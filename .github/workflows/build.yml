@@ -1,0 +1,290 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: jobs only read the repository. The release job below raises this for itself.
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels the older run. Tag runs are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   runner: ubuntu-24.04,     os: linux,   arch: x86_64,  archive: tar.gz }
+          - { name: linux-arm64,    runner: ubuntu-24.04-arm, os: linux,   arch: arm64,   archive: tar.gz }
+          - { name: macos-arm64,    runner: macos-14,         os: macos,   arch: arm64,   archive: tar.gz }
+          - { name: windows-x86_64, runner: windows-2022,     os: windows, arch: x86_64,  archive: zip }
+    env:
+      CONFIG: Release
+      PACKAGE: coyote-${{ matrix.os }}-${{ matrix.arch }}-Release
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          git --version
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${CONFIG} -DCOYOTE_WARNINGS_AS_ERRORS=ON -DCOYOTE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config ${CONFIG} --parallel
+
+      - name: Install
+        run: cmake --install build --config ${CONFIG} --prefix "dist/${PACKAGE}"
+
+      - name: Smoke test - run Hello world from the installed binaries
+        run: |
+          set -eu
+          bin="dist/${PACKAGE}/bin"
+          mkdir -p smoke
+          "${bin}/coyote" --version
+          "${bin}/pvm" --version
+          "${bin}/coyote" build samples/hello.coy -o smoke/hello.ml
+          "${bin}/pvm" smoke/hello.ml > smoke/hello.out
+          printf 'Hello world\n' > smoke/hello.expected
+          diff -u smoke/hello.expected smoke/hello.out
+          echo "Hello world smoke test passed"
+          "${bin}/coyote" build samples/fibonacci.coy -o smoke/fib.ml
+          "${bin}/pvm" smoke/fib.ml > smoke/fib.out
+          test "$(tail -n 1 smoke/fib.out)" = "fib(9) = 34"
+          echo "fibonacci smoke test passed"
+
+      - name: Smoke test - cpx start from the installed binaries
+        run: |
+          set -eu
+          bin="$(pwd)/dist/${PACKAGE}/bin"
+          mkdir -p smoke/project
+          cp samples/hello.coy smoke/project/app.coy
+          printf '{ "schemaVersion": 1, "name": "smoke" }\n' > smoke/project/packages.json
+          cd smoke/project
+          "${bin}/cpx" start > ../cpx.out
+          printf 'Hello world\n' > ../cpx.expected
+          diff -u ../cpx.expected ../cpx.out
+          echo "cpx start smoke test passed"
+
+      - name: Smoke test - cpm resolves a local dependency
+        run: |
+          set -eu
+          bin="$(pwd)/dist/${PACKAGE}/bin"
+          mkdir -p smoke/pm/libs/core smoke/pm/app
+          printf '{ "schemaVersion": 1, "name": "core", "version": "1.0.0" }\n' > smoke/pm/libs/core/packages.json
+          printf '{ "schemaVersion": 1, "name": "app", "dependencies": { "core": { "path": "../libs/core" } } }\n' > smoke/pm/app/packages.json
+          cd smoke/pm/app
+          "${bin}/cpm" install
+          "${bin}/cpm" verify
+          "${bin}/cpm" install --locked
+          echo "cpm smoke test passed"
+
+      - name: Smoke test - invalid source must be rejected
+        run: |
+          set -u
+          bin="dist/${PACKAGE}/bin"
+          printf 'hand:con println(string text)\nprintl("typo")\n' > smoke/bad.coy
+          set +e
+          "${bin}/coyote" check smoke/bad.coy 2> smoke/bad.err
+          rc=$?
+          set -e
+          cat smoke/bad.err
+          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 from the compiler, got $rc"; exit 1; fi
+          grep -q "unknown function 'printl'" smoke/bad.err
+
+      - name: Smoke test - invalid ML must be rejected by the verifier
+        run: |
+          set -u
+          bin="dist/${PACKAGE}/bin"
+          printf 'ml 2\nsource "x.coy"\nfunc main () -> void\n  add.int\n  ret\nend\nentry main\n' > smoke/bad.ml
+          set +e
+          "${bin}/pvm" smoke/bad.ml 2> smoke/badml.err
+          rc=$?
+          set -e
+          cat smoke/badml.err
+          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 from the PVM, got $rc"; exit 1; fi
+          grep -q "stack underflow" smoke/badml.err
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p out
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cmake -E tar cf "../out/${PACKAGE}.zip" --format=zip "${PACKAGE}"
+          else
+            tar -czf "../out/${PACKAGE}.tar.gz" "${PACKAGE}"
+          fi
+          cd ..
+          ls -l out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ env.PACKAGE }}
+          path: out/${{ env.PACKAGE }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 30
+
+  vscode-extension:
+    name: VS Code extension (tests + vsix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: editors/vscode
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.1.0
+        with:
+          node-version: "20"
+
+      - name: Package
+        run: npx --yes @vscode/vsce@3.2.1 package --allow-missing-repository --skip-license -o coyote-vscode.vsix
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: coyote-vscode-extension
+          path: editors/vscode/coyote-vscode.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-installer:
+    name: Windows installer (Coyote Studio + setup.exe)
+    runs-on: windows-2022
+    timeout-minutes: 40
+    env:
+      CONFIG: Release
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.1.0
+        with:
+          node-version: "20"
+
+      - name: Version
+        id: ver
+        run: |
+          node tools/version.js check
+          full="$(node tools/version.js full ${{ github.run_number }})"
+          echo "full=${full}" >> "$GITHUB_OUTPUT"
+          echo "Installer version: ${full}"
+
+      - name: Build the toolchain (static CRT, no VC++ redistributable needed)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=${CONFIG} -DCOYOTE_WARNINGS_AS_ERRORS=ON -DCOYOTE_BUILD_TESTS=OFF
+          cmake --build build --config ${CONFIG} --parallel
+
+      - name: Studio - install packages
+        working-directory: studio
+        run: npm ci
+
+      - name: Studio - package CoyoteStudio.exe
+        working-directory: studio
+        run: >
+          npm run package:win --
+          --icon=build/icon.ico --app-version="${{ steps.ver.outputs.full }}"
+          --win32metadata.CompanyName="Coyote" --win32metadata.ProductName="Coyote Studio"
+          --win32metadata.FileDescription="Coyote Studio"
+
+      - name: Package the VS Code extension
+        working-directory: editors/vscode
+        run: npx --yes @vscode/vsce@3.2.1 package --allow-missing-repository --skip-license -o coyote-vscode.vsix
+
+      - name: Stage installer contents
+        run: bash tools/stage.sh build/${CONFIG} studio/dist/CoyoteStudio-win32-x64 stage editors/vscode/coyote-vscode.vsix
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y --version=6.3.3
+
+      - name: Build setup.exe
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.full }}" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\setup-out" installer\coyote.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem setup-out
+
+      - name: Smoke test - silent install, run, update-detection, uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem setup-out\Coyote-Setup-*.exe).FullName
+          $dir = "$env:RUNNER_TEMP\coyote-inst"
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir","/TYPE=full","/LOG=$env:RUNNER_TEMP\install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log"; throw "install failed: $($p.ExitCode)" }
+          foreach ($f in "bin\coyote.exe","bin\pvm.exe","bin\cpm.exe","bin\cpx.exe","bin\cdt.exe","bin\coyote-llvm.exe","libs\standard.lib","studio\CoyoteStudio.exe","unins000.exe") {
+            if (-not (Test-Path "$dir\$f")) { throw "missing after install: $f" }
+          }
+          "use `"Standard`"`n`nShell.PrintLine(`"installed ok`")`n" | Set-Content -NoNewline "$env:RUNNER_TEMP\h.coy"
+          $out = & "$dir\bin\coyote.exe" run "$env:RUNNER_TEMP\h.coy"
+          if ($out -ne "installed ok") { throw "installed toolchain printed: $out" }
+          # Same version again = repair, must succeed; an older version must be refused.
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "repair failed: $($p.ExitCode)" }
+          $p = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          Start-Sleep -Seconds 5
+          if (Test-Path "$dir\bin\coyote.exe") { throw "uninstall left files behind" }
+
+      - name: Upload setup.exe
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: coyote-setup
+          path: setup-out/Coyote-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, vscode-extension, windows-installer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write   # needed to create the release and attach files
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4.3.0
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd release-files
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "${TAG}" release-files/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Coyote ${TAG}" \
+            --generate-notes
