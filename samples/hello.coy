@@ -1,0 +1,4 @@
+# Coyote "Hello world": `use` brings in the Standard library (standard.lib, installed with Coyote).
+use "Standard"
+
+Shell.PrintLine("Hello world")

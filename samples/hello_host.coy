@@ -1,0 +1,5 @@
+# Coyote "Hello world" without a library: `hand:con` declares a host function of the PVM directly.
+# The PVM only runs it if it is registered and the "console" permission is granted.
+hand:con println(string text)
+
+println("Hello world")

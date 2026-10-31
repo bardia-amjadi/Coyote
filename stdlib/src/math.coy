@@ -1,0 +1,62 @@
+# Standard library: Math.
+hand:math sqrt(double x): double
+hand:math pow(double x, double y): double
+hand:math sin(double x): double
+hand:math cos(double x): double
+hand:math tan(double x): double
+hand:math asin(double x): double
+hand:math acos(double x): double
+hand:math atan(double x): double
+hand:math atan2(double y, double x): double
+hand:math exp(double x): double
+hand:math log(double x): double
+hand:math log10(double x): double
+hand:math floor(double x): double
+hand:math ceil(double x): double
+hand:math round(double x): double
+
+export class Math {
+    public static double PI = 3.141592653589793
+    public static double E = 2.718281828459045
+
+    public static method Sqrt(double x): double { return sqrt(x) }
+    public static method Pow(double x, double y): double { return pow(x, y) }
+    public static method Sin(double x): double { return sin(x) }
+    public static method Cos(double x): double { return cos(x) }
+    public static method Tan(double x): double { return tan(x) }
+    public static method Asin(double x): double { return asin(x) }
+    public static method Acos(double x): double { return acos(x) }
+    public static method Atan(double x): double { return atan(x) }
+    public static method Atan2(double y, double x): double { return atan2(y, x) }
+    public static method Exp(double x): double { return exp(x) }
+    public static method Log(double x): double { return log(x) }
+    public static method Log10(double x): double { return log10(x) }
+    public static method Floor(double x): double { return floor(x) }
+    public static method Ceil(double x): double { return ceil(x) }
+    public static method Round(double x): double { return round(x) }
+
+    public static method Abs(double x): double {
+        if (x < 0.0) { return -x }
+        return x
+    }
+    public static method AbsInt(int x): int {
+        if (x < 0) { return -x }
+        return x
+    }
+    public static method Min(double a, double b): double {
+        if (a < b) { return a }
+        return b
+    }
+    public static method Max(double a, double b): double {
+        if (a > b) { return a }
+        return b
+    }
+    public static method MinInt(int a, int b): int {
+        if (a < b) { return a }
+        return b
+    }
+    public static method MaxInt(int a, int b): int {
+        if (a > b) { return a }
+        return b
+    }
+}

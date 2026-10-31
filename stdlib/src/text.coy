@@ -1,0 +1,43 @@
+# Standard library: Text - string helpers. Positions and lengths count characters (code points), not bytes.
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text charAt(string s, int index): char
+hand:text indexOf(string s, string part): int
+hand:text upper(string s): string
+hand:text lower(string s): string
+hand:text trim(string s): string
+
+export class Text {
+    public static method Length(string s): int { return length(s) }
+    public static method IsEmpty(string s): boolean { return length(s) == 0 }
+    # count characters starting at start; a runtime error when start is outside the text.
+    public static method Substring(string s, int start, int count): string { return substring(s, start, count) }
+    public static method CharAt(string s, int index): char { return charAt(s, index) }
+    # Index of the first occurrence of part, or -1.
+    public static method IndexOf(string s, string part): int { return indexOf(s, part) }
+    public static method Contains(string s, string part): boolean { return indexOf(s, part) >= 0 }
+    public static method StartsWith(string s, string prefix): boolean {
+        int n = length(prefix)
+        if (n > length(s)) { return false }
+        return substring(s, 0, n) == prefix
+    }
+    public static method EndsWith(string s, string suffix): boolean {
+        int n = length(suffix)
+        int total = length(s)
+        if (n > total) { return false }
+        return substring(s, total - n, n) == suffix
+    }
+    # ASCII letters only.
+    public static method Upper(string s): string { return upper(s) }
+    public static method Lower(string s): string { return lower(s) }
+    public static method Trim(string s): string { return trim(s) }
+    public static method Repeat(string s, int times): string {
+        string r = ""
+        int i = 0
+        while (i < times) {
+            r = r + s
+            i = i + 1
+        }
+        return r
+    }
+}

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Coyote",
+  "scopeName": "source.coyote",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#hand" },
+    { "include": "#method" },
+    { "include": "#string" },
+    { "include": "#char" },
+    { "include": "#double" },
+    { "include": "#number" },
+    { "include": "#keyword-control" },
+    { "include": "#keyword-declaration" },
+    { "include": "#reserved" },
+    { "include": "#constant" },
+    { "include": "#type" },
+    { "include": "#call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.coyote",
+      "match": "#.*$"
+    },
+    "hand": {
+      "match": "\\b(hand)(:)([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.hand.coyote" },
+        "2": { "name": "punctuation.separator.coyote" },
+        "3": { "name": "entity.name.namespace.coyote" },
+        "4": { "name": "entity.name.function.coyote" }
+      }
+    },
+    "method": {
+      "match": "\\b(method)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.method.coyote" },
+        "2": { "name": "entity.name.function.coyote" }
+      }
+    },
+    "string": {
+      "name": "string.quoted.double.coyote",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        { "name": "constant.character.escape.coyote", "match": "\\\\[\\\\\"ntr]" },
+        { "name": "invalid.illegal.escape.coyote", "match": "\\\\." }
+      ]
+    },
+    "char": {
+      "name": "string.quoted.single.coyote",
+      "match": "'(?:[^'\\\\\\n]|\\\\[\\\\'\"ntr0])'"
+    },
+    "double": {
+      "name": "constant.numeric.float.coyote",
+      "match": "\\b[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?\\b"
+    },
+    "number": {
+      "name": "constant.numeric.integer.coyote",
+      "match": "\\b[0-9]+\\b"
+    },
+    "keyword-control": {
+      "name": "keyword.control.coyote",
+      "match": "\\b(if|else|while|for|break|continue|return)\\b"
+    },
+    "keyword-declaration": {
+      "name": "keyword.other.coyote",
+      "match": "\\b(var|new|in|is|class|model|property|constructor|public|private|static|this|import|export|use)\\b"
+    },
+    "reserved": {
+      "name": "invalid.deprecated.reserved.coyote",
+      "match": "\\b(hidden|created|here|operator|module|use)\\b"
+    },
+    "constant": {
+      "name": "constant.language.boolean.coyote",
+      "match": "\\b(true|false|null)\\b"
+    },
+    "type": {
+      "name": "storage.type.coyote",
+      "match": "\\b(int|string|boolean|array|double|char|Guid|obj|dyn|map)\\b"
+    },
+    "call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.coyote" } }
+    },
+    "operator": {
+      "name": "keyword.operator.coyote",
+      "match": "==|!=|<=|>=|\\?\\?|\\?|&&|\\|\\||[+\\-*/%]=?|[<>=!]"
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "name": "coyote",
+  "displayName": "Coyote",
+  "description": "Syntax highlighting, diagnostics and formatting for the Coyote language (.coy), using the cdt developer tools.",
+  "version": "0.4.0",
+  "publisher": "coyote",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:coyote"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "coyote",
+        "aliases": [
+          "Coyote",
+          "coyote"
+        ],
+        "extensions": [
+          ".coy"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "coyote",
+        "scopeName": "source.coyote",
+        "path": "./syntaxes/coyote.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "coyote",
+        "path": "./snippets/coyote.json"
+      }
+    ],
+    "configuration": {
+      "title": "Coyote",
+      "properties": {
+        "coyote.cdtPath": {
+          "type": "string",
+          "default": "cdt",
+          "description": "Path to the cdt executable (looked up on PATH when it is just 'cdt')."
+        },
+        "coyote.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run 'cdt check' when a Coyote file is opened or saved and show the errors."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/lib.test.js test/grammar.test.js"
+  }
+}

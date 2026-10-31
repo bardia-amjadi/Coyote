@@ -1,0 +1,16 @@
+# Standard library: Shell - console input and output.
+hand:con print(string text)
+hand:con println(string text)
+hand:con readLine(): string
+hand:con hasInput(): boolean
+
+export class Shell {
+    # Writes text without a line break.
+    public static method Print(string text) { print(text) }
+    # Writes text followed by a line break.
+    public static method PrintLine(string text) { println(text) }
+    # Reads one line from standard input (without the line break); "" at the end of the input.
+    public static method ReadLine(): string { return readLine() }
+    # true while more input can be read.
+    public static method HasInput(): boolean { return hasInput() }
+}

@@ -1,0 +1,1365 @@
+#include "sema.hpp"
+
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <map>
+
+namespace coyote {
+
+namespace {
+
+struct VarInfo {
+    Type type;
+    int slot;
+};
+
+struct FnCtx {
+    bool inMethod = false;
+    std::string name;
+    Type ret = Type::Void;
+    int paramCount = 0;
+    std::vector<Type>* locals = nullptr;  // non-parameter locals
+    std::vector<std::string>* localNames = nullptr;
+    int cls = -1;                         // the class whose method is being checked
+    bool isStatic = false;                // static method / static initializer (no `this`)
+    bool isCtor = false;
+};
+
+// What semantic analysis knows about one class (the declaration itself is Program::classes[i]).
+struct ClassInfo {
+    Type type;                            // Type::classOf(unique ML name)
+    std::map<std::string, int> inst;      // instance field name -> slot (position among instance fields)
+    std::vector<int> instDecl;            // slot -> index into ClassDecl::fields
+    std::map<std::string, int> stat;      // static field name -> index into ClassDecl::fields
+    std::map<std::string, int> props;     // property name -> index into ClassDecl::properties
+    std::map<std::string, int> methods;   // method name -> index into Program::methods (includes accessors)
+    int ctor = -1;
+    int staticInit = -1;
+};
+
+struct Target {
+    bool isMethod;
+    int index;
+};
+
+class Sema {
+public:
+    Sema(Program& p, std::vector<Diagnostic>& out) : prog_(p), out_(out) {}
+
+    void run() {
+        const size_t nmod = prog_.modules.size();
+        tables_.assign(nmod, {});
+        classTables_.assign(nmod, {});
+
+        registerClasses();
+        importClasses();
+        synthesizeMembers();
+        resolveDeclaredTypes();
+        buildClassInfo();
+
+        // Hand declarations and methods are visible throughout their file, regardless of position
+        // (so methods can call each other and recurse).
+        std::map<std::string, std::pair<std::string, std::string>> hostSigs;  // host name -> (signature, file)
+        for (size_t i = 0; i < prog_.hands.size(); ++i) {
+            const HandDecl& h = prog_.hands[i];
+            curModule_ = h.unit;
+            if (!tables_[static_cast<size_t>(h.unit)].emplace(h.name, Target{false, static_cast<int>(i)}).second)
+                error(h.loc, "duplicate declaration of '" + h.name + "'");
+            checkDuplicateParams(h.params, h.name);
+            std::string sig;
+            for (const Param& prm : h.params) sig += typeName(prm.type) + ",";
+            sig += "->" + typeName(h.ret);
+            auto ins = hostSigs.emplace(h.module + "." + h.name, std::make_pair(sig, file()));
+            if (!ins.second && ins.first->second.first != sig)
+                error(h.loc, "host function '" + h.module + "." + h.name + "' is declared with a different signature in " +
+                                 ins.first->second.second);
+        }
+        for (size_t i = 0; i < prog_.methods.size(); ++i) {
+            const MethodDecl& m = prog_.methods[i];
+            curModule_ = m.unit;
+            if (m.classIndex >= 0) continue;  // class members are reached through their class
+            if (!tables_[static_cast<size_t>(m.unit)].emplace(m.name, Target{true, static_cast<int>(i)}).second)
+                error(m.loc, "duplicate declaration of '" + m.name + "'");
+            checkDuplicateParams(m.params, m.name);
+        }
+
+        // Imports bring the exported methods and classes of the imported file into the importing file's scope.
+        for (size_t mi = 0; mi < nmod; ++mi) {
+            curModule_ = static_cast<int>(mi);
+            const Module& mod = prog_.modules[mi];
+            for (size_t k = 0; k < mod.imports.size() && k < mod.importIndex.size(); ++k) {
+                int t = mod.importIndex[k];
+                if (t < 0 || static_cast<size_t>(t) == mi) continue;
+                for (size_t i = 0; i < prog_.methods.size(); ++i) {
+                    const MethodDecl& m = prog_.methods[i];
+                    if (m.unit != t || !m.exported || m.classIndex >= 0) continue;
+                    auto ins = tables_[mi].emplace(m.name, Target{true, static_cast<int>(i)});
+                    if (!ins.second && !(ins.first->second.isMethod && ins.first->second.index == static_cast<int>(i)))
+                        error(mod.imports[k].loc, "importing '" + mod.imports[k].spec + "' brings '" + m.name +
+                                                      "', which conflicts with another declaration of that name");
+                }
+            }
+        }
+
+        for (MethodDecl& m : prog_.methods) {
+            curModule_ = m.unit;
+            checkMethod(m);
+        }
+
+        curModule_ = 0;
+        FnCtx ctx;
+        ctx.locals = &prog_.mainLocals;
+        ctx.localNames = &prog_.mainLocalNames;
+        ctx_ = &ctx;
+        scopes_.clear();
+        scopes_.emplace_back();
+        checkStmts(prog_.stmts);
+        scopes_.clear();
+
+        std::map<std::string, size_t> order;
+        for (size_t i = 0; i < nmod; ++i) order.emplace(prog_.modules[i].path, i);
+        std::stable_sort(out_.begin() + static_cast<std::ptrdiff_t>(firstDiag_), out_.end(), [&](const Diagnostic& a, const Diagnostic& b) {
+            size_t fa = order.count(a.file) ? order[a.file] : 0, fb = order.count(b.file) ? order[b.file] : 0;
+            if (fa != fb) return fa < fb;
+            if (a.loc.line != b.loc.line) return a.loc.line < b.loc.line;
+            return a.loc.col < b.loc.col;
+        });
+    }
+
+    void setFirstDiag(size_t n) { firstDiag_ = n; }
+
+private:
+    Program& prog_;
+    std::vector<Diagnostic>& out_;
+    size_t firstDiag_ = 0;
+    std::vector<std::map<std::string, Target>> tables_;  // per module: name -> callable
+    std::vector<std::map<std::string, int>> classTables_;  // per module: class name -> index into Program::classes
+    std::vector<ClassInfo> cinfo_;
+    std::map<std::string, int> uniqueClass_;             // ML class name -> index
+    int curModule_ = 0;
+    FnCtx* ctx_ = nullptr;
+    std::vector<std::map<std::string, VarInfo>> scopes_;
+    int loopDepth_ = 0;
+
+    const std::string& file() const { return prog_.modules[static_cast<size_t>(curModule_)].path; }
+    std::map<std::string, Target>& table() { return tables_[static_cast<size_t>(curModule_)]; }
+
+    void error(SourceLoc loc, std::string msg) { out_.push_back(Diagnostic{file(), loc, std::move(msg)}); }
+
+    std::map<std::string, int>& classTable() { return classTables_[static_cast<size_t>(curModule_)]; }
+
+    // ---- classes: declarations ----
+
+    void registerClasses() {
+        cinfo_.assign(prog_.classes.size(), {});
+        for (size_t i = 0; i < prog_.classes.size(); ++i) {
+            ClassDecl& c = prog_.classes[i];
+            curModule_ = c.unit;
+            if (!classTable().emplace(c.name, static_cast<int>(i)).second)
+                error(c.loc, "duplicate declaration of class '" + c.name + "'");
+            std::string unique = classMlName(c);
+            uniqueClass_.emplace(unique, static_cast<int>(i));
+            cinfo_[i].type = Type::classOf(unique);
+        }
+    }
+
+    void importClasses() {
+        for (size_t mi = 0; mi < prog_.modules.size(); ++mi) {
+            curModule_ = static_cast<int>(mi);
+            const Module& mod = prog_.modules[mi];
+            for (size_t k = 0; k < mod.imports.size() && k < mod.importIndex.size(); ++k) {
+                int t = mod.importIndex[k];
+                if (t < 0 || static_cast<size_t>(t) == mi) continue;
+                for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
+                    const ClassDecl& c = prog_.classes[ci];
+                    if (c.unit != t || !c.exported) continue;
+                    auto ins = classTables_[mi].emplace(c.name, static_cast<int>(ci));
+                    if (!ins.second && ins.first->second != static_cast<int>(ci))
+                        error(mod.imports[k].loc, "importing '" + mod.imports[k].spec + "' brings class '" + c.name +
+                                                      "', which conflicts with another class of that name");
+                }
+            }
+        }
+    }
+
+    MethodDecl* findMethod(int ci, const std::function<bool(const MethodDecl&)>& pred) {
+        for (MethodDecl& m : prog_.methods)
+            if (m.classIndex == ci && pred(m)) return &m;
+        return nullptr;
+    }
+
+    static StmtPtr makeAssign(ExprPtr target, ExprPtr value, SourceLoc loc) {
+        auto a = std::make_unique<Stmt>();
+        a->kind = Stmt::Kind::Assign;
+        a->loc = loc;
+        a->target = std::move(target);
+        a->expr = std::move(value);
+        return a;
+    }
+
+    static ExprPtr makeVar(const std::string& name, SourceLoc loc) {
+        auto v = std::make_unique<Expr>();
+        v->kind = Expr::Kind::Var;
+        v->loc = loc;
+        v->text = name;
+        return v;
+    }
+
+    static ExprPtr makeMember(ExprPtr recv, const std::string& name, SourceLoc loc) {
+        auto m = std::make_unique<Expr>();
+        m->kind = Expr::Kind::Member;
+        m->loc = loc;
+        m->text = name;
+        m->depth = recv->depth + 1;
+        m->lhs = std::move(recv);
+        return m;
+    }
+
+    // Adds the constructor and static initializer every class needs, and moves field initializers
+    // into them (instance field initializers run first in the constructor, in declaration order).
+    void synthesizeMembers() {
+        for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
+            ClassDecl& c = prog_.classes[ci];
+            curModule_ = c.unit;
+            const int cidx = static_cast<int>(ci);
+            MethodDecl* ctor = findMethod(cidx, [](const MethodDecl& m) { return m.isCtor; });
+            if (!ctor) {
+                MethodDecl m;
+                m.unit = c.unit;
+                m.classIndex = cidx;
+                m.isCtor = true;
+                m.name = "$new";
+                m.loc = c.loc;
+                if (c.isModel) {  // model: one parameter per field that has no initializer, in order
+                    for (const FieldDecl& f : c.fields) {
+                        if (f.isStatic || f.init || f.name[0] == '$') continue;
+                        Param p;
+                        p.type = f.type;
+                        p.name = f.name;
+                        p.loc = f.loc;
+                        m.params.push_back(std::move(p));
+                        m.body.push_back(makeAssign(makeMember(makeVar("this", f.loc), f.name, f.loc), makeVar(f.name, f.loc), f.loc));
+                    }
+                }
+                prog_.methods.push_back(std::move(m));
+                ctor = &prog_.methods.back();
+            }
+            std::vector<StmtPtr> inits;
+            MethodDecl staticInit;
+            for (FieldDecl& f : c.fields) {
+                if (!f.init) continue;
+                if (f.isStatic)
+                    staticInit.body.push_back(makeAssign(makeMember(makeVar(c.name, f.loc), f.name, f.loc), std::move(f.init), f.loc));
+                else
+                    inits.push_back(makeAssign(makeMember(makeVar("this", f.loc), f.name, f.loc), std::move(f.init), f.loc));
+            }
+            ctor->body.insert(ctor->body.begin(), std::make_move_iterator(inits.begin()), std::make_move_iterator(inits.end()));
+            if (!staticInit.body.empty()) {
+                staticInit.unit = c.unit;
+                staticInit.classIndex = cidx;
+                staticInit.isStatic = true;
+                staticInit.isStaticInit = true;
+                staticInit.name = "$static_init";
+                staticInit.loc = c.loc;
+                prog_.methods.push_back(std::move(staticInit));
+            }
+        }
+    }
+
+    // Replaces class names written in a type with the unique ML class name; reports unknown names.
+    void resolveType(Type& t, SourceLoc loc) {
+        switch (t.kind) {
+            case Type::Array: case Type::Nullable: {
+                Type inner = *t.elem;
+                resolveType(inner, loc);
+                t.elem = std::make_shared<const Type>(inner);
+                return;
+            }
+            case Type::Map: {
+                Type k = *t.key, v = *t.elem;
+                resolveType(k, loc);
+                resolveType(v, loc);
+                t.key = std::make_shared<const Type>(k);
+                t.elem = std::make_shared<const Type>(v);
+                return;
+            }
+            case Type::Class: {
+                auto it = classTable().find(t.name);
+                if (it != classTable().end()) {
+                    t = cinfo_[static_cast<size_t>(it->second)].type;
+                } else if (!uniqueClass_.count(t.name)) {  // not already resolved
+                    error(loc, "unknown type '" + t.name + "'");
+                    t = Type::Invalid;
+                }
+                return;
+            }
+            default: return;
+        }
+    }
+
+    void resolveDeclaredTypes() {
+        for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
+            ClassDecl& c = prog_.classes[ci];
+            curModule_ = c.unit;
+            for (FieldDecl& f : c.fields) resolveType(f.type, f.loc);
+            for (PropertyDecl& p : c.properties) resolveType(p.type, p.loc);
+        }
+        for (HandDecl& h : prog_.hands) {
+            curModule_ = h.unit;
+            for (Param& p : h.params) {
+                resolveType(p.type, p.loc);
+                if (p.type.kind == Type::Class || (p.type.elem && p.type.elem->kind == Type::Class))
+                    error(p.loc, "host functions cannot take class types");
+            }
+            resolveType(h.ret, h.loc);
+            if (h.ret != Type::Invalid && !(h.ret == Type::Void || h.ret == Type::Int || h.ret == Type::Double || h.ret == Type::Bool ||
+                  h.ret == Type::Char || h.ret == Type::String))
+                error(h.loc, "a host function can return void, int, double, boolean, char or string, not " + typeName(h.ret));
+        }
+        for (MethodDecl& m : prog_.methods) {
+            curModule_ = m.unit;
+            for (Param& p : m.params) resolveType(p.type, p.loc);
+            resolveType(m.ret, m.loc);
+            if (m.classIndex < 0) continue;
+            const Type& self = cinfo_[static_cast<size_t>(m.classIndex)].type;
+            if (m.isCtor) {
+                m.ret = self;
+            } else if (!m.isStatic) {
+                Param thisParam;
+                thisParam.type = self;
+                thisParam.name = "this";
+                thisParam.loc = m.loc;
+                m.params.insert(m.params.begin(), std::move(thisParam));
+            }
+        }
+    }
+
+    void buildClassInfo() {
+        for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
+            ClassDecl& c = prog_.classes[ci];
+            ClassInfo& info = cinfo_[ci];
+            curModule_ = c.unit;
+            for (size_t i = 0; i < c.fields.size(); ++i) {
+                const FieldDecl& f = c.fields[i];
+                if (f.isStatic) {
+                    info.stat.emplace(f.name, static_cast<int>(i));
+                } else {
+                    info.inst.emplace(f.name, static_cast<int>(info.instDecl.size()));
+                    info.instDecl.push_back(static_cast<int>(i));
+                }
+            }
+            for (size_t i = 0; i < c.properties.size(); ++i) info.props.emplace(c.properties[i].name, static_cast<int>(i));
+            for (size_t mi = 0; mi < prog_.methods.size(); ++mi) {
+                const MethodDecl& m = prog_.methods[mi];
+                if (m.classIndex != static_cast<int>(ci)) continue;
+                if (m.isCtor) { info.ctor = static_cast<int>(mi); continue; }
+                if (m.isStaticInit) { info.staticInit = static_cast<int>(mi); continue; }
+                if (!info.methods.emplace(m.name, static_cast<int>(mi)).second)
+                    error(m.loc, "duplicate method '" + m.name + "' in class '" + c.name + "' (overloading is not supported)");
+                checkDuplicateParams(m.params, m.name);
+                if (info.inst.count(m.name) || info.stat.count(m.name))
+                    error(m.loc, "'" + m.name + "' is both a field and a method of class '" + c.name + "'");
+            }
+            if (info.ctor >= 0) checkDuplicateParams(prog_.methods[static_cast<size_t>(info.ctor)].params, c.name);
+        }
+    }
+
+    void checkDuplicateParams(const std::vector<Param>& params, const std::string& fn) {
+        std::map<std::string, bool> seen;
+        for (const Param& prm : params)
+            if (!seen.emplace(prm.name, true).second)
+                error(prm.loc, "duplicate parameter name '" + prm.name + "' in '" + fn + "'");
+    }
+
+    // ---- scopes ----
+
+    const VarInfo* lookup(const std::string& name) const {
+        for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+            auto f = it->find(name);
+            if (f != it->end()) return &f->second;
+        }
+        return nullptr;
+    }
+
+    // Declares a variable in the innermost scope; returns its slot. Redeclaring a name that is
+    // visible in an enclosing scope of the same function is an error.
+    int declare(const std::string& name, Type type, SourceLoc loc) {
+        if (lookup(name)) {
+            error(loc, "variable '" + name + "' is already declared");
+            return -1;
+        }
+        int slot = ctx_->paramCount + static_cast<int>(ctx_->locals->size());
+        ctx_->locals->push_back(type);
+        ctx_->localNames->push_back(name);
+        scopes_.back().emplace(name, VarInfo{type, slot});
+        return slot;
+    }
+
+    // ---- methods and statements ----
+
+    static bool alwaysReturns(const std::vector<StmtPtr>& stmts) {
+        for (const auto& s : stmts) {
+            switch (s->kind) {
+                case Stmt::Kind::Return: return true;
+                case Stmt::Kind::Block:
+                    if (alwaysReturns(s->body)) return true;
+                    break;
+                case Stmt::Kind::If:
+                    if (s->hasElse && alwaysReturns(s->body) && alwaysReturns(s->elseBody)) return true;
+                    break;
+                default: break;
+            }
+        }
+        return false;
+    }
+
+    void checkMethod(MethodDecl& m) {
+        FnCtx ctx;
+        ctx.inMethod = true;
+        ctx.name = m.name;
+        ctx.ret = m.ret;
+        ctx.paramCount = static_cast<int>(m.params.size());
+        ctx.locals = &m.localTypes;
+        ctx.localNames = &m.localNames;
+        ctx.cls = m.classIndex;
+        ctx.isStatic = m.isStatic || m.isStaticInit;
+        ctx.isCtor = m.isCtor;
+        ctx_ = &ctx;
+
+        scopes_.clear();
+        scopes_.emplace_back();
+        for (size_t i = 0; i < m.params.size(); ++i) {
+            const Param& prm = m.params[i];
+            if (!scopes_.back().emplace(prm.name, VarInfo{prm.type, static_cast<int>(i)}).second) continue;  // duplicate already reported
+        }
+        scopes_.emplace_back();
+        if (m.isCtor) m.thisSlot = declare("this", m.ret, m.loc);  // the object under construction
+        checkStmts(m.body);
+        scopes_.clear();
+
+        if (m.ret != Type::Void && !m.isCtor && !alwaysReturns(m.body))
+            error(m.loc, "method '" + m.name + "' does not return a value on all code paths");
+    }
+
+    void checkStmts(std::vector<StmtPtr>& stmts) {
+        for (auto& s : stmts) checkStmt(*s);
+    }
+
+    void checkScoped(std::vector<StmtPtr>& stmts) {
+        scopes_.emplace_back();
+        checkStmts(stmts);
+        scopes_.pop_back();
+    }
+
+    void checkCondition(ExprPtr& e, const char* kw) {
+        Type t = checkValue(e, "a condition");
+        if (t != Type::Invalid && !coerce(e, Type::Bool))
+            error(e->loc, std::string("the condition of '") + kw + "' must be boolean but got " + typeName(t));
+    }
+
+    int hidden_ = 0;
+    bool reportedImplicit_ = false;  // rewriteImplicitMember already reported an error
+    bool writeTarget_ = false;  // checking the left side of an assignment
+
+    void checkStmt(Stmt& s) {
+        switch (s.kind) {
+            case Stmt::Kind::ExprStmt:
+                check(*s.expr);
+                return;
+            case Stmt::Kind::VarDecl: {
+                if (!s.inferred) resolveType(s.declType, s.loc);
+                Type init = checkValue(s.expr, "an initializer", s.inferred ? nullptr : &s.declType);
+                Type vt = s.inferred ? init : s.declType;
+                if (!s.inferred && s.declType == Type::Invalid) {
+                    s.slot = declare(s.name, vt, s.loc);
+                    return;
+                }
+                if (s.inferred && init == Type::Null) {
+                    error(s.expr->loc, "cannot infer the type of '" + s.name + "' from null; declare it with a nullable type (e.g. int? " + s.name + " = null)");
+                    vt = Type::Invalid;
+                } else if (!s.inferred && init != Type::Invalid && !coerce(s.expr, s.declType)) {
+                    error(s.expr->loc, "cannot initialize '" + s.name + "' (" + typeName(s.declType) +
+                                           ") with a value of type " + typeName(init) + conversionHint(init, s.declType));
+                }
+                s.slot = declare(s.name, vt, s.loc);
+                return;
+            }
+            case Stmt::Kind::Assign: {
+                Expr& target = *s.target;
+                writeTarget_ = true;
+                check(target);  // reports unknown variables and bad indexing
+                writeTarget_ = false;
+                if (target.kind == Expr::Kind::Member && target.classIndex < 0) {
+                    if (target.type != Type::Invalid)
+                        error(target.loc, "invalid assignment target: only variables, elements and fields can be assigned ('" + target.text + "' is read-only)");
+                    checkValue(s.expr, "a value to assign");
+                    return;
+                }
+                if (target.kind == Expr::Kind::Member && target.methodIndex >= 0) {  // property: call its setter
+                    const MethodDecl& setter = prog_.methods[static_cast<size_t>(target.methodIndex)];
+                    Type pt = target.type;
+                    checkValue(s.expr, "a value to assign", &pt);
+                    if (s.expr->type != Type::Invalid && !coerce(s.expr, pt))
+                        error(s.expr->loc, "cannot assign " + typeName(s.expr->type) + " to property '" + target.text + "' of type " +
+                                               typeName(pt) + conversionHint(s.expr->type, pt));
+                    auto call = std::make_unique<Expr>();
+                    call->kind = Expr::Kind::MethodCall;
+                    call->loc = target.loc;
+                    call->text = setter.name;
+                    call->methodIndex = target.methodIndex;
+                    call->classIndex = target.classIndex;
+                    call->type = Type::Void;
+                    call->depth = target.lhs->depth + 2;
+                    call->lhs = std::move(target.lhs);
+                    call->args.push_back(std::move(s.expr));
+                    s.kind = Stmt::Kind::ExprStmt;
+                    s.expr = std::move(call);
+                    s.target.reset();
+                    return;
+                }
+                Type val = checkValue(s.expr, "a value to assign", target.type == Type::Invalid ? nullptr : &target.type);
+                if (target.type == Type::Invalid || val == Type::Invalid) return;
+                if (coerce(s.expr, target.type)) return;
+                if (target.kind == Expr::Kind::Var)
+                    error(s.expr->loc, "cannot assign " + typeName(val) + " to variable '" + target.text +
+                                           "' of type " + typeName(target.type) + conversionHint(val, target.type));
+                else
+                    error(s.expr->loc, "cannot assign " + typeName(val) + " to " +
+                                           (target.lhs->type.isMap() ? "a map value" : "an array element") + " of type " +
+                                           typeName(target.type) + conversionHint(val, target.type));
+                return;
+            }
+            case Stmt::Kind::If:
+                checkCondition(s.expr, "if");
+                checkScoped(s.body);
+                if (s.hasElse) checkScoped(s.elseBody);
+                return;
+            case Stmt::Kind::While:
+                checkCondition(s.expr, "while");
+                ++loopDepth_;
+                checkScoped(s.body);
+                --loopDepth_;
+                return;
+            case Stmt::Kind::For:
+                scopes_.emplace_back();  // the initializer's variable lives only in the loop
+                if (s.init) checkStmt(*s.init);
+                if (s.expr) checkCondition(s.expr, "for");
+                if (s.step) checkStmt(*s.step);
+                ++loopDepth_;
+                checkScoped(s.body);
+                --loopDepth_;
+                scopes_.pop_back();
+                return;
+            case Stmt::Kind::ForEach: {
+                if (!s.inferred) resolveType(s.declType, s.loc);
+                Type coll = checkValue(s.expr, "a collection");
+                scopes_.emplace_back();
+                Type elem = Type::Invalid;
+                if (coll != Type::Invalid) {
+                    if (coll.isArray()) {
+                        elem = *coll.elem;
+                    } else if (coll.isMap()) {
+                        error(s.expr->loc, "a map cannot be iterated directly; use '.keys()' or '.values()'");
+                    } else {
+                        error(s.expr->loc, "cannot iterate over a value of type " + typeName(coll) + "; 'for ... in' needs an array");
+                    }
+                }
+                Type vt = s.inferred ? elem : s.declType;
+                if (!s.inferred && elem != Type::Invalid && elem != s.declType) {
+                    error(s.loc, "loop variable '" + s.name + "' is declared " + typeName(s.declType) +
+                                     " but the array holds " + typeName(elem));
+                    vt = Type::Invalid;
+                }
+                s.slotArr = declare("$arr" + std::to_string(hidden_), coll == Type::Invalid ? Type(Type::Invalid) : coll, s.loc);
+                s.slotIdx = declare("$idx" + std::to_string(hidden_), Type::Int, s.loc);
+                ++hidden_;
+                s.slot = declare(s.name, vt, s.loc);
+                ++loopDepth_;
+                checkScoped(s.body);
+                --loopDepth_;
+                scopes_.pop_back();
+                return;
+            }
+            case Stmt::Kind::Break:
+                if (loopDepth_ == 0) error(s.loc, "'break' is only allowed inside a loop");
+                return;
+            case Stmt::Kind::Continue:
+                if (loopDepth_ == 0) error(s.loc, "'continue' is only allowed inside a loop");
+                return;
+            case Stmt::Kind::Block:
+                checkScoped(s.body);
+                return;
+            case Stmt::Kind::Return: {
+                if (ctx_->isCtor) {
+                    error(s.loc, "a constructor cannot use 'return'; it always returns the new object");
+                    if (s.expr) checkValue(s.expr, "a return value");
+                    return;
+                }
+                if (!ctx_->inMethod) {
+                    if (s.expr) checkValue(s.expr, "a return value");
+                    error(s.loc, "'return' is only allowed inside a method");
+                    return;
+                }
+                if (s.expr) {
+                    Type t = checkValue(s.expr, "a return value", &ctx_->ret);
+                    if (ctx_->ret == Type::Void)
+                        error(s.loc, "method '" + ctx_->name + "' returns no value, so 'return' cannot have a value");
+                    else if (t != Type::Invalid && !coerce(s.expr, ctx_->ret))
+                        error(s.expr->loc, "method '" + ctx_->name + "' must return " + typeName(ctx_->ret) +
+                                               " but got " + typeName(t) + conversionHint(t, ctx_->ret));
+                } else if (ctx_->ret != Type::Void) {
+                    error(s.loc, "method '" + ctx_->name + "' must return a value of type " + typeName(ctx_->ret));
+                }
+                return;
+            }
+        }
+    }
+
+    // ---- implicit conversions ----
+
+    static ExprPtr makeConvert(ExprPtr inner, Expr::Conv conv, const Type& to) {
+        auto n = std::make_unique<Expr>();
+        n->kind = Expr::Kind::Convert;
+        n->loc = inner->loc;
+        n->conv = conv;
+        n->type = to;
+        n->depth = inner->depth + 1;
+        n->lhs = std::move(inner);
+        return n;
+    }
+
+    // Converts `e` to `target` when the language allows it implicitly, by wrapping it in a Convert
+    // node (or retyping a null literal). Returns false, leaving `e` untouched, when it does not.
+    //   int -> double          T -> T?          null -> T? / obj / dyn
+    //   anything -> obj / dyn  dyn -> anything (checked at run time)   obj <-> dyn
+    bool coerce(ExprPtr& e, const Type& target) {
+        const Type from = e->type;
+        if (from == Type::Invalid || target == Type::Invalid || from == target) return true;
+        if (from == Type::Void) return false;
+        if (from == Type::Null) {
+            if (target.isNullable() || target.isRefLike()) { e->type = target; return true; }
+            return false;
+        }
+        if (target == Type::Dyn || target == Type::Obj) {
+            if (from.isRefLike()) { e = makeConvert(std::move(e), Expr::Conv::Retype, target); return true; }
+            e = makeConvert(std::move(e), Expr::Conv::Box, target);
+            return true;
+        }
+        if (from == Type::Dyn) {
+            e = makeConvert(std::move(e), Expr::Conv::Unbox, target);
+            return true;
+        }
+        if (from == Type::Obj) return false;  // obj needs an explicit conversion, e.g. int(x)
+        if (target == Type::Double && from == Type::Int) {
+            e = makeConvert(std::move(e), Expr::Conv::IntToDouble, target);
+            return true;
+        }
+        if (target.isNullable() && !from.isNullable()) {
+            if (!coerce(e, *target.elem)) return false;
+            e = makeConvert(std::move(e), Expr::Conv::Wrap, target);
+            return true;
+        }
+        return false;
+    }
+
+    static std::string conversionHint(const Type& from, const Type& to) {
+        if (from == Type::Double && to == Type::Int) return " (use int(x) to convert; this truncates)";
+        if (from.isNullable() && !to.isNullable()) return " (the value may be null; use '?" "?' or '!')";
+        if (from == Type::Obj) return " (obj needs an explicit conversion such as int(x), or an 'is' check)";
+        if (from == Type::Null) return " (only nullable types, obj and dyn can be null)";
+        return "";
+    }
+
+    static bool isNumeric(const Type& t) { return t == Type::Int || t == Type::Double; }
+
+    // ---- expressions ----
+
+    // Checks an expression that must produce a value. `expected` (optional) gives array literals
+    // their element type.
+    Type checkValue(ExprPtr& e, const char* context, const Type* expected = nullptr) {
+        if (expected && e->kind == Expr::Kind::ArrayLit && expected->isArray())
+            checkArrayLit(*e, expected->elem.get());
+        else
+            check(*e);
+        if (e->type == Type::Void) {
+            error(e->loc, "call to '" + e->text + "' returns no value and cannot be used as " + context);
+            e->type = Type::Invalid;
+        }
+        return e->type;
+    }
+
+    void check(Expr& e) {
+        switch (e.kind) {
+            case Expr::Kind::String: e.type = Type::String; return;
+            case Expr::Kind::Int: e.type = Type::Int; return;
+            case Expr::Kind::Bool: e.type = Type::Bool; return;
+            case Expr::Kind::Double: e.type = Type::Double; return;
+            case Expr::Kind::Char: e.type = Type::Char; return;
+            case Expr::Kind::Null: e.type = Type::Null; return;
+            case Expr::Kind::Var: {
+                const VarInfo* v = lookup(e.text);
+                if (!v) {
+                    if (e.text == "this") {
+                        error(e.loc, "'this' is only available inside instance methods and constructors");
+                        e.type = Type::Invalid;
+                    } else if (rewriteImplicitMember(e)) {
+                        check(e);
+                    } else if (reportedImplicit_) {
+                        reportedImplicit_ = false;
+                        e.type = Type::Invalid;
+                    } else {
+                        error(e.loc, "unknown variable '" + e.text + "'");
+                        e.type = Type::Invalid;
+                    }
+                } else {
+                    e.type = v->type;
+                    e.slot = v->slot;
+                }
+                return;
+            }
+            case Expr::Kind::Call: checkCall(e); return;
+            case Expr::Kind::Unary: checkUnary(e); return;
+            case Expr::Kind::Binary: checkBinary(e); return;
+            case Expr::Kind::ArrayLit: checkArrayLit(e, nullptr); return;
+            case Expr::Kind::NewArray: {
+                resolveType(e.newType, e.loc);
+                Type size = checkValue(e.lhs, "an array size");
+                if (size != Type::Invalid && !coerce(e.lhs, Type::Int))
+                    error(e.lhs->loc, "array size must be int but got " + typeName(size));
+                e.type = e.newType;
+                return;
+            }
+            case Expr::Kind::NewMap: resolveType(e.newType, e.loc); e.type = e.newType; return;
+            case Expr::Kind::NewObj: checkNewObj(e); return;
+            case Expr::Kind::Index: checkIndex(e); return;
+            case Expr::Kind::Member: checkMember(e); return;
+            case Expr::Kind::MethodCall: checkMethodCall(e); return;
+            case Expr::Kind::Convert: checkConvert(e); return;
+            case Expr::Kind::Unwrap: {
+                Type t = checkValue(e.lhs, "an operand");
+                if (t == Type::Invalid) { e.type = Type::Invalid; return; }
+                if (!t.isNullable()) {
+                    error(e.loc, "operator '!' (unwrap) needs a nullable value but got " + typeName(t));
+                    e.type = Type::Invalid;
+                    return;
+                }
+                e.type = *t.elem;
+                return;
+            }
+            case Expr::Kind::IsNull: e.type = Type::Bool; return;  // only created by checkBinary
+            case Expr::Kind::Is: {
+                resolveType(e.newType, e.loc);
+                Type t = checkValue(e.lhs, "an operand");
+                e.type = Type::Bool;
+                if (t == Type::Invalid) return;
+                if (t == Type::Null) { error(e.loc, "'is' cannot test the null literal"); return; }
+                coerce(e.lhs, Type::Obj);
+                return;
+            }
+        }
+    }
+
+    void checkArrayLit(Expr& e, const Type* expectedElem) {
+        Type elem = Type::Invalid;
+        bool bad = false, sawNull = false;
+        for (auto& a : e.args) {
+            Type t = checkValue(a, "an array element", expectedElem);
+            if (t == Type::Invalid) { bad = true; continue; }
+            if (t == Type::Null) { sawNull = true; continue; }
+            if (expectedElem) continue;
+            if (elem == Type::Invalid || (elem == Type::Int && t == Type::Double)) {
+                elem = t;
+            } else if (t != elem && !(elem == Type::Double && t == Type::Int)) {
+                error(a->loc, "array element has type " + typeName(t) + " but earlier elements have type " + typeName(elem));
+                bad = true;
+            }
+        }
+        if (bad) { e.type = Type::Invalid; return; }
+        if (expectedElem) {
+            elem = *expectedElem;
+        } else {
+            if (elem == Type::Invalid) {
+                error(e.loc, "cannot infer the element type of an array literal that only contains null");
+                e.type = Type::Invalid;
+                return;
+            }
+            if (sawNull && !elem.isNullable() && !elem.isRefLike()) elem = Type::nullableOf(elem);
+        }
+        for (auto& a : e.args) {
+            if (coerce(a, elem)) continue;
+            if (expectedElem) {
+                // The literal does not fit the expected type. Report its natural type and let the
+                // caller phrase the mismatch ("cannot initialize ... with a value of type ...").
+                for (auto& x : e.args)
+                    if (x->type != Type::Invalid && x->type != Type::Null) { e.type = Type::arrayOf(x->type); return; }
+                e.type = Type::Invalid;
+                return;
+            }
+            error(a->loc, "array element has type " + typeName(a->type) + " but the array holds " + typeName(elem) + conversionHint(a->type, elem));
+            bad = true;
+        }
+        e.type = bad ? Type(Type::Invalid) : Type::arrayOf(elem);
+    }
+
+    void checkIndex(Expr& e) {
+        Type col = checkValue(e.lhs, "an operand");
+        Type idx = checkValue(e.rhs, "an index");
+        if (col == Type::Invalid) { e.type = Type::Invalid; return; }
+        if (col.isArray()) {
+            if (idx != Type::Invalid && !coerce(e.rhs, Type::Int))
+                error(e.rhs->loc, "array index must be int but got " + typeName(idx));
+            e.type = *col.elem;
+        } else if (col.isMap()) {
+            if (idx != Type::Invalid && !coerce(e.rhs, *col.key))
+                error(e.rhs->loc, "map key must be " + typeName(*col.key) + " but got " + typeName(idx));
+            e.type = *col.elem;
+        } else if (col == Type::Dyn) {
+            if (idx != Type::Invalid) coerce(e.rhs, Type::Obj);
+            e.type = Type::Dyn;
+        } else {
+            error(e.loc, "cannot index a value of type " + typeName(col));
+            e.type = Type::Invalid;
+        }
+    }
+
+    // ---- class members ----
+
+    // True when `e` names a class (and no variable hides it): `Point` in Point.origin() or Point.count.
+    bool isClassRef(const Expr& e, int& ci) {
+        if (e.kind != Expr::Kind::Var || lookup(e.text)) return false;
+        auto it = classTable().find(e.text);
+        if (it == classTable().end()) return false;
+        ci = it->second;
+        return true;
+    }
+
+    int classOfType(const Type& t) const {
+        if (t.kind != Type::Class) return -1;
+        auto it = uniqueClass_.find(t.name);
+        return it == uniqueClass_.end() ? -1 : it->second;
+    }
+
+    const std::string& className(int ci) const { return prog_.classes[static_cast<size_t>(ci)].name; }
+
+    // Inside a class, a bare name that is not a local refers to a member of the class (this.x or
+    // Class.x). Rewrites the Var node into that Member; returns false if there is no such member.
+    bool rewriteImplicitMember(Expr& e) {
+        if (ctx_->cls < 0) return false;
+        const ClassInfo& info = cinfo_[static_cast<size_t>(ctx_->cls)];
+        const std::string& n = e.text;
+        bool isInst = info.inst.count(n) || info.props.count(n);
+        bool isStat = info.stat.count(n);
+        if (!isInst && !isStat) return false;
+        if (isInst && ctx_->isStatic) {
+            error(e.loc, "'" + n + "' is an instance member and cannot be used in a static method");
+            reportedImplicit_ = true;
+            return false;
+        }
+        e.kind = Expr::Kind::Member;
+        e.lhs = makeVar(isStat ? className(ctx_->cls) : "this", e.loc);
+        e.depth = 2;
+        return true;
+    }
+
+    bool canAccess(bool isPrivate, int memberClass) const { return !isPrivate || ctx_->cls == memberClass; }
+
+    void checkMember(Expr& e) {
+        int ci;
+        if (isClassRef(*e.lhs, ci)) {  // static field: Class.field
+            const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
+            auto it = info.stat.find(e.text);
+            if (it == info.stat.end()) {
+                error(e.loc, "class '" + className(ci) + "' has no static field '" + e.text + "'");
+                e.type = Type::Invalid;
+                return;
+            }
+            const FieldDecl& f = prog_.classes[static_cast<size_t>(ci)].fields[static_cast<size_t>(it->second)];
+            if (!canAccess(f.isPrivate, ci)) error(e.loc, "'" + e.text + "' is private to class '" + className(ci) + "'");
+            e.isStatic = true;
+            e.classIndex = ci;
+            e.type = f.type;
+            return;
+        }
+        Type recv = checkValue(e.lhs, "an operand");
+        if (recv == Type::Invalid) { e.type = Type::Invalid; return; }
+        if (recv.kind == Type::Class) {
+            ci = classOfType(recv);
+            const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
+            const ClassDecl& decl = prog_.classes[static_cast<size_t>(ci)];
+            auto f = info.inst.find(e.text);
+            if (f != info.inst.end()) {
+                const FieldDecl& fd = decl.fields[static_cast<size_t>(info.instDecl[static_cast<size_t>(f->second)])];
+                if (!canAccess(fd.isPrivate, ci)) error(e.loc, "'" + e.text + "' is private to class '" + className(ci) + "'");
+                e.classIndex = ci;
+                e.type = fd.type;
+                return;
+            }
+            auto p = info.props.find(e.text);
+            if (p != info.props.end()) {
+                const PropertyDecl& pd = decl.properties[static_cast<size_t>(p->second)];
+                if (!canAccess(pd.isPrivate, ci)) error(e.loc, "property '" + e.text + "' is private to class '" + className(ci) + "'");
+                const bool wantSet = writeTarget_;
+                if (wantSet && !pd.hasSet) { error(e.loc, "property '" + e.text + "' has no setter"); e.type = Type::Invalid; return; }
+                if (!wantSet && !pd.hasGet) { error(e.loc, "property '" + e.text + "' has no getter"); e.type = Type::Invalid; return; }
+                int mi = info.methods.at(std::string(wantSet ? "set_" : "get_") + e.text);
+                e.classIndex = ci;
+                e.methodIndex = mi;
+                e.type = pd.type;
+                if (!wantSet) {  // a read is a call of the getter
+                    e.kind = Expr::Kind::MethodCall;
+                    e.text = prog_.methods[static_cast<size_t>(mi)].name;
+                }
+                return;
+            }
+            if (info.stat.count(e.text)) error(e.loc, "'" + e.text + "' is a static field; use " + className(ci) + "." + e.text);
+            else error(e.loc, "class '" + className(ci) + "' has no field or property '" + e.text + "'");
+            e.type = Type::Invalid;
+            return;
+        }
+        if (recv.isNullable() && recv.elem->kind == Type::Class) {
+            error(e.loc, typeName(recv) + " may be null; unwrap it with '!' (or test for null) before using '." + e.text + "'");
+            e.type = Type::Invalid;
+            return;
+        }
+        if ((recv.isArray() || recv.isMap()) && e.text == "length") {
+            e.type = Type::Int;
+            return;
+        }
+        if (recv == Type::Dyn) {  // validated at run time
+            e.type = Type::Dyn;
+            return;
+        }
+        error(e.loc, typeName(recv) + " has no property '" + e.text + "'");
+        e.type = Type::Invalid;
+    }
+
+    // Checks the arguments of a call to method `mi` (skipping the implicit `this`) and sets the result type.
+    void finishClassCall(Expr& e, int mi, bool instanceCall) {
+        const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
+        const int ci = m.classIndex;
+        if (!canAccess(m.isPrivate, ci)) error(e.loc, "method '" + e.text + "' is private to class '" + className(ci) + "'");
+        e.methodIndex = mi;
+        e.classIndex = ci;
+        e.isStatic = !instanceCall;
+        e.type = m.ret;
+        const size_t skip = instanceCall ? 1 : 0;
+        const size_t want = m.params.size() - skip;
+        packVariadic(e, m.params, skip);
+        if (e.args.size() != want) {
+            error(e.loc, "method '" + e.text + "' expects " + std::to_string(want) + " argument(s) but got " + std::to_string(e.args.size()));
+            return;
+        }
+        for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, m.params[i + skip].type);
+    }
+
+    void checkNewObj(Expr& e) {
+        auto it = classTable().find(e.text);
+        for (auto& a : e.args) checkValue(a, "an argument");
+        if (it == classTable().end()) {
+            error(e.loc, "unknown class '" + e.text + "'");
+            e.type = Type::Invalid;
+            return;
+        }
+        const int ci = it->second;
+        const MethodDecl& ctor = prog_.methods[static_cast<size_t>(cinfo_[static_cast<size_t>(ci)].ctor)];
+        if (!canAccess(ctor.isPrivate, ci)) error(e.loc, "the constructor of '" + className(ci) + "' is private");
+        e.classIndex = ci;
+        e.methodIndex = cinfo_[static_cast<size_t>(ci)].ctor;
+        e.type = cinfo_[static_cast<size_t>(ci)].type;
+        packVariadic(e, ctor.params, 0);
+        if (e.args.size() != ctor.params.size()) {
+            error(e.loc, "the constructor of '" + className(ci) + "' expects " + std::to_string(ctor.params.size()) +
+                             " argument(s) but got " + std::to_string(e.args.size()));
+            return;
+        }
+        std::string saved = e.text;
+        e.text = "new " + className(ci);
+        for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, ctor.params[i].type);
+        e.text = saved;
+    }
+
+    bool expectArgCount(Expr& e, size_t want) {
+        if (e.args.size() == want) return true;
+        error(e.loc, "method '" + e.text + "' expects " + std::to_string(want) + " argument(s) but got " +
+                         std::to_string(e.args.size()));
+        return false;
+    }
+
+    // Variadic callee (`T... xs`): the arguments from the variadic position on are packed into one array
+    // literal, unless exactly one argument is given and it already has the array type. `skip` is the
+    // number of leading parameters that are not in e.args (the receiver of an instance method).
+    void packVariadic(Expr& e, const std::vector<Param>& ps, size_t skip) {
+        if (ps.empty() || !ps.back().variadic) return;
+        const size_t fixed = ps.size() - skip - 1;
+        if (e.args.size() < fixed) return;  // the caller reports the count mismatch
+        const Type arr = ps.back().type;
+        if (e.args.size() == fixed + 1 && e.args[fixed]->type == arr) return;
+        auto lit = std::make_unique<Expr>();
+        lit->kind = Expr::Kind::ArrayLit;
+        lit->loc = e.args.size() > fixed ? e.args[fixed]->loc : e.loc;
+        lit->type = arr;
+        lit->depth = 1;
+        bool bad = false;
+        for (size_t i = fixed; i < e.args.size(); ++i) {
+            ExprPtr& a = e.args[i];
+            lit->depth = std::max(lit->depth, a->depth + 1);
+            if (a->type == Type::Invalid) { bad = true; continue; }
+            if (!coerce(a, *arr.elem)) {
+                error(a->loc, "argument " + std::to_string(i + 1) + " of '" + e.text + "' expects " + typeName(*arr.elem) +
+                                  " (or an " + typeName(arr) + ") but got " + typeName(a->type) + conversionHint(a->type, *arr.elem));
+                bad = true;
+            }
+        }
+        for (size_t i = fixed; i < e.args.size(); ++i) lit->args.push_back(std::move(e.args[i]));
+        e.args.resize(fixed);
+        if (bad) lit->type = Type::Invalid;
+        e.args.push_back(std::move(lit));
+    }
+
+    // `recv.name(args)` where no built-in or class method matches: use an extension method
+    // `method name(this T self, ...)` visible from this file, if one accepts the receiver.
+    bool tryExtension(Expr& e) {
+        auto it = table().find(e.text);
+        if (it == table().end() || !it->second.isMethod) return false;
+        const MethodDecl& m = prog_.methods[static_cast<size_t>(it->second.index)];
+        if (!m.isExtension) return false;
+        e.kind = Expr::Kind::Call;
+        e.args.insert(e.args.begin(), std::move(e.lhs));
+        e.lhs.reset();
+        finishPlainCall(e, it->second.index);
+        return true;
+    }
+
+    void finishPlainCall(Expr& e, int index) {
+        const MethodDecl& m = prog_.methods[static_cast<size_t>(index)];
+        e.methodIndex = index;
+        e.type = m.ret;
+        packVariadic(e, m.params, 0);
+        if (e.args.size() != m.params.size()) {
+            error(e.loc, "function '" + e.text + "' expects " + std::to_string(m.params.size()) + " argument(s) but got " + std::to_string(e.args.size()));
+            return;
+        }
+        for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, m.params[i].type);
+    }
+
+    void checkArg(Expr& e, size_t i, const Type& want) {
+        ExprPtr& a = e.args[i];
+        if (a->type != Type::Invalid && !coerce(a, want))
+            error(a->loc, "argument " + std::to_string(i + 1) + " of '" + e.text + "' expects " + typeName(want) +
+                              " but got " + typeName(a->type) + conversionHint(a->type, want));
+    }
+
+    void checkMethodCall(Expr& e) {
+        int ci;
+        if (isClassRef(*e.lhs, ci)) {  // static call: Class.method(...)
+            for (auto& a : e.args) checkValue(a, "an argument");
+            const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
+            auto it = info.methods.find(e.text);
+            if (it == info.methods.end()) {
+                error(e.loc, "class '" + className(ci) + "' has no method '" + e.text + "'");
+                e.type = Type::Invalid;
+            } else if (!prog_.methods[static_cast<size_t>(it->second)].isStatic) {
+                error(e.loc, "method '" + e.text + "' is not static; call it on an instance of '" + className(ci) + "'");
+                e.type = Type::Invalid;
+            } else {
+                finishClassCall(e, it->second, false);
+            }
+            return;
+        }
+        Type recv = checkValue(e.lhs, "an operand");
+        for (auto& a : e.args) checkValue(a, "an argument");
+        if (recv.kind == Type::Class) {
+            ci = classOfType(recv);
+            const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
+            auto it = info.methods.find(e.text);
+            if (it == info.methods.end()) {
+                if (tryExtension(e)) return;
+                error(e.loc, "class '" + className(ci) + "' has no method '" + e.text + "'");
+                e.type = Type::Invalid;
+            } else if (prog_.methods[static_cast<size_t>(it->second)].isStatic) {
+                error(e.loc, "method '" + e.text + "' is static; call it as " + className(ci) + "." + e.text + "(...)");
+                e.type = Type::Invalid;
+            } else {
+                finishClassCall(e, it->second, true);
+            }
+            return;
+        }
+        if (recv.isNullable() && recv.elem->kind == Type::Class) {
+            error(e.loc, typeName(recv) + " may be null; unwrap it with '!' (or test for null) before calling '" + e.text + "'");
+            e.type = Type::Invalid;
+            return;
+        }
+        if (recv == Type::Invalid) { e.type = Type::Invalid; return; }
+        if (recv == Type::Dyn) {  // any method; validated at run time
+            for (auto& a : e.args)
+                if (a->type != Type::Invalid) coerce(a, Type::Obj);
+            e.type = Type::Dyn;
+            return;
+        }
+        const std::string& m = e.text;
+        if (recv.isArray() && (m == "push" || m == "copy")) {
+            size_t want = m == "push" ? 1 : 0;
+            e.type = m == "push" ? Type(Type::Void) : recv;
+            if (expectArgCount(e, want) && want == 1) checkArg(e, 0, *recv.elem);
+            return;
+        }
+        if (recv.isMap()) {
+            if (m == "containsKey" || m == "remove") {
+                e.type = Type::Bool;
+                if (expectArgCount(e, 1)) checkArg(e, 0, *recv.key);
+                return;
+            }
+            if (m == "tryGet") {
+                const Type& v = *recv.elem;
+                e.type = (v.isNullable() || v.isRefLike()) ? v : Type::nullableOf(v);
+                if (expectArgCount(e, 1)) checkArg(e, 0, *recv.key);
+                return;
+            }
+            if (m == "keys" || m == "values") {
+                e.type = Type::arrayOf(m == "keys" ? *recv.key : *recv.elem);
+                expectArgCount(e, 0);
+                return;
+            }
+        }
+        if (tryExtension(e)) return;
+        error(e.loc, typeName(recv) + " has no method '" + m + "'");
+        e.type = Type::Invalid;
+    }
+
+    void checkConvert(Expr& e) {
+        Type from = checkValue(e.lhs, "an operand");
+        Type to = e.newType;
+        e.type = to;
+        if (from == Type::Invalid) { e.type = Type::Invalid; return; }
+        using C = Expr::Conv;
+        auto fail = [&]() {
+            std::string hint = from.isNullable() ? " (the value may be null; use '?" "?' or '!' first)" : "";
+            error(e.loc, "cannot convert " + typeName(from) + " to " + typeName(to) + hint);
+            e.type = Type::Invalid;
+        };
+        if (from == to) { e.conv = C::Retype; return; }
+        if (from.isRefLike()) { e.conv = C::Unbox; if (to == Type::String) e.conv = C::ToString; return; }
+        switch (to.kind) {
+            case Type::Int:
+                if (from == Type::Double) e.conv = C::DoubleToInt;
+                else if (from == Type::Char) e.conv = C::CharToInt;
+                else if (from == Type::String) e.conv = C::StringToInt;
+                else fail();
+                return;
+            case Type::Double:
+                if (from == Type::Int) e.conv = C::IntToDouble;
+                else if (from == Type::Char) {
+                    e.lhs = makeConvert(std::move(e.lhs), C::CharToInt, Type::Int);
+                    e.conv = C::IntToDouble;
+                } else if (from == Type::String) e.conv = C::StringToDouble;
+                else fail();
+                return;
+            case Type::String:
+                if (from == Type::Int || from == Type::Bool || from == Type::Double || from == Type::Char || from == Type::Guid)
+                    e.conv = C::ToString;
+                else fail();
+                return;
+            case Type::Char:
+                if (from == Type::Int) e.conv = C::IntToChar;
+                else fail();
+                return;
+            case Type::Guid:
+                if (from == Type::String) e.conv = C::StringToGuid;
+                else fail();
+                return;
+            default: fail(); return;
+        }
+    }
+
+    // The path of an imported file that declares a non-exported method `name`, or "".
+    std::string notExportedFrom(const std::string& name) {
+        const Module& mod = prog_.modules[static_cast<size_t>(curModule_)];
+        for (int t : mod.importIndex)
+            for (const MethodDecl& m : prog_.methods)
+                if (t >= 0 && m.unit == t && !m.exported && m.name == name) return prog_.modules[static_cast<size_t>(t)].path;
+        return "";
+    }
+
+    void checkCall(Expr& e) {
+        if (ctx_->cls >= 0) {  // inside a class, a bare call may name one of its methods
+            const ClassInfo& info = cinfo_[static_cast<size_t>(ctx_->cls)];
+            auto m = info.methods.find(e.text);
+            if (m != info.methods.end()) {
+                const bool isStaticMethod = prog_.methods[static_cast<size_t>(m->second)].isStatic;
+                if (!isStaticMethod && ctx_->isStatic) {
+                    error(e.loc, "'" + e.text + "' is an instance method and cannot be called from a static method");
+                    for (auto& a : e.args) checkValue(a, "an argument");
+                    e.type = Type::Invalid;
+                    return;
+                }
+                e.kind = Expr::Kind::MethodCall;
+                e.lhs = makeVar(isStaticMethod ? className(ctx_->cls) : "this", e.loc);
+                checkMethodCall(e);
+                return;
+            }
+        }
+        auto it = table().find(e.text);
+        const std::vector<Param>* params = nullptr;
+        if (it != table().end())
+            params = it->second.isMethod ? &prog_.methods[static_cast<size_t>(it->second.index)].params
+                                         : &prog_.hands[static_cast<size_t>(it->second.index)].params;
+        const size_t fixedParams = params ? (!params->empty() && params->back().variadic ? params->size() - 1 : params->size()) : 0;
+        for (size_t i = 0; i < e.args.size(); ++i)
+            checkValue(e.args[i], "an argument", params && i < fixedParams ? &(*params)[i].type : nullptr);
+
+        if (it == table().end()) {
+            std::string hidden = notExportedFrom(e.text);
+            error(e.loc, hidden.empty() ? "unknown function '" + e.text + "'"
+                                        : "'" + e.text + "' is not exported by '" + hidden + "' (declare it with 'export method')");
+            e.type = Type::Invalid;
+            return;
+        }
+        if (it->second.isMethod) {
+            finishPlainCall(e, it->second.index);
+            return;
+        } else {
+            e.hostIndex = it->second.index;
+            e.type = prog_.hands[static_cast<size_t>(it->second.index)].ret;
+        }
+        if (e.args.size() != params->size()) {
+            error(e.loc, "function '" + e.text + "' expects " + std::to_string(params->size()) +
+                             " argument(s) but got " + std::to_string(e.args.size()));
+            return;
+        }
+        for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, (*params)[i].type);
+    }
+
+    void checkUnary(Expr& e) {
+        Type t = checkValue(e.lhs, "an operand");
+        if (t == Type::Invalid) { e.type = Type::Invalid; return; }
+        if (t == Type::Dyn) { e.type = Type::Dyn; return; }
+        if (e.text == "-" && isNumeric(t)) { e.type = t; return; }
+        if (e.text == "!" && t == Type::Bool) { e.type = Type::Bool; return; }
+        error(e.loc, "operator '" + e.text + "' cannot be applied to " + typeName(t));
+        e.type = Type::Invalid;
+    }
+
+    static bool isConcatOperand(const Type& t) {
+        return t == Type::Int || t == Type::String || t == Type::Bool || t == Type::Double || t == Type::Char ||
+               t == Type::Guid || t == Type::Obj;
+    }
+
+    void checkCoalesce(Expr& e) {
+        Type l = checkValue(e.lhs, "an operand");
+        Type r = checkValue(e.rhs, "an operand", nullptr);
+        if (l == Type::Invalid || r == Type::Invalid) { e.type = Type::Invalid; return; }
+        if (!l.isNullable() && !l.isRefLike()) {
+            error(e.loc, "operator '?" "?' needs a nullable left operand but got " + typeName(l));
+            e.type = Type::Invalid;
+            return;
+        }
+        // The result is the unwrapped type when the right side is a plain value, else the left type.
+        Type inner = l.isNullable() ? *l.elem : l;
+        if (coerce(e.rhs, inner)) {
+            e.type = inner;
+        } else if (l.isNullable() && coerce(e.rhs, l)) {
+            e.type = l;
+        } else {
+            error(e.rhs->loc, "the right side of '?" "?' must be " + typeName(inner) + " (or " + typeName(l) + ") but is " +
+                                  typeName(r));
+            e.type = Type::Invalid;
+        }
+    }
+
+    void checkBinary(Expr& e) {
+        if (e.text == "??") { checkCoalesce(e); return; }
+        Type l = checkValue(e.lhs, "an operand");
+        Type r = checkValue(e.rhs, "an operand");
+        if (l == Type::Invalid || r == Type::Invalid) { e.type = Type::Invalid; return; }
+        const std::string& op = e.text;
+        auto bad = [&]() {
+            error(e.loc, "operator '" + op + "' cannot be applied to " + typeName(l) + " and " + typeName(r));
+            e.type = Type::Invalid;
+        };
+        const bool cmp = op == "<" || op == "<=" || op == ">" || op == ">=";
+        const bool eq = op == "==" || op == "!=";
+
+        if (op == "&&" || op == "||") {
+            if (coerce(e.lhs, Type::Bool) && coerce(e.rhs, Type::Bool)) e.type = Type::Bool;
+            else bad();
+            return;
+        }
+
+        if (eq && (l == Type::Null || r == Type::Null)) {  // x == null / x != null
+            if (l == Type::Null && r == Type::Null) { error(e.loc, "cannot compare null with null"); e.type = Type::Invalid; return; }
+            ExprPtr& other = l == Type::Null ? e.rhs : e.lhs;
+            const Type& ot = other->type;
+            if (!ot.isNullable() && !ot.isRefLike()) {
+                error(e.loc, "'" + typeName(ot) + "' can never be null; declare it as '" + typeName(ot) + "?' to allow null");
+                e.type = Type::Invalid;
+                return;
+            }
+            ExprPtr keep = std::move(other);
+            e.kind = Expr::Kind::IsNull;
+            e.ival = op == "!=" ? 1 : 0;
+            e.lhs = std::move(keep);
+            e.rhs.reset();
+            e.type = Type::Bool;
+            return;
+        }
+
+        // Dynamic operations: resolved at run time, result is dyn.
+        if ((l == Type::Dyn || r == Type::Dyn) && (cmp || eq || op == "+" || op == "-" || op == "*" || op == "/" || op == "%")) {
+            if (coerce(e.lhs, Type::Dyn) && coerce(e.rhs, Type::Dyn)) e.type = Type::Dyn;
+            else bad();
+            return;
+        }
+
+        if (op == "+" && (l == Type::String || r == Type::String)) {
+            if (isConcatOperand(l) && isConcatOperand(r)) e.type = Type::String;  // concatenation converts operands
+            else bad();
+            return;
+        }
+
+        if (eq && (l == Type::Obj || r == Type::Obj)) {
+            if (coerce(e.lhs, Type::Obj) && coerce(e.rhs, Type::Obj)) e.type = Type::Bool;
+            else bad();
+            return;
+        }
+
+        if (isNumeric(l) && isNumeric(r)) {  // int op double promotes to double
+            if (l != r) {
+                if (!coerce(l == Type::Int ? e.lhs : e.rhs, Type::Double)) { bad(); return; }
+            }
+            Type common = (l == Type::Double || r == Type::Double) ? Type(Type::Double) : Type(Type::Int);
+            e.type = (cmp || eq) ? Type(Type::Bool) : common;
+            return;
+        }
+
+        if (cmp && l == Type::Char && r == Type::Char) { e.type = Type::Bool; return; }
+
+        if (eq && l == r) {
+            if (l.isNullable()) {
+                error(e.loc, "cannot compare nullable values with '" + op + "'; compare with null or unwrap them with '!' first");
+                e.type = Type::Invalid;
+                return;
+            }
+            e.type = Type::Bool;
+            return;
+        }
+        bad();
+    }
+};
+
+} // namespace
+
+bool analyze(Program& program, const std::string& file, std::vector<Diagnostic>& diagnostics) {
+    if (program.modules.empty()) {  // a program parsed from a single file, without the module loader
+        Module m;
+        m.path = file;
+        program.modules.push_back(std::move(m));
+    }
+    size_t before = diagnostics.size();
+    Sema sema(program, diagnostics);
+    sema.setFirstDiag(before);
+    sema.run();
+    return diagnostics.size() == before;
+}
+
+} // namespace coyote

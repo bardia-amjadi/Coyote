@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Coyote Studio</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob: data:; connect-src 'self' data:">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="toolbar">
+    <div class="brand"><img src="logo.png" alt="" onerror="this.style.display='none'"><span>Coyote Studio</span></div>
+    <button id="btn-run" title="Run file (F5)">&#9654; Run</button>
+    <button id="btn-project" title="Run project: cpx start (Ctrl+F5)">&#9654; Project</button>
+    <button id="btn-debug" title="Start debugging (F6)">&#128030; Debug</button>
+    <button id="btn-stop" title="Stop (Shift+F5)" disabled>&#9632; Stop</button>
+    <span class="sep"></span>
+    <button id="btn-check" title="Check file">Check</button>
+    <button id="btn-format" title="Format document (Shift+Alt+F)">Format</button>
+    <button id="btn-ml" title="Show the generated ML">ML</button>
+    <button id="btn-native" title="Build a native executable (subset of the language)">Native</button>
+    <button id="btn-cpm" title="cpm install">Packages</button>
+    <span class="sep"></span>
+    <div id="debugbar" class="hidden">
+      <button id="dbg-continue" title="Continue (F8)">&#9654; Continue</button>
+      <button id="dbg-over" title="Step over (F10)">Step Over</button>
+      <button id="dbg-into" title="Step into (F11)">Step Into</button>
+      <button id="dbg-out" title="Step out (Shift+F11)">Step Out</button>
+    </div>
+    <span class="grow"></span>
+    <button id="btn-settings" title="Settings">&#9881;</button>
+  </header>
+  <main id="main">
+    <aside id="sidebar">
+      <div class="panel-title"><span id="project-name">EXPLORER</span>
+        <span class="actions"><button id="ex-newfile" title="New file">+F</button><button id="ex-newdir" title="New folder">+D</button><button id="ex-refresh" title="Refresh">&#8635;</button></span></div>
+      <div id="tree"></div>
+    </aside>
+    <section id="center">
+      <div id="tabs"></div>
+      <div id="editor-wrap">
+        <div id="editor"></div>
+        <div id="welcome">
+          <h1>Coyote Studio</h1>
+          <p id="welcome-version"></p>
+          <div class="welcome-actions">
+            <button id="w-open">Open Folder...</button>
+            <button id="w-new">New Project...</button>
+            <button id="w-file">Open File...</button>
+          </div>
+          <h3>Recent</h3>
+          <ul id="recent"></ul>
+          <p id="toolchain-warning" class="warn hidden"></p>
+        </div>
+      </div>
+      <div id="bottom">
+        <div id="bottom-tabs">
+          <button data-tab="output" class="active">Output</button>
+          <button data-tab="problems">Problems <span id="problem-count"></span></button>
+          <button data-tab="ml">ML</button>
+          <span class="grow"></span>
+          <button id="clear-output" title="Clear">Clear</button>
+        </div>
+        <div id="tab-output" class="tabpane"></div>
+        <div id="tab-problems" class="tabpane hidden"></div>
+        <div id="tab-ml" class="tabpane hidden"><pre id="ml-text"></pre></div>
+      </div>
+    </section>
+    <aside id="debugpane">
+      <div class="panel-title">VARIABLES</div>
+      <div id="vars" class="list"></div>
+      <div class="panel-title">CALL STACK</div>
+      <div id="stack" class="list"></div>
+      <div class="panel-title">BREAKPOINTS</div>
+      <div id="bps" class="list"></div>
+    </aside>
+  </main>
+  <footer id="status"><span id="st-tool"></span><span class="grow"></span><span id="st-state">Ready</span><span id="st-pos"></span></footer>
+</div>
+<div id="modal" class="hidden"><div id="modal-box"></div></div>
+<div id="ctxmenu" class="hidden"></div>
+<script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>
