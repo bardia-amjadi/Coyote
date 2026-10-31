@@ -159,14 +159,14 @@ jobs:
             throw "Inno Setup compiler (ISCC.exe) was not found."
           }
 
-          & $iscc /?
+          &$iscc/?
           Write-Host "Inno Setup is ready."
 
       - name: Build setup.exe
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DAppVersion=${{ steps.ver.outputs.full }}" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\setup-out" installer\coyote.iss
+          &$iscc "/DAppVersion=${{ steps.ver.outputs.full }}" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\setup-out" installer\coyote.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
           Get-ChildItem setup-out
 
