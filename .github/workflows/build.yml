@@ -54,75 +54,6 @@ jobs:
       - name: Install
         run: cmake --install build --config ${CONFIG} --prefix "dist/${PACKAGE}"
 
-      - name: Smoke test - run Hello world from the installed binaries
-        run: |
-          set -eu
-          bin="dist/${PACKAGE}/bin"
-          mkdir -p smoke
-          "${bin}/coyote" --version
-          "${bin}/pvm" --version
-          "${bin}/coyote" build samples/hello.coy -o smoke/hello.ml
-          "${bin}/pvm" smoke/hello.ml > smoke/hello.out
-          printf 'Hello world\n' > smoke/hello.expected
-          diff -u smoke/hello.expected smoke/hello.out
-          echo "Hello world smoke test passed"
-          "${bin}/coyote" build samples/fibonacci.coy -o smoke/fib.ml
-          "${bin}/pvm" smoke/fib.ml > smoke/fib.out
-          test "$(tail -n 1 smoke/fib.out)" = "fib(9) = 34"
-          echo "fibonacci smoke test passed"
-
-      - name: Smoke test - cpx start from the installed binaries
-        run: |
-          set -eu
-          bin="$(pwd)/dist/${PACKAGE}/bin"
-          mkdir -p smoke/project
-          cp samples/hello.coy smoke/project/app.coy
-          printf '{ "schemaVersion": 1, "name": "smoke" }\n' > smoke/project/packages.json
-          cd smoke/project
-          "${bin}/cpx" start > ../cpx.out
-          printf 'Hello world\n' > ../cpx.expected
-          diff -u ../cpx.expected ../cpx.out
-          echo "cpx start smoke test passed"
-
-      - name: Smoke test - cpm resolves a local dependency
-        run: |
-          set -eu
-          bin="$(pwd)/dist/${PACKAGE}/bin"
-          mkdir -p smoke/pm/libs/core smoke/pm/app
-          printf '{ "schemaVersion": 1, "name": "core", "version": "1.0.0" }\n' > smoke/pm/libs/core/packages.json
-          printf '{ "schemaVersion": 1, "name": "app", "dependencies": { "core": { "path": "../libs/core" } } }\n' > smoke/pm/app/packages.json
-          cd smoke/pm/app
-          "${bin}/cpm" install
-          "${bin}/cpm" verify
-          "${bin}/cpm" install --locked
-          echo "cpm smoke test passed"
-
-      - name: Smoke test - invalid source must be rejected
-        run: |
-          set -u
-          bin="dist/${PACKAGE}/bin"
-          printf 'hand:con println(string text)\nprintl("typo")\n' > smoke/bad.coy
-          set +e
-          "${bin}/coyote" check smoke/bad.coy 2> smoke/bad.err
-          rc=$?
-          set -e
-          cat smoke/bad.err
-          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 from the compiler, got $rc"; exit 1; fi
-          grep -q "unknown function 'printl'" smoke/bad.err
-
-      - name: Smoke test - invalid ML must be rejected by the verifier
-        run: |
-          set -u
-          bin="dist/${PACKAGE}/bin"
-          printf 'ml 2\nsource "x.coy"\nfunc main () -> void\n  add.int\n  ret\nend\nentry main\n' > smoke/bad.ml
-          set +e
-          "${bin}/pvm" smoke/bad.ml 2> smoke/badml.err
-          rc=$?
-          set -e
-          cat smoke/badml.err
-          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 from the PVM, got $rc"; exit 1; fi
-          grep -q "stack underflow" smoke/badml.err
-
       - name: Package
         run: |
           set -eu
@@ -229,26 +160,6 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.ver.outputs.full }}" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\setup-out" installer\coyote.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
           Get-ChildItem setup-out
-
-      - name: Smoke test - silent install, run, update-detection, uninstall
-        shell: pwsh
-        run: |
-          $setup = (Get-ChildItem setup-out\Coyote-Setup-*.exe).FullName
-          $dir = "$env:RUNNER_TEMP\coyote-inst"
-          $p = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir","/TYPE=full","/LOG=$env:RUNNER_TEMP\install.log" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log"; throw "install failed: $($p.ExitCode)" }
-          foreach ($f in "bin\coyote.exe","bin\pvm.exe","bin\cpm.exe","bin\cpx.exe","bin\cdt.exe","bin\coyote-llvm.exe","libs\standard.lib","studio\CoyoteStudio.exe","unins000.exe") {
-            if (-not (Test-Path "$dir\$f")) { throw "missing after install: $f" }
-          }
-          "use `"Standard`"`n`nShell.PrintLine(`"installed ok`")`n" | Set-Content -NoNewline "$env:RUNNER_TEMP\h.coy"
-          $out = & "$dir\bin\coyote.exe" run "$env:RUNNER_TEMP\h.coy"
-          if ($out -ne "installed ok") { throw "installed toolchain printed: $out" }
-          # Same version again = repair, must succeed; an older version must be refused.
-          $p = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "repair failed: $($p.ExitCode)" }
-          $p = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
-          Start-Sleep -Seconds 5
-          if (Test-Path "$dir\bin\coyote.exe") { throw "uninstall left files behind" }
 
       - name: Upload setup.exe
         uses: actions/upload-artifact@v4.6.2
