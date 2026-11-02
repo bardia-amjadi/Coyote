@@ -150,23 +150,16 @@ jobs:
       - name: Stage installer contents
         run: bash tools/stage.sh build/${CONFIG} studio/dist/CoyoteStudio-win32-x64 stage editors/vscode/coyote-vscode.vsix
 
-      - name: Install Inno Setup
+      - name: Verify Inno Setup
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-      
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup --no-progress -y
+          if (!(Test-Path $iscc)) {
+              throw "Inno Setup compiler (ISCC.exe) was not found."
           }
-      
-          if (-not (Test-Path $iscc)) {
-            throw "Inno Setup compiler (ISCC.exe) was not found."
-          }
-      
-          & $iscc /?
-          if ($LASTEXITCODE -ne 0) {
-            throw "Inno Setup compiler is not working."
-          }
+          $version = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "Inno Setup found: $version"
+          Write-Host "Compiler path: $iscc"
 
       - name: Build setup.exe
         shell: pwsh
