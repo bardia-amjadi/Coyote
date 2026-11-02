@@ -92,7 +92,7 @@ ctest --test-dir build --output-on-failure
 
 ## CI
 
-`.github/workflows/ci.yml` builds with the tests switched off (`-DCOYOTE_BUILD_TESTS=OFF`) so a repository without `tests/cases` still builds. It builds on Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64, runs Hello world, `cpx`, `cpm` and invalid-input smoke checks from the installed binaries, uploads one archive per platform, packages the VS Code extension, and builds the Windows installer (`Coyote-Setup-<version>.exe`, with a silent install/uninstall check). On a pushed tag `v*` it publishes a GitHub release with all of these and a `SHA256SUMS.txt`.
+`.github/workflows/ci.yml` builds with the tests switched off (`-DCOYOTE_BUILD_TESTS=OFF`) so a repository without `tests/cases` still builds. It builds on Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64, uploads one archive per platform, packages the VS Code extension, and builds the Windows installer (`Coyote-Setup-<version>.exe`). On a pushed tag `v*` it publishes a GitHub release with all of these and a `SHA256SUMS.txt`.
 
 The test suite is still in the repository: run it locally with a normal configure (`-DCOYOTE_BUILD_TESTS=ON`, the default) and `ctest --test-dir build`. The sanitizer and native-backend CI jobs were removed because they need the whole suite.
 

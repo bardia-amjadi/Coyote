@@ -61,8 +61,12 @@ add_library(pvm_core STATIC
   src/pvm/heap.cpp
   src/pvm/ops.cpp
   src/pvm/host.cpp
+  src/pvm/host_sys.cpp
   src/pvm/debugger.cpp)
 target_include_directories(pvm_core PUBLIC src/pvm)
+if(WIN32)
+  target_link_libraries(pvm_core PUBLIC winhttp)
+endif()
 coyote_target_defaults(pvm_core)
 
 add_executable(pvm src/pvm/main.cpp)
@@ -101,21 +105,30 @@ target_include_directories(cdt PRIVATE src/cdt)
 target_link_libraries(cdt PRIVATE coyote_compiler coyote_pkg)
 coyote_target_defaults(cdt)
 
-# The standard library: packed from stdlib/ with the compiler we just built, next to the tools (<tools>/libs).
-file(GLOB COYOTE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/src/*.coy)
+# The standard library: every project under stdlib/ is packed with the compiler we just built into <tools>/libs
+# (standard.io.lib, standard.text.lib, ..., and the umbrella standard.lib that requires them all).
+set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard)
+file(GLOB_RECURSE COYOTE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/*.coy ${CMAKE_SOURCE_DIR}/stdlib/*/packages.json)
 if(CMAKE_CROSSCOMPILING)
-  message(STATUS "cross-compiling: standard.lib is not packed (the compiler cannot run on this machine); copy one into <tools>/libs")
+  message(STATUS "cross-compiling: the standard libraries are not packed (the compiler cannot run on this machine); copy them into <tools>/libs")
 else()
-  add_custom_target(stdlib ALL
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:coyote>/libs
-    COMMAND coyote lib pack ${CMAKE_SOURCE_DIR}/stdlib -o $<TARGET_FILE_DIR:coyote>/libs/standard.lib
-    DEPENDS coyote ${COYOTE_STDLIB_SOURCES} ${CMAKE_SOURCE_DIR}/stdlib/packages.json
-    COMMENT "Packing the Standard library"
+  set(COYOTE_STDLIB_COMMANDS COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:coyote>/libs)
+  set(COYOTE_STDLIB_FILES "")
+  foreach(p ${COYOTE_STDLIB_PROJECTS})
+    string(TOLOWER "${p}" lower)
+    list(APPEND COYOTE_STDLIB_COMMANDS COMMAND coyote lib pack ${CMAKE_SOURCE_DIR}/stdlib/${p} -o $<TARGET_FILE_DIR:coyote>/libs/${lower}.lib)
+    list(APPEND COYOTE_STDLIB_FILES $<TARGET_FILE_DIR:coyote>/libs/${lower}.lib)
+  endforeach()
+  add_custom_target(stdlib ALL ${COYOTE_STDLIB_COMMANDS}
+    DEPENDS coyote ${COYOTE_STDLIB_SOURCES}
+    COMMENT "Packing the Standard libraries"
     VERBATIM)
 endif()
 
 install(TARGETS coyote pvm coyote-llvm cpx cpm cdt RUNTIME DESTINATION bin)
-install(FILES $<TARGET_FILE_DIR:coyote>/libs/standard.lib DESTINATION libs OPTIONAL)
+if(NOT CMAKE_CROSSCOMPILING)
+  install(FILES ${COYOTE_STDLIB_FILES} DESTINATION libs)
+endif()
 install(FILES README.md LICENSE DESTINATION share/coyote OPTIONAL)
 install(DIRECTORY docs samples DESTINATION share/coyote)
 install(DIRECTORY assets/brand DESTINATION share/coyote/assets)

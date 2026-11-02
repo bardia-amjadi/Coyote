@@ -45,28 +45,41 @@ hand:con readLine(): string
 
 Return types: `void` (default), `int`, `double`, `boolean`, `char`, `string`. The PVM runs a host function only if it is registered, its signature matches, and its permission is granted. Permissions: `console`, `time` and `random` are granted by default; functions with no permission (`math`, `text`) are pure.
 
-| Module | Functions |
+| Module | Functions | Permission |
+|---|---|---|
+| `con` | `print`, `println`, `readLine(): string`, `hasInput(): boolean` | `console` |
+| `math` | `sqrt pow sin cos tan asin acos atan atan2 exp log log10 floor ceil round` | none |
+| `text` | `length substring charAt indexOf upper lower trim replace` (character based; `upper`/`lower` ASCII only) | none |
+| `time` | `uptimeMs unixSeconds sleep format` | `time` |
+| `random` | `seed nextInt nextDouble` | `random` |
+| `file` | `readAll writeAll append exists delete copy move size modified fullPath` | `file` |
+| `dir` | `exists create delete list` | `file` |
+| `env` | `get has set` | `system` |
+| `sys` | `argCount arg exit cwd os homeDir` | `system` |
+| `http` | `request body headers header error` (Windows: http and https; other systems: http only) | `net` |
+
+Permissions are checked when a host function is **called**, so a program may declare functions it never reaches. `coyote run` and Coyote Studio grant every permission; the bare `pvm` grants `console`, `time` and `random` unless you pass `--allow <permission>` or `--allow-all`. A denied call is a runtime error naming the permission.
+
+Under the debugger, `readLine` works too: the PVM sends an `inputRequested` event and waits for a `stdin` command ([debugging](debugging.md)); Studio shows this as a prompt in the Terminal.
+
+## The Standard libraries (`stdlib/`, installed as `.lib` files)
+
+`use "Standard"` is an umbrella library with no code of its own: it `requires` all the others. Use a single one (`use "Standard.IO"`) to keep programs small. A library can list `requires` in its `packages.json` (`"requires": ["Other"]`); required libraries are loaded automatically and are visible to anyone who uses the library.
+
+| Library | Classes |
 |---|---|
-| `con` (console) | `print`, `println`, `readLine(): string`, `hasInput(): boolean` |
-| `math` | `sqrt pow sin cos tan asin acos atan atan2 exp log log10 floor ceil round` (all `double`) |
-| `text` | `length substring charAt indexOf upper lower trim` (character-based; `upper`/`lower` are ASCII only) |
-| `time` | `uptimeMs(): int`, `unixSeconds(): int`, `sleep(int ms)` |
-| `random` | `seed(int)`, `nextInt(int low, int high): int`, `nextDouble(): double` |
+| `Standard.IO` | `Shell` (`Print PrintLine ReadLine ReadInt ReadDouble HasInput Prompt`), `File`, `Directory`, `Path` |
+| `Standard.Text` | `Text` (`Length IsEmpty IsBlank Substring CharAt IndexOf Contains StartsWith EndsWith Upper Lower Trim Replace Repeat PadLeft PadRight Join` ...) |
+| `Standard.Math` | `Math`, `Random` |
+| `Standard.Time` | `Time` |
+| `Standard.System` | `Environment` (environment variables, arguments, `Exit`, current directory, OS) |
+| `Standard.Http` | `Http` (`Get Post PostJson Send`), `HttpResponse` |
 
-While a program runs under the debugger, `con.readLine` reports that no input is available (stdin carries debugger commands).
-
-## The Standard library (`standard.lib`, from `stdlib/`)
-
-| Class | Members |
-|---|---|
-| `Shell` | `Print(text)` (no line break), `PrintLine(text)`, `ReadLine()`, `HasInput()` |
-| `Math` | `PI`, `E`, `Sqrt Pow Sin Cos Tan Asin Acos Atan Atan2 Exp Log Log10 Floor Ceil Round`, `Abs`, `AbsInt`, `Min`, `Max`, `MinInt`, `MaxInt` |
-| `Text` | `Length IsEmpty Substring CharAt IndexOf Contains StartsWith EndsWith Upper Lower Trim Repeat` |
-| `Time` | `UptimeMs UnixSeconds Sleep` |
-| `Random` | `Seed NextInt NextDouble` |
+Hover or complete any member in Coyote Studio to see its documentation (the `#` comment lines above each member in `stdlib/`).
 
 There is no method overloading yet, so names such as `AbsInt` / `MinInt` exist next to `Abs` / `Min`.
 
 ## Not implemented
+
 
 Library versions are recorded but not checked or resolved (`use` takes the first library it finds); `cpm` does not install libraries; there is no `.lib` signing; no way to hide a library's source.

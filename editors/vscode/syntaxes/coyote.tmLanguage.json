@@ -70,7 +70,7 @@
     },
     "reserved": {
       "name": "invalid.deprecated.reserved.coyote",
-      "match": "\\b(hidden|created|here|operator|module|use)\\b"
+      "match": "\\b(hidden|created|here|operator|module)\\b"
     },
     "constant": {
       "name": "constant.language.boolean.coyote",

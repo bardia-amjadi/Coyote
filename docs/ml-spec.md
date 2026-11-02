@@ -206,20 +206,29 @@ stack. Recursion is allowed. Nesting deeper than **5000 frames** is a runtime er
 
 ## Host calls and permissions
 
-`hostcall` invokes a host function **only if** all of these hold; otherwise verification fails
-and nothing runs:
+`hostcall` invokes a host function **only if** all of these hold:
 
-1. the function is registered with the PVM (the registry is compiled into the host program);
-2. the `host` declaration's signature equals the registered signature exactly;
-3. the permission the function requires has been granted to the VM instance (the `pvm` CLI grants
-   `console` by default; more with `--allow <permission>`).
+1. the function is registered with the PVM (the registry is compiled into the host program) and
+2. the `host` declaration's signature equals the registered signature exactly. Both are checked by
+   the verifier, before anything runs;
+3. the permission the function requires has been granted to the VM instance. This is checked **at
+   the call**: a program may declare host functions it never reaches (a library bundles many)
+   without being granted all of them, and a call without the permission is a runtime error that
+   happens before the function does anything. The `pvm` CLI grants `console`, `time` and `random`
+   by default; more with `--allow <permission>` (`file`, `system`, `net`) or `--allow-all`.
+   Functions with no permission (`math.*`, `text.*`) are always allowed.
 
-Built-in functions (permission `console`):
+Built-in host functions (the full list with signatures is in [libraries.md](libraries.md)):
 
-| Host           | Signature          | Behaviour |
-|----------------|--------------------|-----------|
-| `con.print`    | `(string) -> void` | writes the text to stdout |
-| `con.println`  | `(string) -> void` | writes the text and `\n` to stdout |
+| Module | Permission | Functions |
+|--------|------------|-----------|
+| `con` | `console` | `print`, `println`, `readLine`, `hasInput` |
+| `math`, `text` | none | pure functions |
+| `time` | `time` | `uptimeMs`, `unixSeconds`, `sleep`, `format` |
+| `random` | `random` | `seed`, `nextInt`, `nextDouble` |
+| `file`, `dir` | `file` | read/write/copy/move/delete files, list/create/delete folders |
+| `env`, `sys` | `system` | environment variables, program arguments, `exit`, working directory |
+| `http` | `net` | `request`, `body`, `headers`, `header`, `error` |
 
 ## Verification
 
@@ -234,8 +243,7 @@ first instruction; duplicate labels.
 Verifier (semantics):
 
 * `source` and `entry` present and unique; entry function exists with `() -> void`;
-* no duplicate hosts or functions; every declared host is registered, signature-compatible and
-  permitted;
+* no duplicate hosts or functions; every declared host is registered and signature-compatible;
 * every `call`, `hostcall`, jump target and `load`/`store` slot refers to something that exists,
   with the right argument count;
 * **operand-stack typing across control flow.** The verifier follows every path from the first

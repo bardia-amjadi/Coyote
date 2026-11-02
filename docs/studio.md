@@ -5,7 +5,15 @@
 
 Libraries: New Project asks for `app` or `library`; Tools > Build Library packs a library project to `out/<name>.lib`, and Build and Install Library for Me also copies it to `~/coyote/libs` so any program can `use` it ([libraries](libraries.md)). The installer puts the Standard library in `<install>\libs`.
 
-Features: file tree and tabs, syntax highlighting, live diagnostics from the compiler, format document, run file / run project, an output panel with stdin, a debugger (breakpoints, step over/into/out, call stack, variables, globals), "show ML", native build, new-project wizard and a toolchain doctor.
+Layout (like Visual Studio / VS Code): activity bar (Explorer, Find in Files, Run and Debug, Libraries), editor tabs with breadcrumbs, a bottom panel (Terminal, Output, Problems, Generated ML), a status bar and a command palette (`Ctrl+Shift+P`), Go to File (`Ctrl+P`), Go to Symbol (`Ctrl+Shift+O`, `Ctrl+T` for the whole project and libraries). Dark and light themes, settings dialog, new-project dialog (Console App or Library).
+
+**Terminal.** Programs run in the Terminal panel. Whatever you type there is sent to the program, so `Shell.ReadLine()` / `Shell.Prompt("Name: ")` work (also while debugging). Enter sends a line, `Ctrl+D` (or the End input button) ends the input, `Ctrl+C` stops the program, Up/Down recall earlier lines. A prompt printed without a line break stays on the same line as your input.
+
+**Language service.** Completion for keywords, locals, methods, classes and members after a dot (arrays and maps included), with the documentation written as `#` comments in the source. Picking a symbol from a library you have not `use`d yet **adds the `use "<Library>"` line for you** (the same for exported symbols of other files: it adds an `import`). The quick fix (`Ctrl+.`) on "unknown variable/class" does the same. Hover, signature help, Go to Definition (`F12`, library sources open read-only), outline, semantic highlighting (classes, methods, parameters, properties get their own colors), format document, and diagnostics as you type (the unsaved text is checked).
+
+**Libraries view.** Lists every installed `.lib` with its classes and members; click to read the source.
+
+Features: file tree, find in files, run file / run project, a debugger (breakpoints, step over/into/out, call stack, variables, globals, program input), "show ML", native build, library build and install, and a toolchain doctor.
 Opening a `.coy` file from Explorer (or `CoyoteStudio.exe file.coy`) opens it in the running Studio.
 
 The toolbar logo is a downscaled copy; the original in `assets/brand/` is untouched and shipped with the installer.
