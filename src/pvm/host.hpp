@@ -19,9 +19,16 @@ struct HostError {
     std::string message;
 };
 
+// Thrown by sys.exit: ends the program with this exit code (not an error).
+struct HostExit {
+    int code;
+};
+
 struct HostContext {
     std::ostream& out;
     std::istream* in = nullptr;  // null: no input available (e.g. while the debugger owns stdin)
+    bool unbuffered = false;     // flush after every write (interactive front ends)
+    const std::vector<std::string>* args = nullptr;  // program arguments (sys.arg)
 };
 
 using HostFn = std::function<Value(const std::vector<Value>& args, HostContext& ctx)>;
@@ -49,11 +56,16 @@ public:
     bool isGranted(const std::string& permission) const { return permission.empty() || granted_.count(permission) != 0; }
     void setInput(std::istream* in) { in_ = in; }
     std::istream* input() const { return in_; }
+    void setUnbuffered(bool v) { unbuffered_ = v; }
+    void setArgs(std::vector<std::string> a) { args_ = std::move(a); }
+    HostContext context(std::ostream& out) const { return HostContext{out, in_, unbuffered_, &args_}; }
 
 private:
     std::map<std::string, HostFunction> funcs_;
     std::set<std::string> granted_;
     std::istream* in_ = nullptr;
+    bool unbuffered_ = false;
+    std::vector<std::string> args_;
 };
 
 // Registers the built-in console host functions (permission "console").
@@ -62,5 +74,9 @@ void registerConsoleHosts(HostRegistry& registry);
 void registerAllHosts(HostRegistry& registry);
 // The permissions a program gets by default (console, time, random).
 void grantDefaultPermissions(HostRegistry& registry);
+// Every permission: console, time, random, file, system, net (`coyote run`, Coyote Studio).
+void grantAllPermissions(HostRegistry& registry);
+// Registers the file/dir/env/sys/http modules (host_sys.cpp).
+void registerSystemHosts(HostRegistry& registry);
 
 } // namespace pvm

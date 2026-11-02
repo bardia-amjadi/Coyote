@@ -3,6 +3,7 @@
 //   coyote-lib 1
 //   name Standard
 //   version 1.0.0
+//   requires Standard.IO          (optional, any number)
 //   file shell.coy 123
 //   <123 bytes of source>
 //   file math.coy 45
@@ -24,6 +25,7 @@ struct LibFile {
 struct Lib {
     std::string name;
     std::string version;
+    std::vector<std::string> requires_;  // other libraries `use` loads together with this one (and makes visible to the user)
     std::vector<LibFile> files;
 };
 

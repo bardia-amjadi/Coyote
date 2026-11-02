@@ -31,7 +31,7 @@ function listDir(dir) {
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
   return names
-    .filter((d) => !HIDDEN.has(d.name))
+    .filter((d) => !HIDDEN.has(d.name) && !d.name.startsWith('.~studio-'))
     .map((d) => ({ name: d.name, path: path.join(dir, d.name), dir: d.isDirectory() }))
     .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
 }

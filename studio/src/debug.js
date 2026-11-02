@@ -18,7 +18,7 @@ class DebugSession extends EventEmitter {
     this.tmp = null;
   }
 
-  // Emits: 'output' (text), 'stopped' ({reason,file,line,function}), 'runtimeError', 'exited' ({code}), 'log' (text from the compiler/pvm stderr).
+  // Emits: 'output' (text), 'inputRequested', 'stopped' ({reason,file,line,function}), 'runtimeError', 'exited' ({code}), 'log' (text from the compiler/pvm stderr).
   async start(file, { cwd, breakpoints = [] } = {}) {
     this.tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coyote-debug-'));
     const ml = path.join(this.tmp, 'program.ml');
@@ -29,7 +29,7 @@ class DebugSession extends EventEmitter {
       err.compileOutput = (build.stderr || build.stdout || build.error || '').trim();
       throw err;
     }
-    this.proc = runner.start(this.tc.tools.pvm, ['--debug', ml], { cwd, onStdout: (d) => this._data(d), onStderr: (d) => this.emit('log', d) });
+    this.proc = runner.start(this.tc.tools.pvm, ['--allow-all', '--debug', ml], { cwd, onStdout: (d) => this._data(d), onStderr: (d) => this.emit('log', d) });
     this.proc.done.then((r) => {
       if (!this.exited) { this.exited = true; this.emit('exited', { code: r.code, error: r.error }); }
       this._flushWaiters();
@@ -61,6 +61,7 @@ class DebugSession extends EventEmitter {
     switch (ev.event) {
       case 'output': this.emit('output', ev.text); break;
       case 'stopped': this.emit('stopped', ev); break;
+      case 'inputRequested': this.emit('inputRequested'); break;
       case 'runtimeError': this.emit('runtimeError', ev); break;
       case 'exited': this.exited = true; this.emit('exited', { code: ev.code }); break;
       default: break;
@@ -93,6 +94,8 @@ class DebugSession extends EventEmitter {
   async stack() { const e = await this._request('stack', 'stack'); return e ? e.frames : []; }
   async variables(frame = 0) { const e = await this._request(`vars ${frame}`, 'vars'); return e ? e.vars : []; }
   async globals() { const e = await this._request('globals', 'globals'); return e ? e.vars : []; }
+  sendInput(text) { this._send('stdin ' + JSON.stringify(text)); }
+  endInput() { this._send('stdineof'); }
   stop() { if (this.proc && !this.exited) { this._send('quit'); setTimeout(() => this.proc && this.proc.kill(), 500).unref(); } }
 }
 

@@ -61,6 +61,11 @@ Lib parseLib(const std::string& text) {
         } else if (line.rfind("version ", 0) == 0 && lib.files.empty()) {
             lib.version = line.substr(8);
             if (lib.version.size() > 64) throw LibError{"library version is too long"};
+        } else if (line.rfind("requires ", 0) == 0 && lib.files.empty()) {
+            std::string r = line.substr(9);
+            if (!isValidLibName(r)) throw LibError{"invalid required library name '" + r + "'"};
+            if (lib.requires_.size() >= 64) throw LibError{"too many 'requires' lines"};
+            lib.requires_.push_back(r);
         } else if (line.rfind("file ", 0) == 0) {
             if (!haveName) throw LibError{"the library has no 'name' line before its first file"};
             size_t sp = line.find_last_of(' ');
@@ -85,15 +90,19 @@ Lib parseLib(const std::string& text) {
         }
     }
     if (!haveName) throw LibError{"the library has no name"};
-    if (lib.files.empty()) throw LibError{"the library '" + lib.name + "' contains no .coy files"};
+    if (lib.files.empty() && lib.requires_.empty()) throw LibError{"the library '" + lib.name + "' contains no .coy files"};
     return lib;
 }
 
 std::string writeLib(const Lib& lib) {
     if (!isValidLibName(lib.name)) throw LibError{"invalid library name '" + lib.name + "' (letters, digits, '_', '-', '.'; must start with a letter or '_')"};
-    if (lib.files.empty()) throw LibError{"the library has no .coy files"};
+    if (lib.files.empty() && lib.requires_.empty()) throw LibError{"the library has no .coy files"};
     std::string out = "coyote-lib 1\nname " + lib.name + "\n";
     if (!lib.version.empty()) out += "version " + lib.version + "\n";
+    for (const std::string& r : lib.requires_) {
+        if (!isValidLibName(r)) throw LibError{"invalid required library name '" + r + "'"};
+        out += "requires " + r + "\n";
+    }
     for (const LibFile& f : lib.files) {
         if (!validPath(f.path)) throw LibError{"invalid file path '" + f.path + "'"};
         if (f.text.size() > kMaxLibFileBytes) throw LibError{"file '" + f.path + "' is too large"};

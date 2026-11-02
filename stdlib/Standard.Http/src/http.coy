@@ -1,0 +1,73 @@
+# Standard.Http: web requests. Needs the "net" permission (granted by Coyote Studio and `coyote run`).
+# http:// works everywhere; https:// works in Windows builds (this build uses WinHTTP there).
+hand:http request(string verb, string url, string headers, string body, int timeoutMs): int
+hand:http body(): string
+hand:http headers(): string
+hand:http header(string name): string
+hand:http error(): string
+
+# The answer to a request. When the request could not be made at all, Status is 0 and Error says why.
+export class HttpResponse {
+    public int Status = 0
+    public string Body = ""
+    public string Error = ""
+    private string rawHeaders = ""
+
+    constructor(int status, string body, string rawHeaders, string error) {
+        this.Status = status
+        this.Body = body
+        this.rawHeaders = rawHeaders
+        this.Error = error
+    }
+    # true for status 200 to 299.
+    property boolean Ok { get { return this.Status >= 200 && this.Status < 300 } }
+    # The value of a response header ("" when absent); the name is not case sensitive.
+    method Header(string name): string {
+        string wanted = name
+        return headerFrom(this.rawHeaders, wanted)
+    }
+    # All headers, one "Name: value" per line.
+    property string Headers { get { return this.rawHeaders } }
+}
+
+hand:text lower(string s): string
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text indexOf(string s, string part): int
+
+method headerFrom(string raw, string name): string {
+    string want = lower(name)
+    string rest = raw
+    while (length(rest) > 0) {
+        int nl = indexOf(rest, "\n")
+        string line = rest
+        if (nl >= 0) {
+            line = substring(rest, 0, nl)
+            rest = substring(rest, nl + 1, length(rest) - nl - 1)
+        } else {
+            rest = ""
+        }
+        int colon = indexOf(line, ":")
+        if (colon > 0 && lower(substring(line, 0, colon)) == want) {
+            int v = colon + 1
+            while (v < length(line) && substring(line, v, 1) == " ") { v = v + 1 }
+            return substring(line, v, length(line) - v)
+        }
+    }
+    return ""
+}
+
+export class Http {
+    # GET a URL (15 second timeout).
+    public static method Get(string url): HttpResponse { return Send("GET", url, "", "", 15000) }
+    # POST text; headers is "" or lines like "Content-Type: text/plain" separated by "\n".
+    public static method Post(string url, string payload, string extraHeaders): HttpResponse { return Send("POST", url, extraHeaders, payload, 15000) }
+    # POST a JSON text with the right Content-Type.
+    public static method PostJson(string url, string json): HttpResponse { return Send("POST", url, "Content-Type: application/json", json, 15000) }
+    # Any method (GET, POST, PUT, DELETE, ...), with headers, a body and a timeout in milliseconds.
+    public static method Send(string verb, string url, string extraHeaders, string payload, int timeoutMs): HttpResponse {
+        int status = request(verb, url, extraHeaders, payload, timeoutMs)
+        if (status == 0) { return new HttpResponse(0, "", "", error()) }
+        return new HttpResponse(status, body(), headers(), "")
+    }
+}

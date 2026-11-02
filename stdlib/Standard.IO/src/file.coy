@@ -1,0 +1,70 @@
+# Standard.IO: files and folders. Needs the "file" permission (granted by Coyote Studio and `coyote run`).
+hand:file readAll(string path): string
+hand:file writeAll(string path, string text)
+hand:file append(string path, string text)
+hand:file exists(string path): boolean
+hand:file delete(string path): boolean
+hand:file copy(string from, string to)
+hand:file move(string from, string to)
+hand:file size(string path): int
+hand:file modified(string path): int
+hand:file fullPath(string path): string
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text indexOf(string s, string part): int
+
+# Splits text at every "\n"; a trailing line break does not create an empty last line; "\r" is dropped.
+method splitLines(string text): array<string> {
+    array<string> parts = new array<string>(0)
+    int start = 0
+    int n = length(text)
+    while (start < n) {
+        int at = indexOf(substring(text, start, n - start), "\n")
+        string line = ""
+        if (at < 0) {
+            line = substring(text, start, n - start)
+            start = n
+        } else {
+            line = substring(text, start, at)
+            start = start + at + 1
+        }
+        int ln = length(line)
+        if (ln > 0 && substring(line, ln - 1, 1) == "\r") { line = substring(line, 0, ln - 1) }
+        parts.push(line)
+    }
+    return parts
+}
+
+# Reading and writing whole files. A missing file or a failed write stops the program with a clear message; test with Exists first.
+export class File {
+    # The whole file as text.
+    public static method ReadAllText(string path): string { return readAll(path) }
+    # The lines of a file (line breaks removed).
+    public static method ReadLines(string path): array<string> { return splitLines(readAll(path)) }
+    # Creates or replaces the file.
+    public static method WriteAllText(string path, string text) { writeAll(path, text) }
+    # Creates or replaces the file with the lines, each followed by a line break.
+    public static method WriteLines(string path, array<string> lines) {
+        string all = ""
+        for (string l in lines) { all = all + l + "\n" }
+        writeAll(path, all)
+    }
+    # Adds text at the end of the file (creating it when needed).
+    public static method AppendAllText(string path, string text) { append(path, text) }
+    # Adds one line (with a line break) at the end of the file.
+    public static method AppendLine(string path, string line) { append(path, line + "\n") }
+    # true when the path is an existing file.
+    public static method Exists(string path): boolean { return exists(path) }
+    # Deletes a file; false when it did not exist.
+    public static method Delete(string path): boolean { return delete(path) }
+    # Copies a file, replacing the target.
+    public static method Copy(string from, string to) { copy(from, to) }
+    # Moves or renames a file.
+    public static method Move(string from, string to) { move(from, to) }
+    # Size in bytes (files up to 2 GiB).
+    public static method Size(string path): int { return size(path) }
+    # Last change as Unix seconds.
+    public static method ModifiedUnix(string path): int { return modified(path) }
+    # The absolute form of a path.
+    public static method FullPath(string path): string { return fullPath(path) }
+}

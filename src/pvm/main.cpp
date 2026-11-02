@@ -24,7 +24,10 @@ void usage(std::ostream& os) {
     os << "Pixel Virtual Machine " COYOTE_VERSION " (supports ML format versions 1 to 6)\n"
        << "usage: pvm [options] <program.ml>\n"
        << "  --verify-only        load and verify the program without running it\n"
-       << "  --allow <permission> grant a host permission (default: console, time, random)\n"
+       << "  --allow <permission> grant a host permission (default: console, time, random; also: file, system, net)\n"
+       << "  --allow-all          grant every permission\n"
+       << "  --unbuffered         flush output after every write\n"
+       << "  -- <args...>         program arguments, readable with sys.arg\n"
        << "  --heap-limit <n>     maximum live array elements (default 8000000)\n"
        << "  --gc-stress          collect garbage before every allocation (testing)\n"
        << "  --gc-stats           print garbage collector statistics to stderr on exit\n"
@@ -63,6 +66,7 @@ int main(int argc, char** argv) {
     bool verifyOnly = false;
     bool gcStats = false;
     bool debug = false;
+    std::vector<std::string> progArgs;
     pvm::HeapOptions heapOptions;
     std::string input;
     pvm::HostRegistry registry;
@@ -78,6 +82,9 @@ int main(int argc, char** argv) {
         if (a == "--gc-stress") { heapOptions.stress = true; continue; }
         if (a == "--gc-stats") { gcStats = true; continue; }
         if (a == "--debug") { debug = true; continue; }
+        if (a == "--unbuffered") { registry.setUnbuffered(true); continue; }
+        if (a == "--allow-all") { pvm::grantAllPermissions(registry); continue; }
+        if (a == "--") { progArgs.assign(args.begin() + static_cast<std::ptrdiff_t>(i) + 1, args.end()); break; }
         if (a == "--heap-limit") {
             if (i + 1 >= args.size()) { std::cerr << "pvm: error: '--heap-limit' needs a value\n"; return 2; }
             const std::string& v = args[++i];
@@ -115,6 +122,7 @@ int main(int argc, char** argv) {
     ss << in.rdbuf();
     std::string text = ss.str();
 
+    registry.setArgs(progArgs);
     pvm::Heap heap(heapOptions);
     auto printStats = [&]() {
         if (gcStats)
@@ -126,13 +134,18 @@ int main(int argc, char** argv) {
         pvm::verify(module, registry, input);
         if (verifyOnly) return 0;
         if (debug) {
-            registry.setInput(nullptr);  // stdin carries debugger commands
+            // stdin carries debugger commands; program input arrives as `stdin "<json>"` commands (docs/debugging.md)
             pvm::StdioDebugger dbg(std::cin, std::cout);
+            pvm::DebugInput dbgInputBuf(dbg, std::cin);
+            std::istream dbgInput(&dbgInputBuf);
+            registry.setInput(&dbgInput);
             EventBuf buf(dbg);
             std::ostream progOut(&buf);
             int code = 0;
             try {
                 pvm::run(module, registry, progOut, heap, &dbg);
+            } catch (const pvm::HostExit& x) {
+                code = x.code;
             } catch (const pvm::RuntimeError& e) {
                 buf.flushNow();
                 dbg.event("{\"event\":\"runtimeError\",\"file\":\"" + pvm::jsonEscape(e.file) + "\",\"line\":" + std::to_string(e.line) +
@@ -144,7 +157,13 @@ int main(int argc, char** argv) {
             printStats();
             return code;
         }
-        pvm::run(module, registry, std::cout, heap);
+        try {
+            pvm::run(module, registry, std::cout, heap);
+        } catch (const pvm::HostExit& x) {
+            std::cout.flush();
+            printStats();
+            return x.code;
+        }
         std::cout.flush();
         printStats();
         if (!std::cout) { std::cerr << "pvm: error: failed to flush standard output\n"; return 1; }

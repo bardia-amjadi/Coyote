@@ -9,6 +9,7 @@ const { Settings } = require('./settings');
 const { findProjectRoot, readManifest, listDir } = require('./project');
 const actions = require('./actions');
 const { DebugSession } = require('./debug');
+const search = require('./search');
 
 const VERSION = require('../package.json').version;
 let win = null;
@@ -59,6 +60,7 @@ function buildMenu() {
       { type: 'separator' },
       { label: 'Save', accelerator: 'CmdOrCtrl+S', click: t('save') },
       { label: 'Save All', accelerator: 'CmdOrCtrl+Alt+S', click: t('saveAll') },
+      { label: 'Close Editor', accelerator: 'CmdOrCtrl+W', click: t('closeTab') },
       { type: 'separator' },
       { role: 'quit' }] },
     { label: '&Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
@@ -80,10 +82,25 @@ function buildMenu() {
       { label: 'Build Native Executable...', click: t('native') },
       { label: 'Build Library (.lib)', click: t('packLib') },
       { label: 'Build and Install Library for Me', click: t('installLib') },
+      { label: 'Open My Libraries Folder', click: t('libFolder') },
+      { label: 'Reload Libraries', click: t('reloadLibs') },
       { label: 'Install Packages (cpm install)', click: t('cpmInstall') },
       { label: 'Toolchain Doctor', click: t('doctor') },
       { label: 'Settings...', click: t('settings') }] },
-    { label: '&View', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
+    { label: '&View', submenu: [
+      { label: 'Command Palette...', accelerator: 'CmdOrCtrl+Shift+P', click: t('palette') },
+      { label: 'Go to File...', accelerator: 'CmdOrCtrl+P', click: t('quickOpen') },
+      { label: 'Go to Symbol in Project...', accelerator: 'CmdOrCtrl+T', click: t('goSymbolWorkspace') },
+      { type: 'separator' },
+      { label: 'Explorer', accelerator: 'CmdOrCtrl+Shift+E', click: t('viewExplorer') },
+      { label: 'Find in Files', accelerator: 'CmdOrCtrl+Shift+F', click: t('viewSearch') },
+      { label: 'Run and Debug', accelerator: 'CmdOrCtrl+Shift+D', click: t('viewDebug') },
+      { label: 'Libraries', accelerator: 'CmdOrCtrl+Shift+L', click: t('viewLibs') },
+      { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+B', click: t('toggleSidebar') },
+      { label: 'Terminal', accelerator: 'CmdOrCtrl+`', click: t('terminal') },
+      { label: 'Toggle Panel', accelerator: 'CmdOrCtrl+J', click: t('togglePanel') },
+      { label: 'Toggle Dark / Light Theme', click: t('toggleTheme') },
+      { type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
     { label: '&Help', submenu: [
       { label: 'About Coyote Studio', click: t('about') },
       { label: 'Language reference (docs/language.md)', click: () => { const p = docPath('language.md'); if (p) shell.openPath(p); } }] },
@@ -115,11 +132,11 @@ function registerIpc() {
     return r.canceled ? null : r.filePaths[0];
   });
   handle('dialog:openFile', async () => {
-    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Coyote', extensions: ['ct'] }, { name: 'All files', extensions: ['*'] }] });
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Coyote', extensions: ['coy'] }, { name: 'All files', extensions: ['*'] }] });
     return r.canceled ? null : r.filePaths[0];
   });
   handle('dialog:saveAs', async (def) => {
-    const r = await dialog.showSaveDialog(win, { defaultPath: def, filters: [{ name: 'Coyote', extensions: ['ct'] }] });
+    const r = await dialog.showSaveDialog(win, { defaultPath: def, filters: [{ name: 'Coyote', extensions: ['coy'] }] });
     return r.canceled ? null : r.filePath;
   });
   handle('dialog:saveExe', async (def) => {
@@ -161,6 +178,13 @@ function registerIpc() {
 
   handle('lib:pack', (root, install) => actions.packLibrary(tc, root, !!install));
   handle('tool:check', (file, cwd) => actions.check(tc, file, cwd));
+  handle('tool:checkText', (file, text, cwd) => actions.checkText(tc, file, text, cwd));
+  handle('tool:formatText', (text) => actions.formatText(tc, text));
+  handle('lang:libs', (projectRoot) => ({ ok: true, ...actions.readLibs(tc, projectRoot) }));
+  handle('fs:files', (root) => ({ ok: true, files: search.listFiles(root) }));
+  handle('fs:search', (root, query, opts) => ({ ok: true, ...search.searchText(root, query, opts || {}) }));
+  handle('shell:openPath', async (p) => { fs.mkdirSync(p, { recursive: true }); const e = await shell.openPath(p); return { ok: !e, error: e }; });
+  handle('shell:openExternal', (url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); return { ok: true }; });
   handle('tool:format', (file, cwd) => actions.format(tc, file, cwd));
   handle('tool:showMl', (file, cwd) => actions.showMl(tc, file, cwd));
   handle('tool:native', (file, out, cwd) => actions.buildNative(tc, file, out, cwd));
@@ -186,7 +210,9 @@ function registerIpc() {
     h.done.then((r) => { if (running === h) running = null; send('run:exit', { code: r.code, phase: 'run', error: r.error }); });
     return { ok: true };
   });
-  handle('run:stdin', (text) => { if (running) running.write(text); return { ok: true }; });
+  handle('run:stdin', (text) => { if (running) running.write(text); else if (session) session.sendInput(text.replace(/\r?\n$/, '')); return { ok: true }; });
+  handle('run:closeStdin', () => { if (running) running.closeStdin(); if (session) session.endInput(); return { ok: true }; });
+  handle('run:stdinDebug', (text) => { if (session) session.sendInput(text); return { ok: true }; });
   handle('run:stop', () => { if (running) running.kill(); if (session) session.stop(); return { ok: true }; });
 
   handle('debug:start', async (file, cwd, breakpoints) => {
@@ -197,6 +223,7 @@ function registerIpc() {
     s.on('log', (text) => send('debug:event', { event: 'log', text }));
     s.on('stopped', (e) => send('debug:event', e));
     s.on('runtimeError', (e) => send('debug:event', e));
+    s.on('inputRequested', () => send('debug:event', { event: 'inputRequested' }));
     s.on('exited', (e) => { if (session === s) session = null; send('debug:event', { event: 'exited', ...e }); });
     try {
       await s.start(file, { cwd, breakpoints });

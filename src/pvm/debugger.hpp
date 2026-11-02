@@ -2,6 +2,7 @@
 #pragma once
 
 #include <iosfwd>
+#include <streambuf>
 #include <set>
 #include <string>
 #include <utility>
@@ -42,5 +43,25 @@ private:
     bool isBreak(const std::string& file, int line) const;
     bool commandLoop(const DebugView& view);  // false = quit
 };
+
+// Input for the program while it runs under the debugger. When the program reads and nothing is buffered, an
+// {"event":"inputRequested"} line is written and debugger-protocol lines are read until `stdin <json string>`
+// (one line of input, the newline is added) or `stdineof` (end of input) arrives.
+class DebugInput : public std::streambuf {
+public:
+    DebugInput(StdioDebugger& dbg, std::istream& in) : dbg_(dbg), in_(in) {}
+
+protected:
+    int_type underflow() override;
+
+private:
+    StdioDebugger& dbg_;
+    std::istream& in_;
+    std::string line_;
+    bool eof_ = false;
+};
+
+// Decodes the body of a JSON string literal (with its surrounding quotes) into UTF-8; false when malformed.
+bool jsonUnquote(const std::string& quoted, std::string& out);
 
 } // namespace pvm

@@ -5,6 +5,7 @@
 #include <map>
 #include <sstream>
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "lexer.hpp"
@@ -39,6 +40,11 @@ bool readSource(const std::string& path, std::string& out, std::string& error) {
     ss << in.rdbuf();
     out = ss.str();
     return true;
+}
+
+std::vector<std::string>& extraLibDirs() {
+    static std::vector<std::string> d;
+    return d;
 }
 
 bool isPathSpec(const std::string& s) {
@@ -178,7 +184,7 @@ private:
     // Where `use "Name"` looks, in order: $COYOTE_LIBS, <project>/.coyote/libs (this file's directory and
     // every ancestor), the toolchain's own libs folder, then ~/coyote/libs.
     std::vector<std::string> libSearchDirs(const std::string& fromFile) {
-        std::vector<std::string> dirs;
+        std::vector<std::string> dirs = extraLibDirs();
         if (const char* env = std::getenv("COYOTE_LIBS")) for (const std::string& d : splitPathList(env)) dirs.push_back(d);
         std::error_code ec;
         fs::path dir = fs::absolute(fs::path(baseDirOf(fromFile)), ec);
@@ -263,8 +269,21 @@ private:
         for (int i : mine)
             for (int j : mine)
                 if (i != j) out_.modules[static_cast<size_t>(i)].libSiblings.push_back(j);
-        libs_[key] = mine;
+        libs_[key] = mine;  // provisional: a library that (indirectly) requires itself sees only its own files
         idxs = mine;
+        for (int i : mine) out_.modules[static_cast<size_t>(i)].libRequires = lib.requires_;
+        // `requires`: the required libraries load with this one and are visible to whoever uses it.
+        for (const std::string& req : lib.requires_) {
+            ImportDecl r;
+            r.loc = imp.loc;
+            r.spec = req;
+            r.isUse = true;
+            std::vector<int> more;
+            if (!useLib(libPath, r, more)) return false;
+            for (int m : more)
+                if (std::find(idxs.begin(), idxs.end(), m) == idxs.end()) idxs.push_back(m);
+        }
+        libs_[key] = idxs;
         return true;
     }
 
@@ -280,6 +299,7 @@ private:
         const std::vector<ImportDecl> imports = out_.modules[mi].imports;
         const std::vector<int> siblings = out_.modules[mi].libSiblings;
         const std::string libName = out_.modules[mi].libName;
+        const std::vector<std::string> libRequires = out_.modules[mi].libRequires;
         std::vector<int> resolved;
         std::vector<ImportDecl> shown;  // parallel to `resolved`; a `use` expands to one entry per file of the library
         auto push = [&](const ImportDecl& imp, int idx) { shown.push_back(imp); resolved.push_back(idx); };
@@ -323,6 +343,16 @@ private:
             }
             push(imp, add(target, text));
         }
+        // A library file also sees the libraries its .lib requires.
+        for (const std::string& req : libRequires) {
+            ImportDecl r;
+            r.loc = SourceLoc{};
+            r.spec = req;
+            r.isUse = true;
+            std::vector<int> idxs;
+            if (!useLib(file, r, idxs)) { push(r, -1); continue; }
+            for (int i : idxs) push(r, i);
+        }
         // The files of one library see each other's exports.
         for (int sib : siblings) {
             ImportDecl self;
@@ -335,6 +365,8 @@ private:
 };
 
 } // namespace
+
+void setExtraLibDirs(std::vector<std::string> dirs) { extraLibDirs() = std::move(dirs); }
 
 bool loadProgram(const std::string& entryPath, Program& out, std::vector<Diagnostic>& diagnostics,
                  std::string& readError) {

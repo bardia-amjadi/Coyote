@@ -48,6 +48,7 @@ struct Manifest {
     std::string name;
     std::string version;
     std::string entry = "app.coy";
+    std::vector<std::string> requires_;         // library projects only: other libraries to load together
     std::string type = "app";                   // "app" (runnable) or "library" (packed into a .lib)
     std::map<std::string, Workflow> workflows;  // declared plus synthesized defaults
     std::vector<Dependency> dependencies;       // sorted by name

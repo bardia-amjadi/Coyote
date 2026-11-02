@@ -1,0 +1,20 @@
+# Standard.Time: clocks, pauses and date formatting (the "time" permission, granted by default).
+hand:time uptimeMs(): int
+hand:time unixSeconds(): int
+hand:time sleep(int ms)
+hand:time format(int unixSeconds, string format, boolean utc): string
+
+export class Time {
+    # Milliseconds since the program first asked (wraps after about 24 days).
+    public static method UptimeMs(): int { return uptimeMs() }
+    # Seconds since 1970-01-01 UTC.
+    public static method UnixSeconds(): int { return unixSeconds() }
+    # Pauses for 0 to 60000 milliseconds.
+    public static method Sleep(int ms) { sleep(ms) }
+    # Formats a Unix time in the local time zone with strftime codes: Time.Format(Time.UnixSeconds(), "%Y-%m-%d %H:%M:%S").
+    public static method Format(int seconds, string pattern): string { return format(seconds, pattern, false) }
+    # The same in UTC.
+    public static method FormatUtc(int seconds, string pattern): string { return format(seconds, pattern, true) }
+    # The current local time formatted with strftime codes.
+    public static method Now(string pattern): string { return format(unixSeconds(), pattern, false) }
+}

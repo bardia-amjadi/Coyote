@@ -29,7 +29,7 @@ void usage(std::ostream& os) {
        << "usage:\n"
        << "  coyote build <file.coy> [-o <out.ml>]   compile to textual ML ('-o -' writes to stdout)\n"
        << "  coyote check <file.coy>                 report diagnostics without writing output\n"
-       << "  coyote run <file.coy>                   compile and run on the PVM\n"
+       << "  coyote run <file.coy> [-- args...]      compile and run on the PVM (all permissions; args via Environment.Arg)\n"
        << "  coyote lib pack <project-dir> [-o <file.lib>] | lib info <file.lib>   build / inspect a library (docs/libraries.md)\n"
        << "  coyote pvm|cpx|cpm|cdt|llvm <args...>  run the named tool of this toolchain\n"
        << "  coyote --version | --help\n"
@@ -83,7 +83,7 @@ int compile(const std::string& path, bool write, const std::string& outPath) {
 
 // `coyote run`: compiles to a temporary ML file and runs it with the sibling `pvm`. The PVM's exit
 // code is returned. The compiler and the PVM still share nothing but the ML file.
-int runSource(const std::string& input, const std::string& selfDir) {
+int runSource(const std::string& input, const std::string& selfDir, const std::vector<std::string>& progArgs) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::path dir = fs::temp_directory_path(ec);
@@ -92,7 +92,12 @@ int runSource(const std::string& input, const std::string& selfDir) {
     fs::path ml = dir / ("coyote-run-" + std::to_string(stamp) + "-" + std::to_string(std::rand()) + ".ml");
     int rc = compile(input, true, ml.string());
     if (rc != 0) { fs::remove(ml, ec); return rc; }
-    coyote::pkg::ProcessResult r = coyote::pkg::runProcess({"pvm", ml.string()}, selfDir);
+    coyote::pkg::ProcessResult r = [&] {
+        // `run` is for programs the user wrote and started: every permission, output shown as it is produced.
+        std::vector<std::string> cmd = {"pvm", "--allow-all", "--unbuffered", ml.string()};
+        if (!progArgs.empty()) { cmd.push_back("--"); cmd.insert(cmd.end(), progArgs.begin(), progArgs.end()); }
+        return coyote::pkg::runProcess(cmd, selfDir);
+    }();
     fs::remove(ml, ec);
     if (!r.started) { std::cerr << "coyote: error: " << r.error << "\n"; return 127; }
     return r.exitCode;
@@ -119,7 +124,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string input, output;
+    std::vector<std::string> progArgs;
     for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--" && cmd == "run") { progArgs.assign(args.begin() + static_cast<std::ptrdiff_t>(i) + 1, args.end()); break; }
         if (args[i] == "-o" && cmd == "build") {
             if (i + 1 >= args.size()) { std::cerr << "coyote: error: '-o' needs a value\n"; return 2; }
             output = args[++i];
@@ -135,6 +142,6 @@ int main(int argc, char** argv) {
     }
     if (input.empty()) { std::cerr << "coyote: error: no input file\n"; return 2; }
     if (output.empty()) output = defaultOutput(input);
-    if (cmd == "run") return runSource(input, coyote::pkg::executableDir(argv[0]));
+    if (cmd == "run") return runSource(input, coyote::pkg::executableDir(argv[0]), progArgs);
     return compile(input, cmd == "build", output);
 }

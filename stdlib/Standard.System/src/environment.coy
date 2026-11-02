@@ -1,0 +1,38 @@
+# Standard.System: environment variables, program arguments, exit. Needs the "system" permission (granted by Coyote Studio and `coyote run`).
+hand:env get(string name): string
+hand:env has(string name): boolean
+hand:env set(string name, string value)
+hand:sys argCount(): int
+hand:sys arg(int index): string
+hand:sys exit(int code)
+hand:sys cwd(): string
+hand:sys os(): string
+hand:sys homeDir(): string
+
+export class Environment {
+    # The value of an environment variable; "" when it is not set.
+    public static method Get(string name): string { return get(name) }
+    # true when the variable is set.
+    public static method Has(string name): boolean { return has(name) }
+    # Sets a variable for this program only.
+    public static method Set(string name, string value) { set(name, value) }
+    # Number of program arguments (`coyote run file.coy -- a b` has 2).
+    public static method ArgCount(): int { return argCount() }
+    public static method Arg(int index): string { return arg(index) }
+    # All program arguments.
+    public static method Args(): array<string> {
+        array<string> a = new array<string>(0)
+        int i = 0
+        while (i < argCount()) {
+            a.push(arg(i))
+            i = i + 1
+        }
+        return a
+    }
+    # Ends the program now with an exit code (0 = success).
+    public static method Exit(int code) { exit(code) }
+    public static method CurrentDirectory(): string { return cwd() }
+    # "windows", "linux" or "macos".
+    public static method OS(): string { return os() }
+    public static method HomeDirectory(): string { return homeDir() }
+}

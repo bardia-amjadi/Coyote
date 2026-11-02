@@ -85,7 +85,7 @@ std::string describeValue(const Module& m, const Value& v, int depth) {
 } // namespace
 
 void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap& heap, DebugHook* hook) {
-    HostContext ctx{out, registry.input()};
+    HostContext ctx = registry.context(out);
     std::vector<Value> stack;
     std::vector<Frame> frames;
     std::vector<Value> globals;  // version 5; GC roots
@@ -274,6 +274,9 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             case Op::HostCall: {
                 const HostDecl& decl = m.hosts[static_cast<size_t>(in.host)];
                 const HostFunction* hf = registry.find(decl.name);  // presence checked by verify()
+                if (!registry.isGranted(hf->permission))
+                    throw rtError("host function '" + decl.name + "' needs the '" + hf->permission +
+                                  "' permission, which was not granted (run with --allow " + hf->permission + ", or use `coyote run`)");
                 size_t argc = static_cast<size_t>(in.ival);
                 std::vector<Value> args(stack.end() - static_cast<std::ptrdiff_t>(argc), stack.end());
                 stack.resize(stack.size() - argc);

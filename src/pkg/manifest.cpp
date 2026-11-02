@@ -260,11 +260,11 @@ Manifest loadManifest(const std::string& text) {
     }
     if (root.kind != Json::Object) bad(root, "packages.json must contain a JSON object");
 
-    static const std::set<std::string> known = {"schemaVersion", "name", "version", "entry", "type", "workflows", "dependencies"};
+    static const std::set<std::string> known = {"schemaVersion", "name", "version", "entry", "type", "requires", "workflows", "dependencies"};
     for (const auto& m : root.members)
         if (!known.count(m.first)) {
             Json at = m.second;
-            bad(at, "unknown key '" + m.first + "' (known keys: schemaVersion, name, version, entry, type, workflows, dependencies)");
+            bad(at, "unknown key '" + m.first + "' (known keys: schemaVersion, name, version, entry, type, requires, workflows, dependencies)");
         }
 
     Manifest m;
@@ -286,6 +286,13 @@ Manifest loadManifest(const std::string& text) {
     if (const Json* t = root.find("type")) {
         if (t->kind != Json::String || (t->string != "app" && t->string != "library")) bad(*t, "'type' must be \"app\" or \"library\"");
         m.type = t->string;
+    }
+    if (const Json* rq = root.find("requires")) {
+        if (rq->kind != Json::Array) bad(*rq, "'requires' must be an array of library names");
+        for (const Json& item : rq->items) {
+            if (item.kind != Json::String) bad(item, "'requires' entries must be strings");
+            m.requires_.push_back(item.string);
+        }
     }
     if (const Json* e = root.find("entry")) {
         checkEntry(*e);

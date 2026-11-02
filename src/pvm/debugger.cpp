@@ -140,4 +140,82 @@ bool StdioDebugger::commandLoop(const DebugView& view) {
     return false;  // stdin closed: stop the program
 }
 
+bool jsonUnquote(const std::string& q, std::string& out) {
+    out.clear();
+    size_t i = 0;
+    while (i < q.size() && q[i] == ' ') ++i;
+    if (i >= q.size() || q[i] != '"') return false;
+    ++i;
+    auto hex4 = [&](size_t at, unsigned& v) {
+        if (at + 4 > q.size()) return false;
+        v = 0;
+        for (size_t k = 0; k < 4; ++k) {
+            char c = q[at + k];
+            v <<= 4;
+            if (c >= '0' && c <= '9') v |= static_cast<unsigned>(c - '0');
+            else if (c >= 'a' && c <= 'f') v |= static_cast<unsigned>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v |= static_cast<unsigned>(c - 'A' + 10);
+            else return false;
+        }
+        return true;
+    };
+    auto utf8 = [&](unsigned cp) {
+        if (cp < 0x80) out += static_cast<char>(cp);
+        else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+    };
+    for (; i < q.size(); ++i) {
+        char c = q[i];
+        if (c == '"') return true;
+        if (c != '\\') { out += c; continue; }
+        if (++i >= q.size()) return false;
+        switch (q[i]) {
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case '/': out += '/'; break;
+            case '\\': out += '\\'; break;
+            case '"': out += '"'; break;
+            case 'u': {
+                unsigned v = 0;
+                if (!hex4(i + 1, v)) return false;
+                i += 4;
+                if (v >= 0xD800 && v < 0xDC00 && i + 6 < q.size() + 0 && q[i + 1] == '\\' && q[i + 2] == 'u') {
+                    unsigned lo = 0;
+                    if (hex4(i + 3, lo) && lo >= 0xDC00 && lo < 0xE000) { v = 0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
+                }
+                utf8(v);
+                break;
+            }
+            default: return false;
+        }
+    }
+    return false;
+}
+
+DebugInput::int_type DebugInput::underflow() {
+    if (eof_) return traits_type::eof();
+    dbg_.event("{\"event\":\"inputRequested\"}");
+    std::string cmdLine;
+    while (std::getline(in_, cmdLine)) {
+        if (!cmdLine.empty() && cmdLine.back() == '\r') cmdLine.pop_back();
+        if (cmdLine.rfind("stdin ", 0) == 0) {
+            std::string text;
+            if (!jsonUnquote(cmdLine.substr(6), text)) {
+                dbg_.event("{\"event\":\"error\",\"message\":\"stdin needs a JSON string\"}");
+                continue;
+            }
+            line_ = text + "\n";
+            setg(&line_[0], &line_[0], &line_[0] + line_.size());
+            return traits_type::to_int_type(line_[0]);
+        }
+        if (cmdLine == "stdineof" || cmdLine == "quit") break;
+    }
+    eof_ = true;
+    return traits_type::eof();
+}
+
 } // namespace pvm

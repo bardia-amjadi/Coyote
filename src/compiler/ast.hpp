@@ -226,6 +226,7 @@ struct Module {
     std::vector<int> importIndex;     // resolved module of each import (filled by the loader)
     std::vector<int> libSiblings;     // other files of the same .lib (they see each other's exports)
     std::string libName;              // non-empty for a file that came out of a .lib
+    std::vector<std::string> libRequires;  // libraries that .lib asks to load with it (made visible to this file)
 };
 
 struct Program {

@@ -6,6 +6,7 @@ namespace {
 
 Value writeText(const std::string& text, HostContext& ctx) {
     ctx.out << text;
+    if (ctx.unbuffered) ctx.out.flush();
     if (!ctx.out) throw HostError{"failed to write to standard output"};
     return Value::none();
 }
@@ -87,10 +88,12 @@ double checkedDouble(double v, const char* fn) {
 
 void registerAllHosts(HostRegistry& r) {
     registerConsoleHosts(r);
+    registerSystemHosts(r);
 
     // con: input
     r.add(HostFunction{"con.readLine", sig({}, Type::String), "console", [](const std::vector<Value>&, HostContext& c) {
         if (!c.in) throw HostError{"no input is available in this mode"};
+        c.out.flush();  // show the prompt before waiting
         std::string line;
         if (!std::getline(*c.in, line)) return Value::ofString("");
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -138,6 +141,20 @@ void registerAllHosts(HostRegistry& r) {
         size_t p = a[0].s.find(a[1].s);
         if (p == std::string::npos) return Value::ofInt(-1);
         return Value::ofInt(static_cast<long long>(cpStarts(a[0].s.substr(0, p)).size()));
+    }});
+    r.add(HostFunction{"text.replace", sig({Type::String, Type::String, Type::String}, Type::String), "", [](const std::vector<Value>& a, HostContext&) {
+        if (a[1].s.empty()) throw HostError{"replace: the text to find is empty"};
+        std::string out;
+        size_t pos = 0;
+        for (;;) {
+            size_t f = a[0].s.find(a[1].s, pos);
+            if (f == std::string::npos) { out.append(a[0].s, pos, std::string::npos); break; }
+            out.append(a[0].s, pos, f - pos);
+            out += a[2].s;
+            pos = f + a[1].s.size();
+            if (out.size() > 64u * 1024u * 1024u) throw HostError{"replace: the result is larger than 64 MiB"};
+        }
+        return Value::ofString(out);
     }});
     r.add(HostFunction{"text.upper", sig({Type::String}, Type::String), "", [](const std::vector<Value>& a, HostContext&) {
         std::string s = a[0].s;
@@ -189,6 +206,13 @@ void registerAllHosts(HostRegistry& r) {
     r.add(HostFunction{"random.nextDouble", sig({}, Type::Double), "random", [](const std::vector<Value>&, HostContext&) {
         return Value::ofDouble(std::uniform_real_distribution<double>(0.0, 1.0)(rng()));
     }});
+}
+
+void grantAllPermissions(HostRegistry& r) {
+    grantDefaultPermissions(r);
+    r.grant("file");
+    r.grant("system");
+    r.grant("net");
 }
 
 void grantDefaultPermissions(HostRegistry& r) {

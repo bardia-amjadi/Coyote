@@ -25,6 +25,7 @@ function start(cmd, args, { cwd, env, onStdout, onStderr } = {}) {
     get child() { return child; },
     kill() { if (child && !child.killed) child.kill(); },
     write(text) { if (child && child.stdin.writable) child.stdin.write(text); },
+    closeStdin() { if (child && child.stdin.writable) child.stdin.end(); },
   };
 }
 

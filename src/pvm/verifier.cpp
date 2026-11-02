@@ -551,9 +551,8 @@ void verify(Module& m, const HostRegistry& registry, const std::string& file) {
         if (!sameSig(hf->sig, h.sig))
             fail(file, h.mlLine, "host function '" + h.name + "' is declared as " + sigToString(h.sig) +
                                      " but the PVM provides " + sigToString(hf->sig));
-        if (!registry.isGranted(hf->permission))
-            fail(file, h.mlLine, "host function '" + h.name + "' requires permission '" + hf->permission +
-                                     "' which was not granted (use --allow " + hf->permission + ")");
+        // The permission is checked when the function is *called* (interpreter.cpp), so a program may declare
+        // host functions it never reaches (a library bundles many) without being granted all of them.
     }
 
     // Classes and globals (version 5): names are unique and every class type refers to a declared class.

@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULTS = { toolchainDir: '', recent: [], theme: 'dark', fontSize: 14, formatOnSave: false, checkOnType: true };
+const DEFAULTS = { toolchainDir: '', recent: [], theme: 'dark', fontSize: 14, fontFamily: '', tabSize: 4, minimap: false, wordWrap: false, autoSave: 'off', formatOnSave: false, checkOnType: true, lastProjectDir: '', sidebarWidth: 280, panelHeight: 260 };
 
 class Settings {
   constructor(file) {

@@ -203,3 +203,50 @@ withTools('packLibrary builds out/<name>.lib and can install it for the user; th
   assert.strictEqual(bad.ok, false);
   assert.match(bad.output, /tools\.coy:1/);
 });
+
+// ---- language index (renderer/langindex.js) ----
+const L = require('../renderer/langindex.js');
+test('langindex: indexes classes, members, docs and hand declarations', () => {
+  const ix = L.indexSource('use "Standard"\nhand:con println(string text)\n# A counter.\nexport class Counter {\n    # Adds one.\n    public static method Bump(int by): int { return by + 1 }\n    property int Count\n    string label\n}\nmethod helper(): int { return 1 }\n');
+  assert.deepStrictEqual(ix.uses.map((u) => u.name), ['Standard']);
+  assert.strictEqual(ix.hands[0].name, 'println');
+  const c = ix.classes[0];
+  assert.strictEqual(c.name, 'Counter');
+  assert.ok(c.exported);
+  assert.strictEqual(c.doc, 'A counter.');
+  const bump = c.members.find((m) => m.name === 'Bump');
+  assert.ok(bump.static);
+  assert.strictEqual(bump.doc, 'Adds one.');
+  assert.strictEqual(L.signatureOf(bump), 'static method Bump(int by): int');
+  assert.deepStrictEqual(c.members.map((m) => m.kind), ['method', 'property', 'field']);
+  assert.strictEqual(ix.methods[0].name, 'helper');
+});
+test('langindex: parses .lib bundles with requires and multibyte content', () => {
+  const body = '# ünï\nexport class A { }\n';
+  const bytes = Buffer.byteLength(body);
+  const lib = L.parseLib(`coyote-lib 1\nname Demo\nversion 1.0.0\nrequires Other\nfile a.coy ${bytes}\n${body}`);
+  assert.strictEqual(lib.error, null);
+  assert.deepStrictEqual(lib.requires, ['Other']);
+  assert.strictEqual(lib.files[0].content, body);
+});
+test('langindex: use insertion goes after the last use or the header comment', () => {
+  assert.deepStrictEqual(L.useInsertion('use "A"\nx\n', 'B'), { line: 2, text: 'use "B"\n' });
+  assert.deepStrictEqual(L.useInsertion('# c\nhand:con p(string t)\n', 'B'), { line: 2, text: 'use "B"\n\n' });
+  assert.ok(L.hasUse('use "Standard.IO"\n', 'standard.io'));
+});
+test('langindex: umbrella library makes required libraries visible', () => {
+  const mk = (name, requires, src) => ({ lib: { name, version: '1', requires, files: src ? [{ name: 'a.coy', content: src }] : [], error: null }, path: name });
+  const libs = L.buildLibIndex([mk('Standard', ['Standard.IO'], ''), mk('Standard.IO', [], 'export class Shell {\n    public static method Hi() { }\n}\n')]);
+  const ctx = L.analyze('use "Standard"\nShell.Hi()\n', { libs });
+  assert.ok(ctx.classes.has('Shell'));
+  assert.deepStrictEqual(L.typeOfExpr(ctx, 'Shell', 2), { staticClass: 'Shell' });
+  const ctx2 = L.analyze('Shell.Hi()\n', { libs });
+  assert.ok(!ctx2.classes.has('Shell'));
+});
+test('langindex: resolves variable and chained member types', () => {
+  const ctx = L.analyze('class P {\n    string name\n}\nclass Q {\n    P owner\n}\nvar q = new Q()\narray<P> ps = new array<P>(1)\n', {});
+  assert.deepStrictEqual(L.typeOfExpr(ctx, 'q', 8), { type: 'Q' });
+  assert.deepStrictEqual(L.typeOfExpr(ctx, 'q.owner', 8), { type: 'P' });
+  assert.deepStrictEqual(L.typeOfExpr(ctx, 'ps[0].name', 8), { type: 'string' });
+  assert.deepStrictEqual(L.typeOfExpr(ctx, 'ps', 8), { type: 'array<P>' });
+});

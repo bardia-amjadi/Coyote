@@ -1,0 +1,17 @@
+# Standard.Math: random numbers (the "random" permission, granted by default).
+hand:random seed(int value)
+hand:random nextInt(int low, int high): int
+hand:random nextDouble(): double
+
+export class Random {
+    # Makes the sequence repeatable.
+    public static method Seed(int value) { seed(value) }
+    # A random int from low to high, both included.
+    public static method NextInt(int low, int high): int { return nextInt(low, high) }
+    # A random double from 0.0 (included) up to 1.0.
+    public static method NextDouble(): double { return nextDouble() }
+    # true or false with equal chance.
+    public static method NextBool(): boolean { return nextInt(0, 1) == 1 }
+    # One random element of a non-empty array.
+    public static method PickString(array<string> items): string { return items[nextInt(0, items.length - 1)] }
+}

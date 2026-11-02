@@ -71,6 +71,7 @@ int pack(const std::string& dirArg, std::string outPath, std::ostream& out, std:
     pkg::Lib lib;
     lib.name = m.name;
     lib.version = m.version;
+    lib.requires_ = m.requires_;
     std::vector<fs::path> files;
     for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         const std::string name = it->path().filename().string();
@@ -97,6 +98,11 @@ int pack(const std::string& dirArg, std::string outPath, std::ostream& out, std:
     std::string libName = "check.lib";
     { std::ofstream(tmp / libName, std::ios::binary) << packed; }
     { std::ofstream(tmp / "check.coy", std::ios::binary) << "use \"./check.lib\"\n"; }
+    {
+        // The libraries this one requires are looked up next to the output file, too.
+        fs::path o = outPath.empty() ? fs::path(".") : fs::path(outPath).parent_path();
+        setExtraLibDirs({o.empty() ? "." : o.string()});
+    }
     Program prog;
     std::vector<Diagnostic> diags;
     std::string readError;
