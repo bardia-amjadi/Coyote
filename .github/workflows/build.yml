@@ -154,16 +154,16 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-
+      
           if (-not (Test-Path $iscc)) {
             choco install innosetup --no-progress -y
           }
-
+      
           if (-not (Test-Path $iscc)) {
             throw "Inno Setup compiler (ISCC.exe) was not found."
           }
-
-          &$iscc/?
+      
+          & $iscc /?
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup compiler is not working."
           }
