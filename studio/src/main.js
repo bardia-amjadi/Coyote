@@ -6,13 +6,16 @@ const os = require('os');
 const path = require('path');
 const { findToolchain } = require('./toolchain');
 const { Settings } = require('./settings');
-const { findProjectRoot, readManifest, listDir } = require('./project');
+const { findProjectRoot, readManifest, saveProject, createProjectFile, cleanProject, listDir } = require('./project');
 const actions = require('./actions');
 const { DebugSession } = require('./debug');
 const search = require('./search');
 
 const VERSION = require('../package.json').version;
 let win = null;
+let appWin = null;
+let appWinReady = false;
+let appWinQueue = [];  // the separate window a program runs in
 let settings = null;
 let tc = { dir: null, tools: {}, missing: [] };
 let running = null;  // current run handle
@@ -49,12 +52,35 @@ function createWindow() {
   win.on('closed', () => { win = null; });
 }
 
+function appWinOp(p) {
+  if (!appWin || appWin.isDestroyed()) return;
+  if (appWinReady) appWin.webContents.send('appwin:op', p); else appWinQueue.push(p);
+}
+
+function openAppWindow(title, theme) {
+  if (!appWin || appWin.isDestroyed()) {
+    appWin = new BrowserWindow({
+      width: 900, height: 620, minWidth: 420, minHeight: 280, title: 'Coyote App', backgroundColor: theme === 'light' ? '#ffffff' : '#1e1e1e', autoHideMenuBar: true,
+      webPreferences: { preload: path.join(__dirname, 'appwin-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false },
+    });
+    appWin.setMenuBarVisibility(false);
+    appWin.loadFile(path.join(__dirname, '..', 'renderer', 'appwindow.html'), { query: { theme: theme || 'dark' } });
+    const w = appWin;
+    appWinReady = false;
+    appWinQueue = [];
+    w.webContents.once('did-finish-load', () => { appWinReady = true; for (const p of appWinQueue) w.webContents.send('appwin:op', p); appWinQueue = []; });
+    w.on('closed', () => { if (appWin === w) appWin = null; send('appwin:event', { type: 'closed' }); });
+  } else appWin.show();
+  appWinOp({ op: 'title', a: title || 'Coyote App' });
+}
+
 function buildMenu() {
   const t = (action) => () => send('menu', action);
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: '&File', submenu: [
       { label: 'New Project...', accelerator: 'CmdOrCtrl+Shift+N', click: t('newProject') },
       { label: 'New File', accelerator: 'CmdOrCtrl+N', click: t('newFile') },
+      { label: 'Open Project (.cyproj)...', accelerator: 'CmdOrCtrl+Alt+O', click: t('openProject') },
       { label: 'Open Folder...', accelerator: 'CmdOrCtrl+K CmdOrCtrl+O', click: t('openFolder') },
       { label: 'Open File...', accelerator: 'CmdOrCtrl+O', click: t('openFile') },
       { type: 'separator' },
@@ -65,6 +91,15 @@ function buildMenu() {
       { role: 'quit' }] },
     { label: '&Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
       { type: 'separator' }, { label: 'Format Document', accelerator: 'Shift+Alt+F', click: t('format') }] },
+    { label: '&Build', submenu: [
+      { label: 'Build Project', accelerator: 'F7', click: t('build') },
+      { label: 'Rebuild Project', accelerator: 'Ctrl+Shift+F7', click: t('rebuild') },
+      { label: 'Clean Project', click: t('clean') },
+      { type: 'separator' },
+      { label: 'Open Output Folder', click: t('openOutput') },
+      { label: 'Project Properties...', click: t('viewProject') },
+      { type: 'separator' },
+      { label: 'Build and Install Library for Me', click: t('installLib') }] },
     { label: '&Run', submenu: [
       { label: 'Run File', accelerator: 'F5', click: t('run') },
       { label: 'Run Project (cpx start)', accelerator: 'Ctrl+F5', click: t('runProject') },
@@ -79,9 +114,6 @@ function buildMenu() {
     { label: '&Tools', submenu: [
       { label: 'Check File', click: t('check') },
       { label: 'Show ML', click: t('showMl') },
-      { label: 'Build Native Executable...', click: t('native') },
-      { label: 'Build Library (.lib)', click: t('packLib') },
-      { label: 'Build and Install Library for Me', click: t('installLib') },
       { label: 'Open My Libraries Folder', click: t('libFolder') },
       { label: 'Reload Libraries', click: t('reloadLibs') },
       { label: 'Install Packages (cpm install)', click: t('cpmInstall') },
@@ -93,6 +125,7 @@ function buildMenu() {
       { label: 'Go to Symbol in Project...', accelerator: 'CmdOrCtrl+T', click: t('goSymbolWorkspace') },
       { type: 'separator' },
       { label: 'Explorer', accelerator: 'CmdOrCtrl+Shift+E', click: t('viewExplorer') },
+      { label: 'Project Manager', accelerator: 'CmdOrCtrl+Shift+J', click: t('viewProject') },
       { label: 'Find in Files', accelerator: 'CmdOrCtrl+Shift+F', click: t('viewSearch') },
       { label: 'Run and Debug', accelerator: 'CmdOrCtrl+Shift+D', click: t('viewDebug') },
       { label: 'Libraries', accelerator: 'CmdOrCtrl+Shift+L', click: t('viewLibs') },
@@ -122,7 +155,7 @@ function handle(channel, fn) {
 }
 
 function registerIpc() {
-  handle('app:info', () => ({ version: VERSION, toolchain: tc, platform: process.platform, settings: settings.data, home: os.homedir(), docs: docPath('language.md') }));
+  handle('app:info', () => ({ version: VERSION, toolchain: tc, platform: process.platform, settings: settings.data, defaults: require('./settings').DEFAULTS, home: os.homedir(), docs: docPath('language.md') }));
   handle('app:setSetting', (k, v) => { settings.set(k, v); if (k === 'toolchainDir') refreshToolchain(); return { ok: true, toolchain: tc }; });
   handle('app:versions', () => actions.versions(tc));
   handle('app:doctor', () => actions.doctor(tc));
@@ -134,6 +167,10 @@ function registerIpc() {
   handle('dialog:openFile', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Coyote', extensions: ['coy'] }, { name: 'All files', extensions: ['*'] }] });
     return r.canceled ? null : r.filePaths[0];
+  });
+  handle('dialog:openProject', async () => {
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Coyote project', extensions: ['cyproj', 'json'] }, { name: 'All files', extensions: ['*'] }] });
+    return r.canceled ? null : path.dirname(r.filePaths[0]);
   });
   handle('dialog:saveAs', async (def) => {
     const r = await dialog.showSaveDialog(win, { defaultPath: def, filters: [{ name: 'Coyote', extensions: ['coy'] }] });
@@ -172,10 +209,13 @@ function registerIpc() {
     const dir = path.join(parent, name);
     if (fs.existsSync(dir) && fs.readdirSync(dir).length) return { ok: false, error: 'the folder already exists and is not empty' };
     fs.mkdirSync(dir, { recursive: true });
-    const r = await require('./runner').capture(tc.tools.cpm, ['-C', dir, 'init', name, ...(kind === 'library' ? ['--library'] : [])], { cwd: dir });
+    const r = await require('./runner').capture(tc.tools.cpm, ['-C', dir, 'init', name, '--cyproj', ...(kind === 'library' ? ['--library'] : [])], { cwd: dir });
     return { ok: r.code === 0, dir, error: (r.stderr || r.stdout || r.error || '').trim() };
   });
 
+  handle('project:save', (root, patch) => ({ ok: true, manifest: saveProject(root, patch) }));
+  handle('project:createFile', (dir, name, entry) => { const f = createProjectFile(dir, name, entry); return { ok: true, file: f, manifest: readManifest(dir) }; });
+  handle('project:clean', (root) => ({ ok: true, removed: cleanProject(root) }));
   handle('lib:pack', (root, install) => actions.packLibrary(tc, root, !!install));
   handle('tool:check', (file, cwd) => actions.check(tc, file, cwd));
   handle('tool:checkText', (file, text, cwd) => actions.checkText(tc, file, text, cwd));
@@ -187,7 +227,6 @@ function registerIpc() {
   handle('shell:openExternal', (url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); return { ok: true }; });
   handle('tool:format', (file, cwd) => actions.format(tc, file, cwd));
   handle('tool:showMl', (file, cwd) => actions.showMl(tc, file, cwd));
-  handle('tool:native', (file, out, cwd) => actions.buildNative(tc, file, out, cwd));
 
   handle('run:file', (file, cwd) => {
     if (running) return { ok: false, error: 'something is already running' };
@@ -210,6 +249,10 @@ function registerIpc() {
     h.done.then((r) => { if (running === h) running = null; send('run:exit', { code: r.code, phase: 'run', error: r.error }); });
     return { ok: true };
   });
+  handle('appwin:open', (title, theme) => { openAppWindow(title, theme); return { ok: true }; });
+  handle('appwin:close', () => { if (appWin && !appWin.isDestroyed()) appWin.close(); return { ok: true }; });
+  ipcMain.on('appwin:event', (_e, p) => send('appwin:event', p));
+  ipcMain.on('appwin:op', (_e, p) => appWinOp(p));
   handle('run:stdin', (text) => { if (running) running.write(text); else if (session) session.sendInput(text.replace(/\r?\n$/, '')); return { ok: true }; });
   handle('run:closeStdin', () => { if (running) running.closeStdin(); if (session) session.endInput(); return { ok: true }; });
   handle('run:stdinDebug', (text) => { if (session) session.sendInput(text); return { ok: true }; });

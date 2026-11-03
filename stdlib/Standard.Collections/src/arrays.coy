@@ -1,0 +1,81 @@
+# Standard.Collections: helpers for plain arrays. Generic methods need their type argument:
+#   int i = Arrays.IndexOfInt(xs, 3)     or   ArrayTools.Reverse<string>(names)
+
+# Helpers for array<int>, array<double> and array<string>.
+export class Arrays {
+    public static method SumInt(array<int> xs): int {
+        int total = 0
+        for (var x in xs) { total = total + x }
+        return total
+    }
+    public static method SumDouble(array<double> xs): double {
+        double total = 0.0
+        for (var x in xs) { total = total + x }
+        return total
+    }
+    public static method MaxInt(array<int> xs): int {
+        int best = xs[0]
+        for (var x in xs) { if (x > best) { best = x } }
+        return best
+    }
+    public static method MinInt(array<int> xs): int {
+        int best = xs[0]
+        for (var x in xs) { if (x < best) { best = x } }
+        return best
+    }
+    public static method AverageInt(array<int> xs): double { return double(SumInt(xs)) / double(xs.length) }
+    public static method AverageDouble(array<double> xs): double { return SumDouble(xs) / double(xs.length) }
+    # Sorts a copy of the numbers, smallest first (insertion sort; fine for a few thousand elements).
+    public static method SortInt(array<int> xs): array<int> {
+        array<int> r = xs.copy()
+        int i = 1
+        while (i < r.length) {
+            int v = r[i]
+            int j = i - 1
+            while (j >= 0 && r[j] > v) {
+                r[j + 1] = r[j]
+                j = j - 1
+            }
+            r[j + 1] = v
+            i = i + 1
+        }
+        return r
+    }
+    public static method SortDouble(array<double> xs): array<double> {
+        array<double> r = xs.copy()
+        int i = 1
+        while (i < r.length) {
+            double v = r[i]
+            int j = i - 1
+            while (j >= 0 && r[j] > v) {
+                r[j + 1] = r[j]
+                j = j - 1
+            }
+            r[j + 1] = v
+            i = i + 1
+        }
+        return r
+    }
+}
+
+# A new array with the elements in reverse order.
+export method Reversed<T>(array<T> xs): array<T> {
+    array<T> r = new array<T>(0)
+    int i = xs.length - 1
+    while (i >= 0) {
+        r.push(xs[i])
+        i = i - 1
+    }
+    return r
+}
+# Index of the first element equal to value, or -1.
+export method IndexOfValue<T>(array<T> xs, T value): int {
+    int i = 0
+    while (i < xs.length) {
+        if (xs[i] == value) { return i }
+        i = i + 1
+    }
+    return -1
+}
+# true when the array contains value.
+export method ContainsValue<T>(array<T> xs, T value): boolean { return IndexOfValue<T>(xs, value) >= 0 }

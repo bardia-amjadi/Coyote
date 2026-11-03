@@ -59,31 +59,19 @@ function runWorkflow(tc, root, workflow, { onOut, onErr } = {}) {
   return runner.start(need(tc, 'cpx'), ['-C', root, workflow], { cwd: root, onStdout: (d) => onOut && onOut(d), onStderr: (d) => onErr && onErr(d) });
 }
 
-// Compiles to ML and then to a native executable with coyote-llvm (a subset of the language).
-async function buildNative(tc, file, outExe, cwd) {
-  const tmp = tempDir();
-  try {
-    const ml = path.join(tmp, 'program.ml');
-    const b = await runner.capture(need(tc, 'coyote'), ['build', file, '-o', ml], { cwd });
-    if (b.code !== 0) return { ok: false, phase: 'compile', output: (b.stderr || b.stdout || b.error || '').trim() };
-    const n = await runner.capture(need(tc, 'coyote-llvm'), ['-o', outExe, ml], { cwd });
-    return { ok: n.code === 0, phase: 'native', output: (n.stderr || n.stdout || n.error || '').trim() };
-  } finally {
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-  }
-}
-
 // Compiles to ML text (for the "show ML" view).
 async function showMl(tc, file, cwd) {
   const r = await runner.capture(need(tc, 'coyote'), ['build', file, '-o', '-'], { cwd });
   return { ok: r.code === 0, text: r.code === 0 ? r.stdout : (r.stderr || r.error || '').trim() };
 }
 
-// Packs a library project (packages.json with "type": "library") into out/<name>.lib; with `install`
+// Packs a library project (project file with "type": "library") into out/<name>.lib; with `install`
 // the file is also copied to the current user's library folder (~/coyote/libs), where `use "Name"` finds it.
 async function packLibrary(tc, root, install) {
   let name;
-  try { name = String(JSON.parse(fs.readFileSync(path.join(root, 'packages.json'), 'utf8')).name || ''); } catch (e) { return { ok: false, output: 'cannot read packages.json: ' + e.message }; }
+  const info = require('./project').readManifest(root);
+  if (!info.ok) return { ok: false, output: 'cannot read the project file: ' + info.error };
+  name = String(info.manifest.name || '');
   const outFile = path.join(root, 'out', name.toLowerCase() + '.lib');
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   const r = await runner.capture(need(tc, 'coyote'), ['lib', 'pack', root, '-o', outFile], { cwd: root });
@@ -176,4 +164,4 @@ function readLibs(tc, projectRoot) {
   return { dirs: libDirs(tc, projectRoot), libs: out };
 }
 
-module.exports = { formatText, checkText, libDirs, readLibs, check, format, runFile, runWorkflow, buildNative, showMl, packLibrary, userLibsDir, cpm, doctor, versions };
+module.exports = { formatText, checkText, libDirs, readLibs, check, format, runFile, runWorkflow, showMl, packLibrary, userLibsDir, cpm, doctor, versions };

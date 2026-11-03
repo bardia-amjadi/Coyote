@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULTS = { toolchainDir: '', recent: [], theme: 'dark', fontSize: 14, fontFamily: '', tabSize: 4, minimap: false, wordWrap: false, autoSave: 'off', formatOnSave: false, checkOnType: true, lastProjectDir: '', sidebarWidth: 280, panelHeight: 260 };
+const DEFAULTS = { toolchainDir: '', recent: [], theme: 'dark', fontSize: 14, fontFamily: '', tabSize: 4, minimap: false, wordWrap: false, autoSave: 'off', formatOnSave: false, checkOnType: true, lastProjectDir: '', appWindow: 'debug', accentColor: '', themeColors: {}, syntaxColors: {}, uiFontSize: 13, density: 'comfortable', terminalFontSize: 13, fontLigatures: false, lineHeight: 0, lineNumbers: 'on', renderWhitespace: 'selection', cursorStyle: 'line', cursorBlinking: 'blink', smoothScrolling: true, bracketPairs: true, indentGuides: true, stickyScroll: true, quickSuggestions: true, acceptOnEnter: 'on', parameterHints: true, suggestImports: true, clearOutputOnBuild: true, sidebarWidth: 280, panelHeight: 260 };
 
 class Settings {
   constructor(file) {

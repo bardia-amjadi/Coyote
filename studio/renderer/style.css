@@ -122,7 +122,7 @@ button.toggle.on { background: var(--accent); color: var(--accent-fg); }
 button.mini { font-size: 11px; padding: 1px 6px; }
 .badge { background: var(--accent); color: var(--accent-fg); border-radius: 8px; padding: 0 5px; font-size: 10px; }
 .badge:empty { display: none; }
-.pane { flex: 1; overflow: auto; padding: 4px 12px; font: 13px Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-word; }
+.pane { flex: 1; overflow: auto; padding: 4px 12px; font: var(--term-size, 13px) Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-word; }
 #pane-terminal { cursor: text; }
 .pane a { color: var(--link); cursor: pointer; text-decoration: underline; }
 .err { color: var(--err); } .good { color: var(--ok); } .info { color: var(--muted); } .stdin { color: #c8b6ff; }
@@ -177,3 +177,39 @@ button.mini { font-size: 11px; padding: 1px 6px; }
 .debug-glyph { background: #ffcc00; clip-path: polygon(0 20%, 60% 20%, 60% 0, 100% 50%, 60% 100%, 60% 80%, 0 80%); margin-left: 2px; width: 14px !important; }
 .debug-line { background: rgba(255, 204, 0, .22); }
 .lib-ro-banner { background: var(--warn); color: #000; }
+
+/* Project Manager */
+.pm-head { padding: 8px 12px 2px; display: flex; flex-direction: column; gap: 2px; }
+.pm-head b { font-size: 14px; }
+.pm-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+.pm-actions button { padding: 3px 10px; }
+.pm-form { display: grid; grid-template-columns: 92px 1fr; gap: 6px 8px; padding: 6px 12px 10px; align-items: center; }
+.pm-form label { color: var(--muted); font-size: 12px; }
+.pm-form label.wide { grid-column: 1 / span 2; color: inherit; }
+.pm-form input[type=text], .pm-form select, .pm-form textarea { width: 100%; box-sizing: border-box; background: var(--input); color: inherit; border: 1px solid var(--border); border-radius: 3px; padding: 4px 6px; font: inherit; }
+.pm-form textarea { resize: vertical; }
+#pm-files .row { padding: 2px 12px; cursor: pointer; display: flex; gap: 6px; }
+#pm-files .row.entry b { color: var(--accent); }
+
+/* ---------- settings page ---------- */
+#settings-page { position: fixed; inset: 0; z-index: 55; background: var(--bg); display: flex; flex-direction: column; }
+#set-head { display: flex; align-items: center; gap: 14px; padding: 10px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); }
+#set-head b { font-size: 15px; } #set-search { width: 320px; }
+#set-main { flex: 1; display: flex; min-height: 0; }
+#set-nav { width: 210px; background: var(--bg2); border-right: 1px solid var(--border); padding: 10px 0; display: flex; flex-direction: column; overflow: auto; }
+#set-nav button { border-radius: 0; border: none; border-left: 3px solid transparent; padding: 8px 18px; text-align: left; width: 100%; justify-content: flex-start; }
+#set-nav button.active { background: var(--sel); border-left-color: var(--accent); }
+#set-body { flex: 1; overflow: auto; padding: 18px 34px 60px; max-width: 900px; }
+#set-body h4 { margin: 4px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.srow { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.slabel { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sctl { display: flex; align-items: center; gap: 8px; flex: none; }
+.sctl input[type=color] { width: 38px; height: 26px; padding: 0; border: 1px solid var(--border); background: transparent; }
+.sctl code { min-width: 62px; } .srst { opacity: .6; }
+.themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.themecard { border: 2px solid var(--border); border-radius: 6px; padding: 8px; cursor: pointer; background: var(--bg2); }
+.themecard:hover { border-color: var(--muted); } .themecard.sel { border-color: var(--accent); }
+.themecard .sw { display: flex; height: 34px; border-radius: 4px; overflow: hidden; margin-bottom: 6px; } .themecard .sw i { flex: 1; }
+.synprev { margin-top: 16px; padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border); font: 13px Consolas, "Cascadia Mono", monospace; }
+body.density-compact .row { padding-top: 0; padding-bottom: 0; }
+body.density-compact #activitybar button { margin: 0; }

@@ -15,13 +15,20 @@ async function openFolder(dir) {
   $('project-name').textContent = base(dir).toUpperCase();
   await App.renderTree();
   await Promise.all([App.loadWorkspace(), App.loadLibs()]);
-  const entry = r.manifest && r.manifest.ok ? join(r.root, r.manifest.entry) : null;
+  const entry = r.manifest && r.manifest.ok && r.manifest.entry ? join(r.root, r.manifest.entry) : null;
   if (entry) await App.openFile(entry).catch(() => {});
-  const isLib = r.manifest && r.manifest.ok && r.manifest.manifest && r.manifest.manifest.type === 'library';
-  $('btn-packlib').classList.toggle('hidden', !isLib);
-  App.setState(r.root ? 'Project: ' + base(r.root) : 'Folder opened (no packages.json)');
+  updateProjectUi();
+  App.setState(r.root ? 'Project: ' + base(r.root) : 'Folder opened (no project file)');
   refreshRecent();
 }
+
+function updateProjectUi() {
+  const ok = !!(S.manifest && S.manifest.ok);
+  $('btn-build').title = ok ? 'Build the project (F7). What it produces is set in the project file.' : 'Build (needs a project file)';
+  App.renderProjectView();
+  App.snapshotProps();
+}
+App.updateProjectUi = updateProjectUi;
 
 async function newProject() {
   const home = S.info.home;
@@ -60,45 +67,21 @@ async function refreshRecent() {
 }
 
 // ---------- dialogs ----------
-async function showSettings() {
-  const info = await studio.info();
-  const s = info.settings;
-  const sel = (id, opts, v) => `<select id="${id}">${opts.map(([val, lab]) => `<option value="${val}" ${String(v) === val ? 'selected' : ''}>${lab}</option>`).join('')}</select>`;
-  const chk = (id, v, lab) => `<label class="check"><input id="${id}" type="checkbox" ${v ? 'checked' : ''}> ${lab}</label>`;
-  const r = await App.modal(`<h3>Settings</h3>
-    <div class="settings-grid">
-      <label>Theme</label>${sel('s-theme', [['dark', 'Dark'], ['light', 'Light']], s.theme)}
-      <label>Editor font size</label><input id="s-font" type="text" value="${s.fontSize}">
-      <label>Editor font</label><input id="s-family" type="text" value="${esc(s.fontFamily || '')}" placeholder="Cascadia Mono, Consolas, monospace">
-      <label>Tab size</label>${sel('s-tab', [['2', '2'], ['4', '4'], ['8', '8']], s.tabSize || 4)}
-      <label>Auto save</label>${sel('s-auto', [['off', 'Off'], ['afterDelay', 'After a short delay']], s.autoSave || 'off')}
-    </div>
-    ${chk('s-fos', s.formatOnSave, 'Format on save')}
-    ${chk('s-cot', s.checkOnType !== false, 'Check for errors while typing')}
-    ${chk('s-min', s.minimap, 'Show minimap')}
-    ${chk('s-wrap', s.wordWrap, 'Word wrap')}
-    <label>Toolchain folder (empty = the installed Coyote)</label>
-    <input id="s-tc" type="text" value="${esc(s.toolchainDir || '')}">
-    <p class="muted small">Using: ${esc(info.toolchain.dir || 'not found')}</p>`,
-  [{ label: 'Save', primary: true, value: (b) => {
-    const g = (id) => b.querySelector('#' + id);
-    return { theme: g('s-theme').value, fontSize: parseInt(g('s-font').value, 10) || 14, fontFamily: g('s-family').value.trim(), tabSize: parseInt(g('s-tab').value, 10) || 4,
-      autoSave: g('s-auto').value, formatOnSave: g('s-fos').checked, checkOnType: g('s-cot').checked, minimap: g('s-min').checked, wordWrap: g('s-wrap').checked, tc: g('s-tc').value.trim() };
-  } }, { label: 'Cancel', value: () => null }]);
-  if (!r) return;
-  for (const k of ['theme', 'fontSize', 'fontFamily', 'tabSize', 'autoSave', 'formatOnSave', 'checkOnType', 'minimap', 'wordWrap']) await studio.setSetting(k, r[k]);
-  const x = await studio.setSetting('toolchainDir', r.tc);
-  S.info = await studio.info();
-  applySettings();
-  updateToolchainStatus();
-  await App.loadLibs();
-  if (!x.toolchain.dir) App.toast('The Coyote tools were not found in that folder.', 'error');
-}
 function applySettings() {
   const s = S.info.settings;
-  App.applyTheme(s.theme);
-  editor.updateOptions({ fontSize: s.fontSize || 14, fontFamily: s.fontFamily || 'Cascadia Mono, Consolas, monospace', tabSize: s.tabSize || 4, minimap: { enabled: !!s.minimap }, wordWrap: s.wordWrap ? 'on' : 'off' });
+  const d = (k, v) => (s[k] === undefined ? v : s[k]);
+  App.applyTheme();
+  if (!editor) return;
+  editor.updateOptions({
+    fontSize: s.fontSize || 14, fontFamily: s.fontFamily || 'Cascadia Mono, Consolas, monospace', fontLigatures: !!d('fontLigatures', false), lineHeight: d('lineHeight', 0) || 0,
+    tabSize: s.tabSize || 4, minimap: { enabled: !!s.minimap }, wordWrap: s.wordWrap ? 'on' : 'off', lineNumbers: d('lineNumbers', 'on'), renderWhitespace: d('renderWhitespace', 'selection'),
+    cursorStyle: d('cursorStyle', 'line'), cursorBlinking: d('cursorBlinking', 'blink'), smoothScrolling: !!d('smoothScrolling', true), bracketPairColorization: { enabled: !!d('bracketPairs', true) },
+    guides: { bracketPairs: !!d('bracketPairs', true), indentation: !!d('indentGuides', true) }, stickyScroll: { enabled: !!d('stickyScroll', true) },
+    quickSuggestions: d('quickSuggestions', true) ? { other: true, comments: false, strings: true } : false, acceptSuggestionOnEnter: d('acceptOnEnter', 'on'), parameterHints: { enabled: !!d('parameterHints', true) },
+  });
 }
+App.applySettings = applySettings;
+App.updateToolchainStatus = () => updateToolchainStatus();
 async function toggleTheme() {
   const next = S.info.settings.theme === 'light' ? 'dark' : 'light';
   await studio.setSetting('theme', next);
@@ -132,7 +115,7 @@ const MENU = {
   continue: () => S.debug.active && App.debugCmd('resume'), stepOver: () => S.debug.active && App.debugCmd('stepOver'), stepInto: () => S.debug.active && App.debugCmd('stepInto'), stepOut: () => S.debug.active && App.debugCmd('stepOut'),
   toggleBreakpoint: () => App.toggleBreakpoint(),
   check: async () => { const f = App.activeCoy(); if (f) { await App.saveAll(); await App.runCheck(f); App.showTab('problems'); } },
-  showMl: App.showMl, native: App.buildNative, packLib: () => App.packLib(false), installLib: () => App.packLib(true), cpmInstall: App.cpmInstall, doctor: showDoctor, settings: showSettings, about: showAbout,
+  showMl: App.showMl, build: () => App.buildProject('build'), rebuild: () => App.buildProject('rebuild'), clean: () => App.cleanProject(false), openOutput: App.openOutputFolder, viewProject: () => App.showView('project'), openProject: async () => { const d = await studio.dialog.openProject(); if (d) openFolder(d); }, packLib: () => App.packLib(false), installLib: () => App.packLib(true), cpmInstall: App.cpmInstall, doctor: showDoctor, settings: () => App.openSettings(), about: showAbout,
   palette: () => App.openPalette('>'), quickOpen: () => App.openQuickOpen(), goSymbol: () => App.openPalette('@'), goSymbolWorkspace: () => App.openPalette('#'),
   viewExplorer: () => App.showView('explorer'), viewSearch: () => App.showView('search'), viewDebug: () => App.showView('debug'), viewLibs: () => App.showView('libs'),
   toggleSidebar: () => App.toggleSidebar(), togglePanel: () => App.togglePanel(), terminal: () => App.showTab('terminal'), toggleTheme,
@@ -146,7 +129,7 @@ App.COMMANDS = {
   openFolder: { label: 'File: Open folder...', run: MENU.openFolder }, openFile: { label: 'File: Open file...', key: 'Ctrl+O', run: MENU.openFile }, save: { label: 'File: Save', key: 'Ctrl+S', run: MENU.save }, saveAll: { label: 'File: Save all', run: MENU.saveAll },
   closeTab: { label: 'View: Close editor', key: 'Ctrl+W', run: MENU.closeTab },
   format: { label: 'Format document', key: 'Shift+Alt+F', run: MENU.format }, check: { label: 'Tools: Check file', run: MENU.check }, showMl: { label: 'Tools: Show generated ML', run: MENU.showMl },
-  native: { label: 'Tools: Build native executable...', run: MENU.native }, packLib: { label: 'Library: Build .lib', run: MENU.packLib }, installLib: { label: 'Library: Build and install for me', run: MENU.installLib },
+  build: { label: 'Build: Build project', key: 'F7', run: MENU.build }, rebuild: { label: 'Build: Rebuild project', key: 'Ctrl+Shift+F7', run: MENU.rebuild }, clean: { label: 'Build: Clean project', run: MENU.clean }, openOutput: { label: 'Build: Open output folder', run: MENU.openOutput }, projectView: { label: 'View: Project Manager', key: 'Ctrl+Shift+P', run: MENU.viewProject }, packLib: { label: 'Library: Build .lib', run: MENU.packLib }, installLib: { label: 'Library: Build and install for me', run: MENU.installLib },
   libFolder: { label: 'Library: Open my libraries folder', run: MENU.libFolder }, reloadLibs: { label: 'Library: Reload installed libraries', run: MENU.reloadLibs },
   cpm: { label: 'Packages: cpm install', run: MENU.cpmInstall }, doctor: { label: 'Tools: Toolchain doctor', run: MENU.doctor },
   explorer: { label: 'View: Explorer', key: 'Ctrl+Shift+E', run: MENU.viewExplorer }, search: { label: 'View: Find in files', key: 'Ctrl+Shift+F', run: MENU.viewSearch },
@@ -172,19 +155,20 @@ function makeResizer(el, onDrag, cursorClass) {
 async function init() {
   S.info = await studio.info();
   const st = S.info.settings;
-  App.applyTheme(st.theme);
+  App.applyTheme();
   $('welcome-version').textContent = 'Version ' + S.info.version;
   updateToolchainStatus();
   App.wireQuick();
   App.initPanels();
   await refreshRecent();
   await App.initMonaco();
+  applySettings();
   window.__studio = { S, monaco: App.monaco, editor, openFile: App.openFile, MENU, openFolderPath: openFolder, App };  // used by the automated UI test
 
   // toolbar and views
   $('btn-run').onclick = App.runActive; $('btn-debug').onclick = App.startDebug; $('btn-stop').onclick = () => studio.run.stop();
-  $('btn-format').onclick = MENU.format; $('btn-native').onclick = App.buildNative; $('btn-packlib').onclick = () => App.packLib(true);
-  $('btn-palette').onclick = () => App.openQuickOpen(); $('btn-theme').onclick = toggleTheme; $('btn-settings').onclick = showSettings; $('act-settings').onclick = showSettings;
+  $('btn-format').onclick = MENU.format; $('btn-build').onclick = () => App.buildProject('build'); App.wireProjectView();
+  $('btn-palette').onclick = () => App.openQuickOpen(); $('btn-theme').onclick = toggleTheme; $('btn-settings').onclick = () => App.openSettings(); $('act-settings').onclick = () => App.openSettings();
   $('dbg-continue').onclick = MENU.continue; $('dbg-over').onclick = MENU.stepOver; $('dbg-into').onclick = MENU.stepInto; $('dbg-out').onclick = MENU.stepOut;
   for (const b of document.querySelectorAll('#activitybar button[data-view]')) b.onclick = () => App.showView(b.dataset.view);
   $('ex-newfile').onclick = () => App.newFile(); $('ex-newdir').onclick = () => App.newFolder(); $('ex-refresh').onclick = async () => { await App.renderTree(); await App.loadWorkspace(); };
@@ -215,10 +199,11 @@ async function init() {
 
   // events from the main process
   studio.onMenu((a) => { if (MENU[a]) MENU[a](); });
-  studio.onOpenPath((f) => App.openFile(f));
-  studio.takeOpenPath().then((f) => { if (f) App.openFile(f); });
-  studio.onRunOut(({ text }) => App.term.write(text));
-  studio.onRunErr(({ text }) => App.term.write(text, 'err'));
+  const openPath = (f) => (/\.cyproj$/i.test(f) ? openFolder(App.dirOf(f)) : App.openFile(f));
+  studio.onOpenPath(openPath);
+  studio.takeOpenPath().then((f) => { if (f) openPath(f); });
+  studio.onRunOut(({ text }) => App.runSink().write(text));
+  studio.onRunErr(({ text }) => App.runSink().write(text, 'err'));
   studio.onRunExit(App.onRunExit);
   studio.onDebug(App.onDebugEvent);
 

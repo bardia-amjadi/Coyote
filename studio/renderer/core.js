@@ -14,6 +14,7 @@ const App = {
     bpDecor: new Map(),
     info: null,
     running: false,
+    runKind: 'run',
     debug: { active: false, paused: false, file: null, line: 0, frame: 0, stack: [], wantsInput: false, queue: [] },
     expanded: new Set(),
     selected: null,

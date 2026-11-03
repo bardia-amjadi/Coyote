@@ -1,0 +1,172 @@
+# Standard.Collections: generic collections. Write the element type in angle brackets:
+#   List<int> xs = new List<int>()      Stack<string> s = new Stack<string>()
+# Elements are compared with == (value comparison for int, string, boolean, double, char; identity for objects).
+
+# A growable list.
+export class List<T> {
+    array<T> items = new array<T>(0)
+
+    constructor() { }
+    # Number of elements.
+    property int Count { get { return items.length } }
+    # true when the list has no elements.
+    method IsEmpty(): boolean { return items.length == 0 }
+    # Adds an element at the end.
+    method Add(T value) { items.push(value) }
+    # Adds every element of an array at the end.
+    method AddAll(array<T> values) {
+        for (var v in values) { items.push(v) }
+    }
+    # The element at an index (a runtime error when the index is outside the list).
+    method Get(int index): T { return items[index] }
+    # Replaces the element at an index.
+    method Set(int index, T value) { items[index] = value }
+    # The first element (a runtime error on an empty list).
+    method First(): T { return items[0] }
+    # The last element (a runtime error on an empty list).
+    method Last(): T { return items[items.length - 1] }
+    # Index of the first element equal to value, or -1.
+    method IndexOf(T value): int {
+        int i = 0
+        while (i < items.length) {
+            if (items[i] == value) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    # true when some element equals value.
+    method Contains(T value): boolean { return IndexOf(value) >= 0 }
+    # Inserts an element before the given index (index == Count appends).
+    method Insert(int index, T value) {
+        if (index < 0 || index > items.length) { items[items.length + 1000000] = value }
+        array<T> result = new array<T>(0)
+        int i = 0
+        while (i < items.length) {
+            if (i == index) { result.push(value) }
+            result.push(items[i])
+            i = i + 1
+        }
+        if (index == items.length) { result.push(value) }
+        items = result
+    }
+    # Removes the element at an index.
+    method RemoveAt(int index) {
+        T check = items[index]
+        array<T> result = new array<T>(0)
+        int i = 0
+        while (i < items.length) {
+            if (i != index) { result.push(items[i]) }
+            i = i + 1
+        }
+        items = result
+    }
+    # Removes the first element equal to value; true when one was removed.
+    method Remove(T value): boolean {
+        int i = IndexOf(value)
+        if (i < 0) { return false }
+        RemoveAt(i)
+        return true
+    }
+    # Removes every element.
+    method Clear() { items = new array<T>(0) }
+    # Reverses the order in place.
+    method Reverse() {
+        array<T> result = new array<T>(0)
+        int i = items.length - 1
+        while (i >= 0) {
+            result.push(items[i])
+            i = i - 1
+        }
+        items = result
+    }
+    # A copy of the elements as an array.
+    method ToArray(): array<T> { return items.copy() }
+}
+
+# A last-in, first-out stack.
+export class Stack<T> {
+    array<T> items = new array<T>(0)
+    int size = 0
+
+    constructor() { }
+    property int Count { get { return size } }
+    method IsEmpty(): boolean { return size == 0 }
+    # Puts an element on top.
+    method Push(T value) {
+        if (size < items.length) { items[size] = value } else { items.push(value) }
+        size = size + 1
+    }
+    # Removes and returns the top element (a runtime error when the stack is empty).
+    method Pop(): T {
+        T top = items[size - 1]
+        size = size - 1
+        return top
+    }
+    # The top element without removing it.
+    method Peek(): T { return items[size - 1] }
+    method Clear() { size = 0 }
+}
+
+# A first-in, first-out queue.
+export class Queue<T> {
+    array<T> items = new array<T>(0)
+    int head = 0
+
+    constructor() { }
+    property int Count { get { return items.length - head } }
+    method IsEmpty(): boolean { return head >= items.length }
+    # Adds an element at the back.
+    method Enqueue(T value) { items.push(value) }
+    # Removes and returns the front element (a runtime error when the queue is empty).
+    method Dequeue(): T {
+        T front = items[head]
+        head = head + 1
+        if (head > 32 && head * 2 > items.length) {  # drop the consumed part now and then
+            array<T> rest = new array<T>(0)
+            int i = head
+            while (i < items.length) {
+                rest.push(items[i])
+                i = i + 1
+            }
+            items = rest
+            head = 0
+        }
+        return front
+    }
+    # The front element without removing it.
+    method Peek(): T { return items[head] }
+    method Clear() {
+        items = new array<T>(0)
+        head = 0
+    }
+}
+
+# A set of distinct values (linear search: meant for small sets).
+export class Set<T> {
+    List<T> list = new List<T>()
+
+    constructor() { }
+    property int Count { get { return list.Count } }
+    # Adds a value; false when it was already there.
+    method Add(T value): boolean {
+        if (list.Contains(value)) { return false }
+        list.Add(value)
+        return true
+    }
+    method Contains(T value): boolean { return list.Contains(value) }
+    method Remove(T value): boolean { return list.Remove(value) }
+    method Clear() { list.Clear() }
+    # The members, in insertion order.
+    method ToArray(): array<T> { return list.ToArray() }
+}
+
+# Two values together.
+export class Pair<A, B> {
+    A first
+    B second
+
+    constructor(A first, B second) {
+        this.first = first
+        this.second = second
+    }
+}

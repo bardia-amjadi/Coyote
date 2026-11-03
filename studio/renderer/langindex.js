@@ -7,10 +7,10 @@
   else root.CoyoteLang = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'var', 'new', 'method', 'hand', 'class', 'model',
-    'property', 'constructor', 'public', 'private', 'static', 'this', 'import', 'export', 'use', 'get', 'set'];
+    'property', 'constructor', 'public', 'private', 'protected', 'static', 'override', 'interface', 'base', 'as', 'this', 'import', 'export', 'use', 'get', 'set'];
   const TYPES = ['int', 'double', 'boolean', 'string', 'char', 'Guid', 'obj', 'dyn', 'array', 'map', 'void'];
   const LITERALS = ['true', 'false', 'null'];
-  const MODIFIERS = new Set(['public', 'private', 'static', 'export']);
+  const MODIFIERS = new Set(['public', 'private', 'protected', 'static', 'override', 'export']);
 
   const KEYWORD_DOCS = {
     method: 'Declares a method: `method name(int a, string b): int { ... }`. The return type is optional (no value).',
@@ -27,7 +27,12 @@
     constructor: 'The initializer of a class: `constructor(int a) { ... }`.',
     this: 'The current object inside an instance method.',
     in: 'Used by `for (var x in items)`.',
-    is: 'Type test on an `obj`/`dyn` value: `if (v is string) { ... }`.',
+    is: 'Type test: `if (v is string)` on an `obj`/`dyn` value, or `a is Dog` on a class value (true for Dog and its subclasses).',
+    interface: 'Declares an interface: signatures only. `interface Shape { method Area(): double }`. A class implements it with `class Circle : Shape`.',
+    protected: 'Member visible in its own class and in subclasses (not outside).',
+    override: 'Marks a method that replaces an inherited one. Optional, but checked: it must match the base method exactly.',
+    base: '`base(args)` in a constructor header calls the base constructor; `base.Method()` calls the base version of a method.',
+    as: '`x as Dog`: converts a class value. An upcast always works; a downcast fails at run time with `invalid cast`.',
   };
   const TYPE_DOCS = {
     int: '32-bit signed integer. Overflow is a runtime error.', double: '64-bit floating point number.', boolean: '`true` or `false`.',
@@ -166,7 +171,7 @@
       let line = trimmed;
       let consumed = 0;
       // join lines of a declaration whose parameter list is not closed yet
-      if (/^(?:(?:public|private|static|export)\s+)*(?:method|constructor)\b/.test(line)) {
+      if (/^(?:(?:public|private|protected|static|override|export)\s+)*(?:method|constructor)\b/.test(line)) {
         while ((line.match(/\(/g) || []).length > (line.match(/\)/g) || []).length && i + consumed + 1 < raw.length) {
           consumed++;
           line += ' ' + scanned[i + consumed].code.trim();
@@ -190,14 +195,15 @@
             const w = /^(\w+)\s+/.exec(rest);
             if (w && MODIFIERS.has(w[1])) { mods.add(w[1]); rest = rest.slice(w[0].length); } else break;
           }
-          if ((mm = /^(class|model)\s+([A-Za-z_]\w*)/.exec(rest))) {
-            cls = { kind: mm[1], name: mm[2], exported: mods.has('export'), line: i + 1, endLine: raw.length, doc: docText(doc), members: [] };
+          if ((mm = /^(class|model|interface)\s+([A-Za-z_]\w*)\s*(?:<([^>]*)>)?\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
+            cls = { kind: mm[1], name: mm[2], exported: mods.has('export'), line: i + 1, endLine: raw.length, doc: docText(doc), members: [],
+              typeParams: mm[3] ? splitTop(mm[3], ',').map((x) => x.trim()).filter(Boolean) : [], supers: mm[4] ? splitTop(mm[4], ',').map((x) => x.trim()).filter(Boolean) : [] };
             res.classes.push(cls);
             if (mm[1] === 'model') {
               const body = /\{(.*)\}?/.exec(rest);
               if (body) addModelFields(cls, body[1].replace(/\}.*$/, ''), i + 1);
             }
-          } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
+          } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
             const sym = { kind: 'method', name: mm[1], params: parseParams(mm[2]), ret: (mm[3] || '').trim(), exported: mods.has('export'), line: i + 1, endLine: raw.length, doc: docText(doc), extension: /\(\s*this\s/.test(rest) };
             res.methods.push(sym);
             method = sym;
@@ -210,10 +216,10 @@
           const w = /^(\w+)\s+/.exec(rest);
           if (w && MODIFIERS.has(w[1])) { mods.add(w[1]); rest = rest.slice(w[0].length); } else break;
         }
-        const base = { line: i + 1, doc: docText(doc), static: mods.has('static'), private: mods.has('private'), container: cls.name };
+        const base = { line: i + 1, doc: docText(doc), static: mods.has('static'), private: mods.has('private'), protected: mods.has('protected'), override: mods.has('override'), container: cls.name };
         if (cls.kind === 'model' && !/^(method|constructor|property)\b/.test(rest)) {
           addModelFields(cls, rest, i + 1);
-        } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
+        } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
           const sym = { ...base, kind: 'method', name: mm[1], params: parseParams(mm[2]), ret: (mm[3] || '').trim(), endLine: raw.length };
           cls.members.push(sym);
           method = sym;
@@ -260,7 +266,7 @@
   function collectLocals(line, lineNo, method, out, depth) {
     let m;
     // parameters of the method/constructor on this line
-    if ((m = /^(?:(?:public|private|static|export)\s+)*(?:method\s+\w+|constructor)\s*\(([^)]*)\)/.exec(line))) {
+    if ((m = /^(?:(?:public|private|protected|static|override|export)\s+)*(?:method\s+\w+(?:\s*<[^>]*>)?|constructor)\s*\(([^)]*)\)/.exec(line))) {
       for (const p of parseParams(m[1])) if (p.name) out.push({ kind: 'var', name: p.name, type: p.type.replace(/\.\.\.$/, '[]'), line: lineNo, param: true, scope: method });
     }
     // for (T x in ...)
@@ -421,8 +427,9 @@
       let cur2 = null;
       if (i === 0) {
         if (name === 'this') cur2 = scope.cls ? { type: scope.cls.name } : null;
+        else if (name === 'base' && !m[2]) { const bs = scope.cls && supersOf(ctx, scope.cls).find((x) => x.cls.kind !== 'interface'); cur2 = bs ? { type: bs.type } : null; }
         else if (m[2] && ctx.methods.has(name)) { const r = ctx.methods.get(name).ret; cur2 = r ? { type: r } : null; } else if (scope.vars.has(name)) cur2 = { type: normalizeVarType(ctx, scope.vars.get(name), line) };
-        else if (scope.cls && scope.cls.members.find((x) => x.name === name)) { const mem = scope.cls.members.find((x) => x.name === name); cur2 = memberValue(mem); } else if (ctx.classes.has(name)) cur2 = { staticClass: name };
+        else if (scope.cls && allMembers(ctx, scope.cls).find((x) => x.name === name && x.kind !== 'ctor')) { const mem = allMembers(ctx, scope.cls).find((x) => x.name === name && x.kind !== 'ctor'); cur2 = memberValue(mem); } else if (ctx.classes.has(name)) cur2 = { staticClass: name };
         else cur2 = null;
       } else if (t && t.type) {
         const mem = membersOf(ctx, t.type).find((x) => x.name === name && (m[2] ? x.kind === 'method' || x.kind === 'ctor' : x.kind !== 'method'));
@@ -464,11 +471,54 @@
   }
 
   // Members reachable on a value of `type` (instance members for classes, built-ins for arrays/maps).
+  function substituteAll(sym, map) {
+    const keys = Object.keys(map);
+    if (!keys.length) return sym;
+    const re = new RegExp('\\b(' + keys.join('|') + ')\\b', 'g');
+    const sub = (t) => (t ? t.replace(re, (x) => map[x]) : t);
+    return { ...sym, type: sub(sym.type), ret: sub(sym.ret), params: (sym.params || []).map((p) => ({ ...p, type: sub(p.type) })) };
+  }
+  // The direct supertypes of a class as { cls, type } (type keeps its type arguments, e.g. Source<int>).
+  function supersOf(ctx, cls) {
+    const out = [];
+    for (const t of cls.supers || []) { const c = ctx.classes.get(baseTypeName(t)); if (c) out.push({ cls: c, type: t }); }
+    return out;
+  }
+  // All members of a class including inherited ones (own members win over inherited with the same name and parameter count).
+  function allMembers(ctx, cls, type, seen) {
+    seen = seen || new Set();
+    if (seen.has(cls.name)) return [];
+    seen.add(cls.name);
+    const map = {};
+    const args = type ? genericArgs(type) : [];
+    (cls.typeParams || []).forEach((p, i) => { if (args[i]) map[p] = args[i]; });
+    const own = cls.members.filter((m) => m.kind !== 'ctor').map((m) => substituteAll(m, map));
+    const out = [...own];
+    const has = (m) => out.some((o) => o.name === m.name && o.kind === m.kind && (o.params || []).length === (m.params || []).length);
+    for (const sup of supersOf(ctx, cls)) {
+      const supType = sup.type.replace(/\b[A-Za-z_]\w*\b/g, (x) => map[x] || x);
+      for (const m of allMembers(ctx, sup.cls, supType, seen)) if (!m.private && !has(m)) out.push({ ...m, inherited: true });
+    }
+    return out;
+  }
   function membersOf(ctx, type) {
     const b = builtinMembers(type);
     if (b.length) return b;
     const c = ctx.classes.get(baseTypeName(type));
-    return c ? c.members.filter((m) => m.kind !== 'ctor' && !m.static) : [];
+    return c ? allMembers(ctx, c, type).filter((m) => !m.static) : [];
+  }
+  // Methods a class could override (inherited, not private, not static, not overridden yet).
+  function overridable(ctx, cls) {
+    const own = new Set(cls.members.filter((m) => m.kind === 'method').map((m) => m.name + '/' + m.params.length));
+    const out = [];
+    for (const sup of supersOf(ctx, cls)) for (const m of allMembers(ctx, sup.cls, sup.type)) if (m.kind === 'method' && !m.static && !m.private && !own.has(m.name + '/' + m.params.length) && !out.some((o) => o.name === m.name && o.params.length === m.params.length)) out.push(m);
+    return out;
+  }
+  // Members reachable through `base.` inside `cls`: those of its base class (not interfaces).
+  function baseMembers(ctx, cls) {
+    const out = [];
+    for (const sup of supersOf(ctx, cls)) if (sup.cls.kind !== 'interface') for (const m of allMembers(ctx, sup.cls, sup.type)) if (!m.static && !m.private) out.push(m);
+    return out;
   }
   function staticMembersOf(ctx, className) {
     const c = ctx.classes.get(className);
@@ -493,7 +543,7 @@
     return null;
   }
 
-  return { KEYWORDS, TYPES, LITERALS, KEYWORD_DOCS, TYPE_DOCS, parseLib, scanLine, splitTop, parseParams, indexSource, signatureOf, paramsText,
+  return { allMembers, overridable, baseMembers, supersOf, KEYWORDS, TYPES, LITERALS, KEYWORD_DOCS, TYPE_DOCS, parseLib, scanLine, splitTop, parseParams, indexSource, signatureOf, paramsText,
     visibleLibs, buildLibIndex, useInsertion, hasUse, builtinMembers, genericArgs, baseTypeName, analyze, enclosing, localsAt, typeOfExpr, membersOf,
     staticMembersOf, activeCall, normalizeVarType };
 });

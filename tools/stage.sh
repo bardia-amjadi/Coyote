@@ -16,6 +16,10 @@ done
 cp "$bin"/libs/*.lib "$stage/libs/"
 cp -r "$studio"/. "$stage/studio/"
 [ -f "$stage/studio/CoyoteStudio.exe" ] || { echo "stage: CoyoteStudio.exe not found in $studio" >&2; exit 1; }
+if [ -n "${COYOTE_CLANG_DIR:-}" ] && [ -d "$COYOTE_CLANG_DIR" ]; then
+  mkdir -p "$stage/clang"
+  cp -r "$COYOTE_CLANG_DIR"/. "$stage/clang/"
+fi
 cp "$root"/docs/*.md "$stage/docs/"
 cp "$root"/samples/* "$stage/samples/"
 cp "$root"/assets/brand/* "$stage/assets/brand/"

@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Coyote App</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+<link rel="stylesheet" href="style.css">
+<style>
+  html, body { height: 100%; }
+  #aw { display: flex; flex-direction: column; height: 100%; background: var(--editor); }
+  #aw-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); flex: none; }
+  #aw-title { font-weight: 600; } #aw-state { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+  #aw-state.on::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; }
+  #aw-state.debug.on::before { background: var(--status-debug); }
+  #pane-terminal { flex: 1; font-size: 14px; padding: 10px 16px; }
+</style></head>
+<body class="theme-dark"><div id="aw">
+  <div id="aw-bar"><span id="aw-title">Coyote App</span><button id="aw-eof" class="mini" title="Send end of input (Ctrl+D)">End input</button><button id="aw-stop" class="mini" title="Stop the program (Ctrl+C)">Stop</button><span id="aw-state"></span></div>
+  <div id="pane-terminal" class="pane"></div>
+</div>
+<script src="terminal.js"></script>
+<script src="appwindow.js"></script>
+</body></html>

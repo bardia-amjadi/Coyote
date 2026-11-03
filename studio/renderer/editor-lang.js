@@ -5,8 +5,8 @@
 (function () {
   const L = CoyoteLang;
   const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return'];
-  const DECL = ['hand', 'method', 'class', 'model', 'property', 'constructor', 'import', 'export', 'use', 'var', 'new', 'in', 'is', 'this', 'get', 'set'];
-  const MOD = ['public', 'private', 'static'];
+  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'import', 'export', 'use', 'var', 'new', 'in', 'is', 'as', 'this', 'base', 'get', 'set'];
+  const MOD = ['public', 'private', 'protected', 'static', 'override'];
   const KW_SET = new Set(L.KEYWORDS.filter((k) => k !== 'get' && k !== 'set'));
   const TYPE_SET = new Set(L.TYPES);
 
@@ -40,7 +40,7 @@
           [/\b(import)(\s+)(")/, ['keyword.declaration', '', { token: 'string', next: '@string' }]],
           [/\b(hand)(\s*)(:)(\s*)([A-Za-z_]\w*)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'delimiter', '', 'namespace', '', 'entity.name.function']],
           [/\b(method)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'entity.name.function']],
-          [/\b(class|model)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'type.identifier']],
+          [/\b(class|model|interface)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', { token: 'type.identifier', next: '@header' }]],
           [/\b(new)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', { cases: { '@types': 'type', '@default': 'type.identifier' } }]],
           [/\b(property)(\s+)([A-Za-z_]\w*(?:<[^>()]*>)?\??)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'type', '', 'variable.name']],
           [/"/, 'string', '@string'],
@@ -58,6 +58,7 @@
           [/[{}()\[\]]/, '@brackets'],
           [/[,;:]/, 'delimiter'],
         ],
+        header: [[/[ \t]+/, ''], [/[:,<>]/, 'delimiter'], [/\?/, 'operator'], [/[A-Za-z_]\w*/, { cases: { '@types': 'type', '@default': 'type.identifier' } }], [/\{/, { token: '@brackets', next: '@pop' }], [/$/, '', '@pop'], [/./, '', '@pop']],
         string: [[/[^\\"]+/, 'string'], [/\\[\\"ntr0']/, 'string.escape'], [/\\./, 'invalid'], [/"/, 'string', '@pop']],
         libname: [[/[^"]+/, 'string.lib'], [/"/, 'string', '@pop']],
       },
@@ -98,6 +99,7 @@
     // every exported library symbol, for completion of names that have not been `use`d yet
     function libSymbols() {
       const out = [];
+      if (host.settings && host.settings().suggestImports === false) return out;
       for (const lib of host.libs().values()) {
         for (const c of lib.classes) out.push({ sym: c, lib: lib.name });
         for (const m of lib.methods) out.push({ sym: m, lib: lib.name });
@@ -133,7 +135,7 @@
 
     // ------------------------------------------------------------ completion
     monaco.languages.registerCompletionItemProvider('coyote', {
-      triggerCharacters: ['.', '"', ':'],
+      triggerCharacters: ['.', '"', ':', ' '],
       provideCompletionItems(model, pos) {
         try { return completeAt(model, pos); } catch (e) { console.error('completion failed: ' + (e && e.stack || e)); return { suggestions: [] }; }
       },
@@ -176,6 +178,67 @@
             if (seen.has(sig)) continue;
             seen.add(sig);
             items.push({ label: h.name, kind: K.Function, insertText: sig, range: r, detail: sig, documentation: h.doc || '' });
+          }
+          return { suggestions: items };
+        }
+
+        // import "<file of this project>"
+        if ((m = /^\s*import\s+"([^"]*)$/.exec(prefix))) {
+          const r = new monaco.Range(pos.lineNumber, pos.column - m[1].length, pos.lineNumber, pos.column);
+          for (const f of host.importFiles(model)) items.push({ label: f.spec, kind: K.File, insertText: f.spec, range: r, detail: f.exports.length ? 'exports: ' + f.exports.join(', ') : 'no exported symbols', sortText: f.spec.toLowerCase() });
+          return { suggestions: items };
+        }
+        const enc = L.localsAt(ctx, pos.lineNumber);
+        // class Name<T> : <base class, interfaces>
+        if ((m = /^\s*(?:(?:public|private|export)\s+)*(class|interface)\s+\w+\s*(?:<[^>]*>)?\s*:\s*(?:[^{]*,\s*)?(\w*)$/.exec(prefix))) {
+          const r = new monaco.Range(pos.lineNumber, pos.column - m[2].length, pos.lineNumber, pos.column);
+          const self = (/class|interface\s+(\w+)/.exec(prefix) || [])[1];
+          const used = new Set((prefix.split(':')[1] || '').split(',').map((x) => x.trim().replace(/<.*$/, '')));
+          for (const [name, c] of ctx.classes) {
+            if (c.kind === 'model' || name === self || used.has(name)) continue;
+            if (m[1] === 'interface' && c.kind !== 'interface') continue;
+            items.push({ label: name, kind: c.kind === 'interface' ? K.Interface : K.Class, insertText: name, range: r, detail: c.kind + (c.supers && c.supers.length ? ' : ' + c.supers.join(', ') : ''), documentation: md(c), sortText: (c.kind === 'interface' ? '1' : '0') + name });
+          }
+          for (const { sym, lib } of libSymbols()) {
+            if (ctx.classes.has(sym.name) || (sym.kind !== 'class' && sym.kind !== 'interface') || L.hasUse(model.getValue(), lib) || (m[1] === 'interface' && sym.kind !== 'interface')) continue;
+            items.push({ label: { label: sym.name, description: lib }, kind: sym.kind === 'interface' ? K.Interface : K.Class, insertText: sym.name, range: r, detail: `${lib} - adds: use "${lib}"`, sortText: '3' + sym.name, additionalTextEdits: useEdit(model, lib) });
+          }
+          return { suggestions: items };
+        }
+        // override <cursor>: the methods of the base types that can be overridden, as complete declarations
+        if (enc.cls && (m = /^\s*(?:(?:public|protected)\s+)*override\s+(?:method\s+)?(\w*)$/.exec(prefix))) {
+          const r = new monaco.Range(pos.lineNumber, pos.column - m[1].length, pos.lineNumber, pos.column);
+          const hasMethodKw = /\bmethod\s+\w*$/.test(prefix);
+          for (const mem of L.overridable(ctx, enc.cls)) {
+            const ps = L.paramsText(mem.params);
+            items.push({ label: mem.name, kind: K.Method, range: r, detail: `override ${mem.container}.${mem.name}`, documentation: md(mem), sortText: '0' + mem.name,
+              insertText: (hasMethodKw ? '' : 'method ') + `${mem.name}(${ps})${mem.ret ? ': ' + mem.ret : ''} {\n\t${mem.ret ? 'return $0' : '$0'}\n}`, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet });
+          }
+          return { suggestions: items };
+        }
+        // base.<cursor>
+        if (enc.cls && (m = /\bbase\s*\.\s*(\w*)$/.exec(prefix))) {
+          for (const mem of L.baseMembers(ctx, enc.cls)) {
+            const isM = mem.kind === 'method';
+            items.push({ label: mem.name, kind: kindOf(mem), insertText: isM ? methodSnippet(mem.name, mem.params) : mem.name, insertTextRules: isM ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, range, detail: L.signatureOf(mem), documentation: md(mem), sortText: (isM ? '1' : '0') + mem.name });
+          }
+          return { suggestions: items };
+        }
+        // x as <Type> / x is <Type> / new <Type>: class names (and built-in types)
+        if ((m = /(?:\bas|\bis|\bnew)\s+(\w*)$/.exec(prefix)) && !/\bnew\s+array|\bnew\s+map/.test(prefix)) {
+          const isNew = /\bnew\s+\w*$/.test(prefix);
+          for (const [name, c] of ctx.classes) {
+            if (isNew && c.kind === 'interface') continue;
+            items.push({ label: name, kind: c.kind === 'interface' ? K.Interface : c.kind === 'model' ? K.Struct : K.Class, insertText: (c.typeParams && c.typeParams.length && isNew) ? `${name}<\${1:${c.typeParams.join(', ')}}>($0)` : name,
+              insertTextRules: (c.typeParams && c.typeParams.length && isNew) ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, range, detail: c.kind + (c.typeParams && c.typeParams.length ? '<' + c.typeParams.join(', ') + '>' : ''), documentation: md(c), sortText: '0' + name });
+          }
+          if (isNew) for (const k of ['array', 'map']) items.push({ label: k, kind: K.TypeParameter, insertText: k + '<', range, sortText: '1' + k });
+          else for (const k of L.TYPES) items.push({ label: k, kind: K.TypeParameter, insertText: k, range, sortText: '2' + k });
+          if (isNew || /\b(as|is)\s+\w*$/.test(prefix)) {
+            for (const { sym, lib } of libSymbols()) {
+              if (ctx.classes.has(sym.name) || (sym.kind !== 'class' && sym.kind !== 'model') || L.hasUse(model.getValue(), lib)) continue;
+              items.push({ label: { label: sym.name, description: lib }, kind: K.Class, insertText: sym.name, range, detail: `${lib} - adds: use "${lib}"`, sortText: '3' + sym.name, additionalTextEdits: useEdit(model, lib) });
+            }
           }
           return { suggestions: items };
         }
@@ -249,6 +312,11 @@
         const snip = (label, text, doc) => items.push({ label, kind: K.Snippet, insertText: text, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, range, documentation: doc, sortText: '6' + label, detail: 'snippet' });
         snip('method', 'method ${1:name}(${2}): ${3:int} {\n\t$0\n}', 'Method');
         snip('class', 'class ${1:Name} {\n\t$0\n}', 'Class');
+        snip('classinherit', 'class ${1:Name} : ${2:Base} {\n\tconstructor(${3}) : base(${4}) { }\n\t$0\n}', 'Class that extends a base class');
+        snip('interface', 'interface ${1:Name} {\n\tmethod ${2:Do}(): ${3:int}\n}', 'Interface: signatures only');
+        snip('generic class', 'class ${1:Box}<${2:T}> {\n\t${2:T} value\n\tconstructor(${2:T} v) { value = v }\n\t$0\n}', 'Generic class');
+        snip('generic method', 'method ${1:First}<${2:T}>(array<${2:T}> xs): ${2:T} {\n\treturn xs[0]\n}', 'Generic method (call it as First<int>(...))');
+        snip('override', 'override method ${1:name}(${2}): ${3:int} {\n\t$0\n}', 'Override an inherited method');
         snip('model', 'model ${1:Name} {\n\t${2:int} ${3:field}\n}', 'Model: a class with a generated constructor');
         snip('for', 'for (int ${1:i} = 0; ${1:i} < ${2:n}; ${1:i} += 1) {\n\t$0\n}', 'Counting loop');
         snip('foreach', 'for (${1:var} ${2:item} in ${3:items}) {\n\t$0\n}', 'For-each loop');
@@ -429,13 +497,13 @@
             const callLike = /^\s*\(/.test(after);
             let type = -1, mods = 0;
             if (prevCh === '.') { type = callLike ? 2 : 3; } else if (prevCh === ':' && /\bhand\s*:\s*$/.test(before)) type = 6;
-            else if (/\bhand\s*:\s*\w+\s+$/.test(before)) { type = 1; mods = 1; } else if (prevWord === 'method' || prevWord === 'constructor') { type = 1; mods = 1; } else if (prevWord === 'class' || prevWord === 'model') { type = 0; mods = 1; } else if (prevWord === 'new') type = 0;
+            else if (/\bhand\s*:\s*\w+\s+$/.test(before)) { type = 1; mods = 1; } else if (prevWord === 'method' || prevWord === 'constructor') { type = 1; mods = 1; } else if (prevWord === 'class' || prevWord === 'interface' || prevWord === 'model') { type = 0; mods = 1; } else if (prevWord === 'new') type = 0;
             else if (prevWord === 'property') type = -1;
             else if (callLike && !/^[A-Z]/.test(name) || (callLike && (ctx.methods.has(name)))) type = 1;
             else if (ctx.classes.has(name)) { type = 0; if (ctx.classes.get(name).lib) mods = 4; } else {
               if (!scope) scope = L.localsAt(ctx, ln);
               if (scope.vars.has(name)) type = scope.vars.get(name).param ? 4 : 5;
-              else if (scope.cls && scope.cls.members.some((x) => x.name === name && x.kind !== 'ctor' && x.kind !== 'method')) type = 3;
+              else if (scope.cls && L.allMembers(ctx, scope.cls).some((x) => x.name === name && x.kind !== 'ctor' && x.kind !== 'method')) type = 3;
               else if (/^[A-Z]/.test(name) && /^\??\s+[A-Za-z_]/.test(after)) type = 0;
               else if (/^[A-Z]/.test(name) && /^\s*\./.test(after)) type = 0;
             }

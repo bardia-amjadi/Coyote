@@ -1,0 +1,35 @@
+# Standard.Text: building long strings piece by piece.
+hand:text length(string s): int
+
+# Collects pieces and joins them once at the end (much cheaper than `s = s + piece` in a loop).
+export class StringBuilder {
+    array<string> parts = new array<string>(0)
+    int total = 0
+
+    constructor() { }
+    # Appends text.
+    method Append(string text): StringBuilder {
+        parts.push(text)
+        total = total + length(text)
+        return this
+    }
+    # Appends text and a line break.
+    method AppendLine(string text): StringBuilder {
+        parts.push(text)
+        parts.push("\n")
+        total = total + length(text) + 1
+        return this
+    }
+    # Number of characters collected so far.
+    property int Length { get { return total } }
+    # The whole text.
+    method ToString(): string {
+        string s = ""
+        for (var p in parts) { s = s + p }
+        return s
+    }
+    method Clear() {
+        parts = new array<string>(0)
+        total = 0
+    }
+}

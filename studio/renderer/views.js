@@ -11,6 +11,7 @@ function showView(name) {
   for (const v of document.querySelectorAll('#sidepanel .view')) v.classList.toggle('hidden', v.id !== 'view-' + name);
   if (name === 'search') { $('search-q').focus(); $('search-q').select(); }
   if (name === 'libs') renderLibsView();
+  if (name === 'project') App.renderProjectView();
 }
 function toggleSidebar(force) {
   S.sidebarVisible = force === undefined ? !S.sidebarVisible : force;
@@ -26,6 +27,7 @@ function fileIcon(it) {
   const n = it.name.toLowerCase();
   if (n.endsWith('.coy')) return '<span class="ico coy">◆</span>';
   if (n.endsWith('.lib')) return '<span class="ico lib">▤</span>';
+  if (n.endsWith('.cyproj')) return '<span class="ico json">◈</span>';
   if (n.endsWith('.json')) return '<span class="ico json">{}</span>';
   if (n.endsWith('.md')) return '<span class="ico md">M</span>';
   return '<span class="ico">·</span>';
@@ -43,7 +45,7 @@ async function renderTree() {
       row.className = 'node' + (S.selected === it.path ? ' active' : '');
       row.style.paddingLeft = 8 + depth * 14 + 'px';
       row.dataset.path = it.path;
-      const special = !it.dir && it.name === 'packages.json' ? '<span class="badge">project</span>' : '';
+      const special = !it.dir && (it.name === 'packages.json' || it.name.toLowerCase().endsWith('.cyproj')) ? '<span class="badge">project</span>' : '';
       row.innerHTML = `<span class="twist">${it.dir ? (S.expanded.has(it.path) ? '▾' : '▸') : ''}</span>${fileIcon(it)}<span>${esc(it.name)}</span>${special}`;
       row.onclick = async () => {
         S.selected = it.path;

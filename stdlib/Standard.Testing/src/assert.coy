@@ -1,0 +1,56 @@
+# Standard.Testing: tiny test helpers. A failed check prints "FAIL: <message>" and counts; call Assert.Finish() at
+# the end: it prints a summary and exits with code 1 when anything failed (needs the "system" permission, which
+# `coyote run` and Coyote Studio grant).
+hand:con println(string text)
+hand:sys exit(int code)
+
+export class Assert {
+    static int passed = 0
+    static int failed = 0
+
+    public static method True(boolean condition, string message) {
+        if (condition) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            println("FAIL: " + message)
+        }
+    }
+    public static method False(boolean condition, string message) { True(!condition, message) }
+    public static method EqualInt(int expected, int actual, string message) {
+        if (expected == actual) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            println("FAIL: " + message + " (expected " + expected + ", got " + actual + ")")
+        }
+    }
+    public static method EqualString(string expected, string actual, string message) {
+        if (expected == actual) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            println("FAIL: " + message + " (expected \"" + expected + "\", got \"" + actual + "\")")
+        }
+    }
+    # Compares doubles within a tolerance.
+    public static method EqualDouble(double expected, double actual, double tolerance, string message) {
+        double d = expected - actual
+        if (d < 0.0) { d = 0.0 - d }
+        if (d <= tolerance) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            println("FAIL: " + message + " (expected " + expected + ", got " + actual + ")")
+        }
+    }
+    public static method Fail(string message) {
+        failed = failed + 1
+        println("FAIL: " + message)
+    }
+    # Prints "N passed, M failed" and exits with code 1 when something failed.
+    public static method Finish() {
+        println("" + passed + " passed, " + failed + " failed")
+        if (failed > 0) { exit(1) }
+    }
+}

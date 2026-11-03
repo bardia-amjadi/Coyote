@@ -27,8 +27,7 @@
     </div>
     <div class="tb-group">
       <button id="btn-format" title="Format document (Shift+Alt+F)"><span>Format</span></button>
-      <button id="btn-native" title="Build a native executable (subset of the language)"><span>Native</span></button>
-      <button id="btn-packlib" title="Build this library project into a .lib"><span>Build lib</span></button>
+      <button id="btn-build" title="Build the project as set in its project file (F7)"><svg viewBox="0 0 16 16"><path d="M2.5 13.5l5-5M9 3l4 4-2 2-4-4zM6.5 6.5L4 4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg><span>Build</span></button>
     </div>
     <span class="grow"></span>
     <button id="btn-palette" class="searchbox" title="Command palette (Ctrl+Shift+P)"><svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4"/></svg><span>Search commands, files, symbols (Ctrl+P)</span></button>
@@ -40,6 +39,7 @@
     <nav id="activitybar">
       <button data-view="explorer" class="active" title="Explorer (Ctrl+Shift+E)"><svg viewBox="0 0 24 24"><path d="M8 3h7l4 4v11H8zM15 3v4h4M5 7v14h11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></button>
       <button data-view="search" title="Find in files (Ctrl+Shift+F)"><svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M14.5 14.5L21 21" stroke="currentColor" stroke-width="1.8"/></svg></button>
+      <button data-view="project" title="Project Manager (Ctrl+Shift+J)"><svg viewBox="0 0 24 24"><path d="M3 6.5h7l2 2.5h9v10H3zM3 6.5V4h6l2 2.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 14h8" stroke="currentColor" stroke-width="1.6"/></svg></button>
       <button data-view="debug" title="Run and Debug (Ctrl+Shift+D)"><svg viewBox="0 0 24 24"><path d="M6 4v13l10-6.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="17" cy="18" r="3.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M17 14.6v1.6M13.6 18h1.5M19 18h1.6" stroke="currentColor" stroke-width="1.3"/></svg></button>
       <button data-view="libs" title="Libraries (Ctrl+Shift+L)"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16 5.5l3.8-1 3 15.3-3.8 1z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></button>
       <span class="grow"></span>
@@ -59,6 +59,44 @@
           <p>No folder opened.</p>
           <button class="primary" id="ex-open">Open Folder</button>
           <button id="ex-new">New Project</button>
+        </div>
+      </section>
+      <section id="view-project" class="view hidden">
+        <div class="view-title"><span>PROJECT MANAGER</span></div>
+        <div id="pm-empty" class="empty-view hidden">
+          <p id="pm-empty-text">This folder has no project file.</p>
+          <button class="primary" id="pm-create">Create project file here</button>
+          <button id="pm-new">New Project</button>
+        </div>
+        <div id="pm-body" class="hidden">
+          <div class="pm-head"><b id="pm-title"></b><span id="pm-file" class="muted small"></span></div>
+          <div class="pm-actions">
+            <button id="pm-build" class="primary">Build</button><button id="pm-rebuild">Rebuild</button><button id="pm-clean">Clean</button>
+            <button id="pm-run">Run</button><button id="pm-debug">Debug</button><button id="pm-open">Output folder</button>
+          </div>
+          <div class="group-title">PROPERTIES</div>
+          <div class="pm-form">
+            <label>Name</label><input id="pm-name" type="text" spellcheck="false">
+            <label>Version</label><input id="pm-version" type="text" spellcheck="false">
+            <label>Type</label><select id="pm-type"><option value="app">App (runnable)</option><option value="library">Library (.lib)</option></select>
+            <label>Entry file</label><select id="pm-entry"></select>
+            <label>Description</label><input id="pm-desc" type="text">
+          </div>
+          <div class="group-title" id="pm-out-title">OUTPUT (what Build produces)</div>
+          <div class="pm-form" id="pm-out-form">
+            <label>Kind</label><select id="pm-outkind"><option value="native">Executable (.exe)</option><option value="ml">ML file for the PVM (.ml)</option></select>
+            <label>Native mode</label><select id="pm-outmode"><option value="auto">Auto: native code when possible, otherwise bundled</option><option value="bundle">Always bundled (PVM inside the .exe)</option><option value="native-only">Native code only (fail otherwise)</option></select>
+            <label>Folder</label><input id="pm-outdir" type="text" spellcheck="false">
+            <label>File name</label><input id="pm-outname" type="text" spellcheck="false">
+            <label class="check wide"><input id="pm-keep" type="checkbox"> Keep methods that are never called</label>
+          </div>
+          <div class="group-title" id="pm-run-title">RUN</div>
+          <div class="pm-form" id="pm-run-form">
+            <label>Arguments</label><textarea id="pm-args" rows="2" spellcheck="false" placeholder="one per line"></textarea>
+          </div>
+          <div class="pm-actions"><button id="pm-save" class="primary">Save properties</button><button id="pm-revert">Revert</button></div>
+          <div class="group-title">SOURCE FILES <span class="muted small" id="pm-count"></span></div>
+          <div id="pm-files" class="list"></div>
         </div>
       </section>
       <section id="view-search" class="view hidden">
@@ -161,12 +199,15 @@
 <div id="toasts"></div>
 <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
 <script src="core.js"></script>
+<script src="themes.js"></script>
 <script src="langindex.js"></script>
 <script src="terminal.js"></script>
 <script src="editor-lang.js"></script>
 <script src="editor.js"></script>
 <script src="views.js"></script>
+<script src="projectview.js"></script>
 <script src="run.js"></script>
+<script src="settingsview.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

@@ -56,6 +56,7 @@ function resolveImport(fromPath, spec) {
 }
 const langHost = {
   libs: () => S.libs,
+  settings: () => S.info.settings,
   generation: () => S.gen,
   importedSymbols(model) {
     const out = { classes: [], methods: [] };
@@ -81,6 +82,11 @@ const langHost = {
       for (const m of e.ix.methods) if (m.exported && !m.extension) out.push({ sym: m, spec });
     }
     return out;
+  },
+  importFiles(model) {
+    const from = fileOfModel(model);
+    if (!from) return [];
+    return [...S.ws.values()].filter((e) => keyOf(e.path) !== keyOf(from) && /\.coy$/i.test(e.path)).map((e) => ({ spec: relativeSpec(from, e.path), path: e.path, exports: e.ix.classes.filter((c) => c.exported).map((c) => c.name).concat(e.ix.methods.filter((m) => m.exported && !m.extension).map((m) => m.name)) }));
   },
   ensureLibModel(libName, file) {
     const uri = monaco.Uri.parse(`coyote-lib://${encodeURIComponent(libName)}/${file}`);
@@ -373,11 +379,7 @@ async function initMonaco() {
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG, () => editor.getAction('editor.action.gotoLine').run());
 }
 
-function applyTheme(theme) {
-  document.body.classList.toggle('theme-light', theme === 'light');
-  document.body.classList.toggle('theme-dark', theme !== 'light');
-  if (App.monaco) App.monaco.editor.setTheme(theme === 'light' ? 'coyote-light' : 'coyote-dark');
-}
+function applyTheme() { window.CoyoteThemes.applyAppearance(S.info.settings); }
 
 Object.assign(App, { loadLibs, loadWorkspace, indexFile, renderTabs, activate, openFile, openVirtual, openLibSource, closeTab, closeOthers, closeAll, saveFile, saveAll,
   runCheck, scheduleCheck, renderProblems, problemList, refreshBreakpointDecor, toggleBreakpoint, refreshDebugLine, bpSet, initMonaco, applyTheme, langHost, renderBreadcrumbs });

@@ -17,6 +17,33 @@ function initPanels() {
     onLink: link,
   });
   outTerm = new Terminal($('pane-output'), { onLink: link });
+  mirrorToAppWindow(term);
+  studio.onAppWin((ev) => {
+    if (ev.type === 'line') term.h.onLine(ev.text);
+    else if (ev.type === 'eof') endInput();
+    else if (ev.type === 'stop') { term.writeLine('^C', 'info'); studio.run.stop(); } else if (ev.type === 'closed') { S.appWin = false; if (S.running) { term.writeLine('[app window closed: stopping the program]', 'info'); studio.run.stop(); } }
+  });
+}
+
+// ---------- the app window ----------
+// Setting "appWindow": 'debug' (default: only when debugging), 'always' (run and debug) or 'never' (Terminal panel only).
+// The window mirrors everything the Terminal panel shows and sends typed lines back, so both stay in sync.
+function mirrorToAppWindow(t) {
+  const send = (op, a, b) => { if (S.appWin) studio.appwin.op({ op, a, b }); };
+  const orig = { write: t.write.bind(t), writeLine: t.writeLine.bind(t), clear: t.clear.bind(t), setActive: t.setActive.bind(t), setWaiting: t.setWaiting.bind(t) };
+  t.write = (x, c) => { orig.write(x, c); send('write', x, c); };
+  t.writeLine = (x, c) => { orig.writeLine(x, c); send('writeLine', x, c); };
+  t.clear = () => { orig.clear(); send('clear'); };
+  t.setActive = (on) => { orig.setActive(on); send('active', on, S.debug.active ? 'debug' : 'run'); };
+  t.setWaiting = (on) => { orig.setWaiting(on); send('waiting', on); };
+}
+async function openAppWindowFor(debug, title) {
+  const mode = (S.info && S.info.settings && S.info.settings.appWindow) || 'debug';
+  if (mode === 'never' || (mode === 'debug' && !debug)) return;
+  const theme = document.body.classList.contains('theme-light') ? 'light' : 'dark';
+  await studio.appwin.open(title, theme);
+  S.appWin = true;
+  studio.appwin.op({ op: 'clear' });
 }
 function endInput() {
   if (S.debug.active) {
@@ -42,11 +69,12 @@ function setState(t) { $('st-state').textContent = t; }
 function setRunning(v, label) {
   S.running = v;
   $('btn-stop').disabled = !v;
-  for (const id of ['btn-run', 'btn-debug', 'btn-native', 'btn-packlib']) $(id).disabled = v;
+  for (const id of ['btn-run', 'btn-debug', 'btn-build']) $(id).disabled = v;
   term.setActive(v);
   $('term-eof').classList.toggle('hidden', !v);
   $('term-state').textContent = v ? (label || 'running') : '';
   setState(v ? (label || 'Running...') : 'Ready');
+  if (S.appWin) studio.appwin.op({ op: 'state', a: v ? (label || 'running') : 'finished' });
   $('status').classList.toggle('debugging', v && S.debug.active);
   if (v) term.focus();
 }
@@ -60,17 +88,19 @@ async function runActive() {
   await App.saveAll();
   showTab('terminal');
   term.clear();
+  await openAppWindowFor(false, base(f));
   term.writeLine(`> run ${base(f)}`, 'info');
   setRunning(true, 'running ' + base(f));
   const r = await studio.run.file(f, cwdFor(f));
   if (r.ok === false) { term.writeLine(r.error, 'err'); setRunning(false); }
 }
 async function runProject() {
-  if (!S.project) return App.toast('This folder has no packages.json. Use New Project, or run the current file.', 'error');
-  if (S.manifest && S.manifest.manifest && S.manifest.manifest.type === 'library') return App.toast('This is a library project: it cannot run. Use Build Library, then `use` it from an app.', 'error');
+  if (!S.project) return App.toast('This folder has no project file (.cyproj). Use File > New Project, or run the current file.', 'error');
+  if (S.manifest && S.manifest.manifest && S.manifest.manifest.type === 'library') return App.toast('This is a library project: it cannot run. Use Build, then `use` it from an app.', 'error');
   await App.saveAll();
   showTab('terminal');
   term.clear();
+  await openAppWindowFor(false, base(S.project));
   term.writeLine(`> cpx start (${base(S.project)})`, 'info');
   setRunning(true, 'running project');
   const r = await studio.run.workflow(S.project, 'start');
@@ -103,21 +133,6 @@ async function showMl() {
   $('ml-text').textContent = r.text;
   showTab('ml');
 }
-async function buildNative() {
-  const f = activeCoy();
-  if (!f) return;
-  await App.saveAll();
-  const def = f.replace(/\.coy$/, S.info.platform === 'win32' ? '.exe' : '');
-  const target = await studio.dialog.saveExe(def);
-  if (!target) return;
-  showTab('output');
-  outLine(`> native build ${base(f)} -> ${target}`, 'info');
-  setState('Building native executable...');
-  const r = await studio.tool.native(f, target, cwdFor(f));
-  if (r.ok) { outLine('Native executable written: ' + target, 'good'); App.toast('Native executable written', 'good'); } else outLine((r.phase === 'native' ? 'Native backend: ' : 'Compile error:\n') + r.output + (r.phase === 'native' ? '\n(the native backend supports only a subset; run on the PVM instead)' : ''), 'err');
-  setState('Ready');
-}
-
 // ---------- debugger ----------
 async function loadFrame(i) {
   S.debug.frame = i;
@@ -167,6 +182,8 @@ async function startDebug() {
   if (!f) return App.toast('Open a .coy file to debug it.', 'error');
   await App.saveAll();
   showTab('terminal');
+  S.debug.active = true;  // before the window opens: its Terminal mirrors the debug flag
+  await openAppWindowFor(true, base(f) + ' (debugging)');
   term.clear();
   term.writeLine(`> debug ${base(f)}`, 'info');
   const bps = [];
@@ -194,11 +211,13 @@ function onDebugEvent(ev) {
   }
   return undefined;
 }
+function runSink() { return S.runKind === 'build' ? outTerm : term; }
 function onRunExit(r) {
+  if (S.runKind === 'build') return App.onBuildExit(r);
   term.writeLine(r.code === 0 ? '[finished]' : `[exited with code ${r.code}${r.error ? ': ' + r.error : ''}]`, r.code === 0 ? 'good' : 'err');
   setRunning(false);
 }
 
-Object.assign(App, { initPanels, out, outLine, showTab, togglePanel, setState, setRunning, runActive, runProject, packLib, cpmInstall, showMl, buildNative, startDebug, debugCmd, debugUi, onDebugEvent, onRunExit, activeCoy, entryFile, endInput });
+Object.assign(App, { initPanels, out, outLine, showTab, togglePanel, setState, setRunning, runActive, runProject, packLib, cpmInstall, showMl, runSink, startDebug, debugCmd, debugUi, onDebugEvent, onRunExit, activeCoy, entryFile, endInput });
 Object.defineProperty(App, 'term', { get: () => term });
 Object.defineProperty(App, 'outTerm', { get: () => outTerm });
