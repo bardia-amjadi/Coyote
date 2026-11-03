@@ -76,7 +76,7 @@ jobs:
           retention-days: 30
 
   vscode-extension:
-    name: VS Code extension (tests + vsix)
+    name: VS Code extension (vsix)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -147,19 +147,27 @@ jobs:
         working-directory: editors/vscode
         run: npx --yes @vscode/vsce@3.2.1 package --allow-missing-repository --skip-license -o coyote-vscode.vsix
 
+      - name: Download clang for native builds (llvm-mingw)
+        shell: bash
+        run: |
+          set -eu
+          ver=20241030
+          curl -fsSL -o llvm-mingw.zip "https://github.com/mstorsjo/llvm-mingw/releases/download/${ver}/llvm-mingw-${ver}-ucrt-x86_64.zip"
+          unzip -q llvm-mingw.zip -d llvm-extract
+          mv llvm-extract/llvm-mingw-* clang-dir
+          # only x86_64 programs are built: drop the other targets to keep the installer smaller
+          rm -rf clang-dir/armv7-w64-mingw32 clang-dir/aarch64-w64-mingw32 clang-dir/i686-w64-mingw32
+          rm -f clang-dir/bin/*armv7* clang-dir/bin/*aarch64* clang-dir/bin/*i686*
+          ls clang-dir/bin | head -30
+          test -f clang-dir/bin/x86_64-w64-mingw32-clang.exe
+
       - name: Stage installer contents
+        env:
+          COYOTE_CLANG_DIR: ${{ github.workspace }}/clang-dir
         run: bash tools/stage.sh build/${CONFIG} studio/dist/CoyoteStudio-win32-x64 stage editors/vscode/coyote-vscode.vsix
 
-      - name: Verify Inno Setup
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (!(Test-Path $iscc)) {
-              throw "Inno Setup compiler (ISCC.exe) was not found."
-          }
-          $version = (Get-Item $iscc).VersionInfo.ProductVersion
-          Write-Host "Inno Setup found: $version"
-          Write-Host "Compiler path: $iscc"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y --version=6.3.3
 
       - name: Build setup.exe
         shell: pwsh
