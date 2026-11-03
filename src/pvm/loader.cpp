@@ -10,7 +10,7 @@ namespace pvm {
 namespace {
 
 constexpr int kMinVersion = 1;
-constexpr int kMaxVersion = 6;
+constexpr int kMaxVersion = 7;
 constexpr int kMaxTypeDepth = 32;  // nesting limit for array<array<...>>, so hostile input cannot recurse deeply
 
 struct Word {
@@ -319,13 +319,21 @@ public:
 
             if (head == "class") {
                 needVersion(5, "'class'");
-                needArgs(w, 2);
+                if (w.size() < 2) fail("'class' needs a name");
                 if (w[1].quoted || !isClassName(w[1].text)) fail("'class' needs a name");
                 for (const ClassDecl& other : mod_.classes)
                     if (other.name == w[1].text) fail("duplicate class '" + w[1].text + "'");
                 ClassDecl c;
                 c.name = w[1].text;
                 c.mlLine = lineNo_;
+                if (w.size() > 2) {
+                    needVersion(7, "'class ... extends'");
+                    if (w[2].quoted || w[2].text != "extends" || w.size() < 4) fail("expected 'extends <class> ...' after the class name");
+                    for (size_t k = 3; k < w.size(); ++k) {
+                        if (w[k].quoted || !isClassName(w[k].text)) fail("'extends' needs class names");
+                        c.supers.push_back(w[k].text);
+                    }
+                }
                 mod_.classes.push_back(std::move(c));
                 curClass = &mod_.classes.back();
             } else if (head == "global") {
@@ -532,6 +540,9 @@ private:
                 break;
             }
             case Op::NewObj:
+            case Op::Upcast:
+            case Op::Downcast:
+            case Op::IsInst:
             case Op::GetField:
             case Op::SetField:
             case Op::GetGlobal:
@@ -543,6 +554,7 @@ private:
                     in.type = Type::classOf(in.str);
                     in.objType = std::make_shared<const Type>(in.type);
                 }
+                if (in.op == Op::Upcast || in.op == Op::Downcast || in.op == Op::IsInst) in.type = Type::classOf(in.str);
                 break;
             case Op::DynMember:
                 needArgs(w, 2);

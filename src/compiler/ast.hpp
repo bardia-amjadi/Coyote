@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ struct Type {
     std::shared_ptr<const Type> elem;  // Array/Nullable element, Map value
     std::shared_ptr<const Type> key;   // Map key
     std::string name;                  // Class: the class name (as written; unique ML name after semantic analysis)
+    std::vector<Type> targs;           // Class: generic arguments as written (`Box<int>`); empty once instantiated
 
     Type() = default;
     Type(Kind k) : kind(k) {}  // implicit, so `Type::Int` can be used wherever a Type is expected
@@ -54,11 +56,17 @@ struct Type {
     friend bool operator==(const Type& a, const Type& b) {
         if (a.kind != b.kind) return false;
         if (a.kind == Map) return *a.key == *b.key && *a.elem == *b.elem;
-        if (a.kind == Class) return a.name == b.name;
+        if (a.kind == Class) return a.name == b.name && a.targs == b.targs;
         return (a.kind != Array && a.kind != Nullable) || *a.elem == *b.elem;
     }
     friend bool operator!=(const Type& a, const Type& b) { return !(a == b); }
 };
+
+// Readable names of instantiated generic classes (mangled ML name -> `Box<int>`), for diagnostics.
+inline std::map<std::string, std::string>& genericDisplayNames() {
+    static std::map<std::string, std::string> names;
+    return names;
+}
 
 // Name used in diagnostics.
 inline std::string typeName(const Type& t) {
@@ -77,7 +85,15 @@ inline std::string typeName(const Type& t) {
         case Type::Obj: return "obj";
         case Type::Dyn: return "dyn";
         case Type::Null: return "null";
-        case Type::Class: return t.name;
+        case Type::Class: {
+            if (!t.targs.empty()) {
+                std::string s = t.name + "<";
+                for (size_t i = 0; i < t.targs.size(); ++i) s += (i ? ", " : "") + typeName(t.targs[i]);
+                return s + ">";
+            }
+            auto it = genericDisplayNames().find(t.name);
+            return it == genericDisplayNames().end() ? t.name : it->second;
+        }
     }
     return "?";
 }
@@ -89,6 +105,7 @@ inline std::string mlTypeName(const Type& t) {
         case Type::Map: return "map<" + mlTypeName(*t.key) + "," + mlTypeName(*t.elem) + ">";
         case Type::Nullable: return mlTypeName(*t.elem) + "?";
         case Type::Dyn: return "obj";
+        case Type::Class: return t.name;  // the mangled name, never the display name
         default: return typeName(t);
     }
 }
@@ -103,7 +120,7 @@ struct Expr {
                       Member, MethodCall, Convert, Unwrap, IsNull, Is };
     // Convert: how `lhs` is turned into `type` (inserted by sema, or written as int(x), double(x), ...).
     enum class Conv { IntToDouble, DoubleToInt, CharToInt, IntToChar, StringToInt, StringToDouble, StringToGuid,
-                      ToString, Wrap, Box, Unbox, Retype };
+                      ToString, Wrap, Box, Unbox, Retype, Upcast, Downcast };
     Kind kind = Kind::String;
     SourceLoc loc;               // Unary/Binary: the operator; Index: the '['; Member/MethodCall: the member name
     std::string text;            // string value, variable/callee/member name, or operator
@@ -114,6 +131,7 @@ struct Expr {
                                  // NewArray: lhs is the size.
     std::vector<ExprPtr> args;   // Call/MethodCall arguments, ArrayLit elements
     Type newType;                // NewArray/NewMap: the type being created; Is/explicit conversions: the target type
+    std::vector<Type> typeArgs;  // Call: explicit generic arguments (`Id<int>(5)`); removed by generic expansion
     int depth = 1;               // height of this expression tree (set by the parser; bounded)
 
     // Filled in by semantic analysis.
@@ -168,6 +186,18 @@ struct MethodDecl {
     bool isCtor = false;         // the constructor (named "$new"); builds `this`, runs field initializers, returns it
     bool isExtension = false;    // `method name(this T self, ...)`: callable as self.name(...)
     bool isStaticInit = false;   // synthesized: runs a class's static field initializers
+    bool isProtected = false;    // visible in the class and its subclasses
+    bool isOverride = false;     // declared with 'override' (must replace an inherited method)
+    bool isAbstract = false;     // an interface method: a signature without a body
+    bool isInit = false;         // synthesized `$init`: the constructor body of a class that is part of a hierarchy
+    bool isDispatcher = false;   // synthesized: chooses an implementation with isinst tests (emitted by mlgen)
+    int initMethod = -1;         // constructors of hierarchy classes: the `$init` method the constructor calls
+    std::vector<std::pair<int, int>> cases;  // dispatcher: (class, implementing method), most derived classes first
+    int defaultImpl = -1;        // dispatcher: the method used when no case matches (-1: none, interface)
+    std::vector<std::string> typeParams;  // `method Id<T>(T x)`: a template (top-level methods only)
+    bool hasBaseCall = false;    // constructor written as `constructor(...) : base(args)`
+    SourceLoc baseLoc;
+    std::vector<std::unique_ptr<Expr>> baseArgs;
     int thisSlot = -1;           // constructors: the local slot that holds the new object (set by sema)
     int unit = 0;                // index into Program::modules (the file it was declared in)
     bool exported = false;       // declared with 'export'
@@ -186,7 +216,9 @@ struct FieldDecl {
     Type type;
     ExprPtr init;                // optional initializer (moved into the constructor / static initializer by sema)
     bool isPrivate = false;
+    bool isProtected = false;
     bool isStatic = false;
+    int owner = -1;              // class that declared the field when it was inherited (-1: the class itself)
 };
 
 struct PropertyDecl {
@@ -194,6 +226,8 @@ struct PropertyDecl {
     std::string name;
     Type type;
     bool isPrivate = false;
+    bool isProtected = false;
+    int owner = -1;
     bool hasGet = false, hasSet = false;  // the accessors are methods "get_<name>" / "set_<name>" of the class
 };
 
@@ -202,6 +236,12 @@ struct ClassDecl {
     int unit = 0;                // index into Program::modules
     bool exported = false;
     bool isModel = false;        // a constructor taking every field in order is generated when none is declared
+    bool isInterface = false;    // `interface I { method m(...): T }`: signatures only
+    std::vector<std::string> typeParams;  // `class Box<T>`: a template; instantiated per set of arguments (generics.cpp)
+    std::vector<Type> superTypes;         // `class D : Base<int>, I`: the supertypes as written (names are in superNames)
+    std::vector<std::string> superNames;  // `class D : Base, I1, I2` (parser output)
+    std::vector<SourceLoc> superLocs;
+    std::vector<int> supers;     // resolved direct supertypes: the base class first, then interfaces (filled by sema)
     SourceLoc loc;
     std::string name;
     std::vector<FieldDecl> fields;

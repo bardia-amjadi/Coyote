@@ -1,5 +1,7 @@
 // pvm: the Pixel Virtual Machine CLI. Loads, verifies and executes a textual ML program.
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <new>
@@ -14,6 +16,14 @@
 #include "loader.hpp"
 #include "verifier.hpp"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #ifndef COYOTE_VERSION
 #define COYOTE_VERSION "0.0.0"
 #endif
@@ -21,7 +31,7 @@
 namespace {
 
 void usage(std::ostream& os) {
-    os << "Pixel Virtual Machine " COYOTE_VERSION " (supports ML format versions 1 to 6)\n"
+    os << "Pixel Virtual Machine " COYOTE_VERSION " (supports ML format versions 1 to 7)\n"
        << "usage: pvm [options] <program.ml>\n"
        << "  --verify-only        load and verify the program without running it\n"
        << "  --allow <permission> grant a host permission (default: console, time, random; also: file, system, net)\n"
@@ -59,9 +69,41 @@ private:
 
 } // namespace
 
+// A bundled executable (made by `coyote-llvm`) is this program followed by an ML text, its length (8 bytes,
+// little endian) and the magic "CYBNDL01". Returns true and fills `ml` when this executable carries one.
+bool readBundle(std::string& ml) {
+    std::filesystem::path self;
+    std::error_code ec;
+#ifdef _WIN32
+    char buf[MAX_PATH * 4];
+    DWORD n = GetModuleFileNameA(nullptr, buf, static_cast<DWORD>(sizeof buf));
+    if (n == 0 || n >= sizeof buf) return false;
+    self = std::string(buf, n);
+#else
+    self = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) return false;
+#endif
+    std::ifstream in(self, std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const std::streamoff size = in.tellg();
+    if (size < 16) return false;
+    char tail[16];
+    in.seekg(size - 16);
+    if (!in.read(tail, 16) || std::memcmp(tail + 8, "CYBNDL01", 8) != 0) return false;
+    unsigned long long len = 0;
+    for (int i = 0; i < 8; ++i) len |= static_cast<unsigned long long>(static_cast<unsigned char>(tail[i])) << (8 * i);
+    if (len > 64ull * 1024 * 1024 || static_cast<std::streamoff>(len) > size - 16) return false;
+    ml.resize(static_cast<size_t>(len));
+    in.seekg(size - 16 - static_cast<std::streamoff>(len));
+    return static_cast<bool>(in.read(&ml[0], static_cast<std::streamsize>(len)));
+}
+
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
-    if (args.empty()) { usage(std::cerr); return 2; }
+    std::string bundledMl;
+    const bool bundled = readBundle(bundledMl);
+    if (args.empty() && !bundled) { usage(std::cerr); return 2; }
 
     bool verifyOnly = false;
     bool gcStats = false;
@@ -74,6 +116,13 @@ int main(int argc, char** argv) {
     pvm::grantDefaultPermissions(registry);
     registry.setInput(&std::cin);
 
+    if (bundled) {  // the command line belongs to the embedded program; it runs with every permission
+        pvm::grantAllPermissions(registry);
+        registry.setUnbuffered(true);
+        progArgs = args;
+        input = "program";
+        args.clear();
+    }
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         if (a == "--help" || a == "-h") { usage(std::cout); return 0; }
@@ -106,21 +155,26 @@ int main(int argc, char** argv) {
     }
     if (input.empty()) { std::cerr << "pvm: error: no program file\n"; return 2; }
 
-    std::ifstream in(input, std::ios::binary);
-    if (!in) { std::cerr << "pvm: error: cannot read '" << input << "'\n"; return 2; }
-    // The loader keeps every instruction in memory (roughly ten times the file size).
-    constexpr std::streamoff kMaxProgramBytes = 32 * 1024 * 1024;
-    in.seekg(0, std::ios::end);
-    std::streamoff size = in.tellg();
-    in.seekg(0, std::ios::beg);
-    if (size > kMaxProgramBytes) {
-        std::cerr << "pvm: error: '" << input << "' is larger than the " << kMaxProgramBytes / (1024 * 1024)
-                  << " MiB program file limit\n";
-        return 2;
+    std::string text;
+    if (bundled) {
+        text = bundledMl;
+    } else {
+        std::ifstream in(input, std::ios::binary);
+        if (!in) { std::cerr << "pvm: error: cannot read '" << input << "'\n"; return 2; }
+        // The loader keeps every instruction in memory (roughly ten times the file size).
+        constexpr std::streamoff kMaxProgramBytes = 32 * 1024 * 1024;
+        in.seekg(0, std::ios::end);
+        std::streamoff size = in.tellg();
+        in.seekg(0, std::ios::beg);
+        if (size > kMaxProgramBytes) {
+            std::cerr << "pvm: error: '" << input << "' is larger than the " << kMaxProgramBytes / (1024 * 1024)
+                      << " MiB program file limit\n";
+            return 2;
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        text = ss.str();
     }
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    std::string text = ss.str();
 
     registry.setArgs(progArgs);
     pvm::Heap heap(heapOptions);

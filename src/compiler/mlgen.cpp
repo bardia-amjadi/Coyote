@@ -1,6 +1,7 @@
 #include "mlgen.hpp"
 
 #include <cstdio>
+#include <functional>
 #include <set>
 #include <sstream>
 
@@ -41,25 +42,38 @@ std::string sigText(const std::vector<Param>& params, Type ret) {
 
 class Gen {
 public:
-    explicit Gen(const Program& p) : prog_(p) {}
+    Gen(const Program& p, bool removeUnused) : prog_(p), dce_(removeUnused) {}
 
     std::string run(const std::string& sourcePath) {
-        os_ << "ml " << kMlVersion << "\n";
+        markLive();
+        int version = kMlVersion;
+        for (const ClassDecl& c : prog_.classes)
+            if (!c.supers.empty()) version = 7;  // class hierarchies need ML 7
+        os_ << "ml " << version << "\n";
         os_ << "source " << quote(sourcePath) << "\n";
         std::set<std::string> hosts;  // several files may declare the same host function
         for (const HandDecl& h : prog_.hands)
             if (hosts.insert(h.module + "." + h.name).second)
                 os_ << "host " << h.module << "." << h.name << " " << sigText(h.params, h.ret) << "\n";
         for (const ClassDecl& c : prog_.classes) {
-            os_ << "class " << classMlName(c) << "\n";
+            os_ << "class " << classMlName(c);
+            if (!c.supers.empty()) {
+                os_ << " extends";
+                for (int sidx : c.supers) os_ << " " << classMlName(prog_.classes[static_cast<size_t>(sidx)]);
+            }
+            os_ << "\n";
             for (const FieldDecl& f : c.fields)
                 if (!f.isStatic) os_ << "  field " << f.name << " " << mlTypeName(f.type) << "\n";
             os_ << "end\n";
             for (const FieldDecl& f : c.fields)
                 if (f.isStatic) os_ << "global " << classMlName(c) << "." << f.name << " " << mlTypeName(f.type) << "\n";
         }
-        for (const MethodDecl& m : prog_.methods)
+        for (size_t mi = 0; mi < prog_.methods.size(); ++mi) {
+            const MethodDecl& m = prog_.methods[mi];
+            if (m.isAbstract || !live_[mi]) continue;  // interface signature (no code) / unreachable method
+            if (m.isDispatcher) { dispatcher(m); continue; }
             function(fnName(m), sigText(m.params, m.ret), m.ret, m.localTypes, m.body, m.unit, &m);
+        }
         function("$main", "() -> void", Type::Void, prog_.mainLocals, prog_.stmts, 0, nullptr);
         os_ << "entry $main\n";
         return os_.str();
@@ -67,9 +81,49 @@ public:
 
 private:
     const Program& prog_;
+    bool dce_;
+    std::vector<char> live_;       // per method: reachable from the top-level code
     std::ostringstream os_;
     int curLine_ = 0;
     int labels_ = 0;
+
+    // Dead-code removal: marks the methods reachable from the top-level code and the static initializers.
+    void markLive() {
+        live_.assign(prog_.methods.size(), dce_ ? 0 : 1);
+        if (!dce_) return;
+        std::vector<size_t> work;
+        auto mark = [&](int mi) {
+            if (mi < 0 || live_[static_cast<size_t>(mi)]) return;
+            live_[static_cast<size_t>(mi)] = 1;
+            work.push_back(static_cast<size_t>(mi));
+        };
+        std::function<void(const Expr&)> ex = [&](const Expr& e) {
+            if (e.kind == Expr::Kind::Call || e.kind == Expr::Kind::MethodCall || e.kind == Expr::Kind::NewObj || e.kind == Expr::Kind::Member)
+                mark(e.methodIndex);
+            if (e.lhs) ex(*e.lhs);
+            if (e.rhs) ex(*e.rhs);
+            for (const auto& a : e.args) ex(*a);
+        };
+        std::function<void(const Stmt&)> st = [&](const Stmt& s) {
+            if (s.expr) ex(*s.expr);
+            if (s.target) ex(*s.target);
+            if (s.init) st(*s.init);
+            if (s.step) st(*s.step);
+            for (const auto& b : s.body) st(*b);
+            for (const auto& b : s.elseBody) st(*b);
+        };
+        for (const auto& s : prog_.stmts) st(*s);
+        for (size_t i = 0; i < prog_.methods.size(); ++i)
+            if (prog_.methods[i].isStaticInit) mark(static_cast<int>(i));
+        while (!work.empty()) {
+            const MethodDecl& m = prog_.methods[work.back()];
+            work.pop_back();
+            for (const auto& s : m.body) st(*s);
+            mark(m.initMethod);
+            for (const auto& c : m.cases) mark(c.second);
+            mark(m.defaultImpl);
+        }
+    }
 
     // ML name of a method. Methods of imported files get a per-file prefix so private methods in
     // different files may share a name.
@@ -99,6 +153,11 @@ private:
         }
         if (method && method->isCtor) {  // allocate the object; the epilogue returns it
             os_ << "  newobj " << mlTypeName(method->ret) << "\n  store " << method->thisSlot << "\n";
+            if (method->initMethod >= 0) {  // hierarchy class: the constructor body lives in `$init`
+                os_ << "  load " << method->thisSlot << "\n";
+                for (size_t i = 0; i < method->params.size(); ++i) os_ << "  load " << i << "\n";
+                os_ << "  call " << fnName(prog_.methods[static_cast<size_t>(method->initMethod)]) << " " << method->params.size() + 1 << "\n";
+            }
         }
         for (const auto& s : body) stmt(*s);
         if (method && method->isCtor) {
@@ -107,6 +166,39 @@ private:
         }
         // Fall-through return. Semantic analysis guarantees non-void methods return on every
         // path, so for them this tail is unreachable; it keeps the ML structurally complete.
+        defaultReturn(ret);
+        os_ << "end\n";
+    }
+
+    // The ML of one dispatcher: tests the receiver's class (most derived first) and calls the implementation.
+    void dispatcher(const MethodDecl& d) {
+        const std::string self = mlTypeName(d.params[0].type);
+        os_ << "func " << fnName(d) << " " << sigText(d.params, d.ret) << "\n";
+        for (size_t i = 0; i < d.params.size(); ++i) os_ << "  .var " << i << " " << quote(i == 0 ? "this" : d.params[i].name) << "\n";
+        auto callImpl = [&](int impl, const std::string& from) {
+            const MethodDecl& y = prog_.methods[static_cast<size_t>(impl)];
+            const std::string owner = classMlName(prog_.classes[static_cast<size_t>(y.classIndex)]);
+            if (owner != from) os_ << "  upcast " << owner << "\n";
+            for (size_t i = 1; i < d.params.size(); ++i) os_ << "  load " << i << "\n";
+            os_ << "  call " << fnName(y) << " " << d.params.size() << "\n  ret\n";
+        };
+        for (const auto& [cls, impl] : d.cases) {
+            const std::string next = newLabel();
+            const std::string cname = classMlName(prog_.classes[static_cast<size_t>(cls)]);
+            os_ << "  load 0\n  isinst " << cname << "\n  jump.false " << next << "\n  load 0\n  downcast " << cname << "\n";
+            callImpl(impl, cname);
+            os_ << "label " << next << "\n";
+        }
+        if (d.defaultImpl >= 0) {
+            os_ << "  load 0\n";
+            callImpl(d.defaultImpl, self);
+        } else {
+            defaultReturn(d.ret);
+        }
+        os_ << "end\n";
+    }
+
+    void defaultReturn(Type ret) {
         switch (ret.kind) {
             case Type::Int: os_ << "  push.int 0\n"; break;
             case Type::String: os_ << "  push.str \"\"\n"; break;
@@ -120,7 +212,6 @@ private:
             default: break;
         }
         os_ << "  ret\n";
-        os_ << "end\n";
     }
 
     std::vector<std::pair<std::string, std::string>> loops_;  // (continue label, break label) of enclosing loops
@@ -288,7 +379,7 @@ private:
                 return;
             case Expr::Kind::Is:
                 expr(*e.lhs);
-                os_ << "  istype " << mlTypeName(e.newType) << "\n";
+                os_ << (e.lhs->type.kind == Type::Class ? "  isinst " : "  istype ") << mlTypeName(e.newType) << "\n";
                 return;
             case Expr::Kind::Convert: convert(e); return;
             case Expr::Kind::Var: os_ << "  load " << e.slot << "\n"; return;
@@ -390,6 +481,8 @@ private:
             case C::Wrap: os_ << "  wrap\n"; return;
             case C::Box: os_ << "  box\n"; return;
             case C::Unbox: os_ << "  unbox " << mlTypeName(e.type) << "\n"; return;
+            case C::Upcast: os_ << "  upcast " << mlTypeName(e.type) << "\n"; return;
+            case C::Downcast: os_ << "  downcast " << mlTypeName(e.type) << "\n"; return;
             case C::Retype: return;
         }
     }
@@ -459,8 +552,8 @@ private:
 
 } // namespace
 
-std::string generateMl(const Program& program, const std::string& sourcePath) {
-    return Gen(program).run(sourcePath);
+std::string generateMl(const Program& program, const std::string& sourcePath, bool removeUnused) {
+    return Gen(program, removeUnused).run(sourcePath);
 }
 
 } // namespace coyote

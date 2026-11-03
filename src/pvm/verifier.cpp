@@ -116,9 +116,12 @@ void resolve(Ctx& c, Function& f, size_t nslots) {
                                                 std::to_string(np) + " parameter(s)");
                 break;
             }
+            case Op::Upcast:
+            case Op::Downcast:
+            case Op::IsInst:
             case Op::NewObj: {
                 auto it = c.classIndex.find(in.str);
-                if (it == c.classIndex.end()) fail(c.file, in.mlLine, "'newobj' of undeclared class '" + in.str + "'");
+                if (it == c.classIndex.end()) fail(c.file, in.mlLine, "'" + std::string(opName(in.op)) + "' of undeclared class '" + in.str + "'");
                 in.cls = it->second;
                 break;
             }
@@ -408,6 +411,20 @@ void verifyFunction(Ctx& c, Function& f) {
                 st = drop(st, 2);
                 break;
             }
+            case Op::Upcast: case Op::Downcast: case Op::IsInst: {
+                need(1);
+                Type t = at(st, 1);
+                if (t.kind != Type::Class) fail(file, in.mlLine, "'" + std::string(nm) + "' needs a class instance on the stack but found " + typeName(t));
+                const ClassDecl& from = c.m.classes[static_cast<size_t>(c.classIndex.at(t.name))];
+                const size_t to = static_cast<size_t>(in.cls);
+                if (in.op == Op::Upcast && !from.isa[to])
+                    fail(file, in.mlLine, "'upcast " + in.str + "': " + t.name + " is not a subtype of " + in.str);
+                if (in.op == Op::Downcast && !c.m.classes[to].isa[static_cast<size_t>(c.classIndex.at(t.name))])
+                    fail(file, in.mlLine, "'downcast " + in.str + "': " + in.str + " is not a subtype of " + t.name);
+                st = drop(st, 1);
+                st = push(st, in.op == Op::IsInst ? Type(Type::Bool) : Type::classOf(in.str));
+                break;
+            }
             case Op::GetGlobal: st = push(st, c.m.globals[static_cast<size_t>(in.target)].type); break;
             case Op::SetGlobal: {
                 need(1);
@@ -568,6 +585,37 @@ void verify(Module& m, const HostRegistry& registry, const std::string& file) {
     };
     for (const ClassDecl& c : m.classes)
         for (const FieldDecl& f : c.fields) checkType(f.type, c.mlLine, "class '" + c.name + "'");
+    // Class hierarchy (version 7): supertypes must be declared, the graph must be acyclic, and a class must start with the
+    // fields of each of its supertypes (same names and types, same order) so that a subtype can be used as its supertype.
+    for (ClassDecl& c : m.classes) c.isa.assign(m.classes.size(), 0);
+    for (size_t i = 0; i < m.classes.size(); ++i) {
+        ClassDecl& c = m.classes[i];
+        c.isa[i] = 1;
+        for (const std::string& s : c.supers) {
+            auto it = classIndex.find(s);
+            if (it == classIndex.end()) fail(file, c.mlLine, "class '" + c.name + "' extends undeclared class '" + s + "'");
+            if (it->second == static_cast<int>(i)) fail(file, c.mlLine, "class '" + c.name + "' extends itself");
+            const ClassDecl& sup = m.classes[static_cast<size_t>(it->second)];
+            if (sup.fields.size() > c.fields.size()) fail(file, c.mlLine, "class '" + c.name + "' must start with the fields of '" + s + "'");
+            for (size_t k = 0; k < sup.fields.size(); ++k)
+                if (sup.fields[k].name != c.fields[k].name || sup.fields[k].type != c.fields[k].type)
+                    fail(file, c.mlLine, "class '" + c.name + "' must start with the fields of '" + s + "' (field " + std::to_string(k) + " differs)");
+        }
+    }
+    for (size_t round = 0; round <= m.classes.size(); ++round) {  // transitive closure; a cycle never settles
+        bool changed = false;
+        for (ClassDecl& c : m.classes)
+            for (const std::string& s : c.supers) {
+                const ClassDecl& sup = m.classes[static_cast<size_t>(classIndex.at(s))];
+                for (size_t j = 0; j < sup.isa.size(); ++j)
+                    if (sup.isa[j] && !c.isa[j]) { c.isa[j] = 1; changed = true; }
+            }
+        if (!changed) break;
+        if (round == m.classes.size()) fail(file, m.classes[0].mlLine, "the class hierarchy has a cycle");
+    }
+    for (size_t i = 0; i < m.classes.size(); ++i)
+        for (size_t j = 0; j < m.classes.size(); ++j)
+            if (i != j && m.classes[i].isa[j] && m.classes[j].isa[i]) fail(file, m.classes[i].mlLine, "the class hierarchy has a cycle through '" + m.classes[i].name + "'");
     for (const GlobalDecl& g : m.globals) checkType(g.type, g.mlLine, "global '" + g.name + "'");
     for (const HostDecl& h : m.hosts) {
         for (const Type& t : h.sig.params)

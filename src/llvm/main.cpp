@@ -8,6 +8,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -355,22 +362,102 @@ void usage(std::ostream& os) {
        << "  -o <file>        output file (default: a.out, or <name>.ll with --emit-ll; '-' writes IR to stdout)\n"
        << "  --emit-ll        write LLVM IR only; do not run clang\n"
        << "  --clang <path>   clang executable (default: clang)\n"
-       << "supported: int, boolean, string; calls; control flow; console print/println. See docs/llvm.md.\n"
+       << "  --bundle         always build a bundled executable (the PVM with the program embedded; any program works)\n"
+       << "  --native-only    fail instead of falling back to a bundled executable when the program is outside the native subset\n"
+       << "Default: programs inside the native subset (int, boolean, string; calls; control flow; console print/println)\n"
+       << "become real LLVM/clang executables; every other program becomes a bundled executable. See docs/llvm.md.\n"
        << "exit codes: 0 ok, 1 ML error or unsupported program, 2 usage, I/O or toolchain error\n";
 }
 
 } // namespace
 
+namespace {
+// Directory of this executable ("" when unknown).
+std::filesystem::path selfDir() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+#ifdef _WIN32
+    char buf[MAX_PATH * 4];
+    DWORD n = GetModuleFileNameA(nullptr, buf, static_cast<DWORD>(sizeof buf));
+    if (n == 0 || n >= sizeof buf) return {};
+    return fs::path(std::string(buf, n)).parent_path();
+#else
+    fs::path p = fs::read_symlink("/proc/self/exe", ec);
+    return ec ? fs::path() : p.parent_path();
+#endif
+}
+
+// The clang to use when --clang is not given: the one installed with Coyote (<install>\clang\bin, next to <install>\bin),
+// then plain "clang" from the PATH.
+std::string findClang() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path here = selfDir();
+    if (!here.empty()) {
+        for (const char* rel : {"../clang/bin", "clang/bin", "../llvm/bin"}) {
+            for (const char* name : {"x86_64-w64-mingw32-clang.exe", "clang.exe", "clang"}) {
+                fs::path c = here / rel / name;
+                if (fs::is_regular_file(c, ec)) return fs::weakly_canonical(c, ec).string();
+            }
+        }
+    }
+    return "clang";
+}
+}  // namespace
+
+// A bundled executable is a copy of `pvm` followed by the ML text, an 8-byte little-endian length and the magic
+// "CYBNDL01". At start-up pvm looks for that trailer in its own file and runs the embedded program with every
+// permission (it is the user's own program), passing the command line to it. Works for every ML program.
+int writeBundle(const std::string& mlText, const std::string& output) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path here = selfDir();
+    fs::path pvmExe;
+    for (const char* rel : {".", "../bin"}) {
+        for (const char* name : {"pvm.exe", "pvm"}) {
+            fs::path c = here / rel / name;
+            if (!here.empty() && fs::is_regular_file(c, ec)) { pvmExe = c; break; }
+        }
+        if (!pvmExe.empty()) break;
+    }
+    if (pvmExe.empty()) {
+        std::cerr << "coyote-llvm: error: cannot find 'pvm' next to coyote-llvm; a bundled executable is built from it\n";
+        return 2;
+    }
+    std::ifstream in(pvmExe, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << in.rdbuf();
+    std::string image = bytes.str();
+    if (image.size() >= 16 && image.compare(image.size() - 8, 8, "CYBNDL01") == 0) {
+        std::cerr << "coyote-llvm: error: '" << pvmExe.string() << "' already contains a bundled program\n";
+        return 2;
+    }
+    image += mlText;
+    unsigned long long len = mlText.size();
+    for (int i = 0; i < 8; ++i) image += static_cast<char>((len >> (8 * i)) & 0xFF);
+    image += "CYBNDL01";
+    std::ofstream out(output, std::ios::binary | std::ios::trunc);
+    if (!out || !(out.write(image.data(), static_cast<std::streamsize>(image.size())))) {
+        std::cerr << "coyote-llvm: error: cannot write '" << output << "'\n";
+        return 2;
+    }
+    out.close();
+    fs::permissions(output, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec, fs::perm_options::add, ec);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
     std::string input, output, clang = "clang";
-    bool emitLl = false;
+    bool emitLl = false, forceBundle = false, nativeOnly = false;
     if (args.empty()) { usage(std::cerr); return 2; }
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         if (a == "--help" || a == "-h") { usage(std::cout); return 0; }
         if (a == "--version") { std::cout << "coyote-llvm " COYOTE_VERSION "\n"; return 0; }
         if (a == "--emit-ll") { emitLl = true; continue; }
+        if (a == "--bundle") { forceBundle = true; continue; }
+        if (a == "--native-only") { nativeOnly = true; continue; }
         if (a == "-o" || a == "--clang") {
             if (i + 1 >= args.size()) { std::cerr << "coyote-llvm: error: '" << a << "' needs a value\n"; return 2; }
             (a == "-o" ? output : clang) = args[++i];
@@ -387,26 +474,56 @@ int main(int argc, char** argv) {
     std::ostringstream ss;
     ss << in.rdbuf();
 
+    const std::string mlText = ss.str();
+    {   // the program must be valid ML for the full PVM (every host function, every permission)
+        pvm::HostRegistry full;
+        pvm::registerAllHosts(full);
+        pvm::grantAllPermissions(full);
+        try {
+            pvm::Module m = pvm::loadMl(mlText, input);
+            pvm::verify(m, full, input);
+        } catch (const pvm::MlError& e) {
+            std::cerr << pvm::formatMlError(e) << "\n";
+            return 1;
+        }
+    }
+    namespace fs = std::filesystem;
+    auto bundle = [&]() {
+        if (output.empty()) output = fs::path(input).stem().string() + (
+#ifdef _WIN32
+            ".exe"
+#else
+            ""
+#endif
+        );
+        if (output == "-") { std::cerr << "coyote-llvm: error: a bundled executable cannot be written to stdout\n"; return 2; }
+        return writeBundle(mlText, output);
+    };
+    if (forceBundle && !emitLl) return bundle();
+
     pvm::HostRegistry registry;
     pvm::registerConsoleHosts(registry);
     registry.grant("console");
     pvm::Module module;
-    try {
-        module = pvm::loadMl(ss.str(), input);
-        pvm::verify(module, registry, input);
-    } catch (const pvm::MlError& e) {
-        std::cerr << pvm::formatMlError(e) << "\n";
-        return 1;
-    }
-
     std::vector<std::string> problems;
-    std::string ir = Gen(module).run(problems);
+    std::string ir;
+    try {
+        module = pvm::loadMl(mlText, input);
+        pvm::verify(module, registry, input);
+        ir = Gen(module).run(problems);
+    } catch (const pvm::MlError& e) {  // valid ML, but it uses a host function the native subset does not have
+        problems.push_back(pvm::formatMlError(e));
+    }
     if (!problems.empty()) {
+        if (!nativeOnly && !emitLl) {
+            std::cerr << "coyote-llvm: note: " << problems.front() << "\n"
+                      << "coyote-llvm: note: the program is outside the native subset, so a bundled executable is built instead (the PVM with the program embedded)\n";
+            return bundle();
+        }
         for (const std::string& p : problems) std::cerr << "coyote-llvm: error: " << p << "\n";
         return 1;
     }
 
-    namespace fs = std::filesystem;
     if (emitLl) {
         if (output.empty()) output = fs::path(input).stem().string() + ".ll";
         if (output == "-") { std::cout << ir; return 0; }
@@ -425,12 +542,20 @@ int main(int argc, char** argv) {
         std::ofstream(dir / "runtime.c", std::ios::binary) << kRuntime;
     }
     auto quote = [](const std::string& s) { return "\"" + s + "\""; };
+    if (clang == "clang") clang = findClang();
     std::string cmd = quote(clang) + " -O2 -Wno-override-module -o " + quote(output) + " " + quote((dir / "program.ll").string()) + " " +
                       quote((dir / "runtime.c").string());
+#ifdef _WIN32
+    // cmd.exe strips the first and the last quote of a command line that starts with a quote; wrapping the whole
+    // command keeps every path (including ones with spaces, like "C:\Users\First Last\...") intact.
+    cmd = "\"" + cmd + "\"";
+#endif
     int rc = std::system(cmd.c_str());
     fs::remove_all(dir, ec);
     if (rc != 0) {
-        std::cerr << "coyote-llvm: error: clang failed (is '" << clang << "' installed? use --clang <path> or --emit-ll)\n";
+        std::cerr << "coyote-llvm: error: clang failed (command: " << cmd << ")\n"
+                  << "  Native builds need clang. The Coyote setup installs it with the \"Native builds\" component (folder 'clang' next to 'bin');\n"
+                  << "  otherwise install clang yourself, or use --clang <path>, or --emit-ll to get the LLVM IR only.\n";
         return 2;
     }
     return 0;

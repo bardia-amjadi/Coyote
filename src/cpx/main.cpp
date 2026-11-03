@@ -98,9 +98,9 @@ struct Runner {
 };
 
 bool readManifestText(const std::string& dir, std::string& out, std::string& path) {
-    path = dir == "." ? "packages.json" : (std::filesystem::path(dir) / "packages.json").string();
+    path = coyote::pkg::findManifestFile(dir);
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec)) {
+    if (path.empty()) {
         std::cerr << "cpx: error: no packages.json in " << (dir == "." ? "the current directory" : "'" + dir + "'")
                   << " (use -C <dir> to choose another project)\n";
         return false;

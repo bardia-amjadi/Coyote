@@ -1,9 +1,12 @@
 #include "sema.hpp"
 
+#include "generics.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <iterator>
 #include <map>
+#include <set>
 
 namespace coyote {
 
@@ -36,6 +39,10 @@ struct ClassInfo {
     std::map<std::string, int> methods;   // method name -> index into Program::methods (includes accessors)
     int ctor = -1;
     int staticInit = -1;
+    int init = -1;                        // `$init` (constructor body) of a class that is part of a hierarchy
+    bool hasSub = false;                  // some class extends this one
+    int depth = 0;                        // length of the longest inheritance chain above this class
+    std::set<int> isa;                    // this class and every class / interface it extends, directly or not
 };
 
 struct Target {
@@ -54,9 +61,13 @@ public:
 
         registerClasses();
         importClasses();
+        resolveSupers();
         synthesizeMembers();
         resolveDeclaredTypes();
+        flattenFields();
         buildClassInfo();
+        inheritMethods();
+        buildDispatchers();
 
         // Hand declarations and methods are visible throughout their file, regardless of position
         // (so methods can call each other and recurse).
@@ -104,6 +115,7 @@ public:
 
         for (MethodDecl& m : prog_.methods) {
             curModule_ = m.unit;
+            if (m.isDispatcher || m.isAbstract) continue;  // no body to check
             checkMethod(m);
         }
 
@@ -137,6 +149,8 @@ private:
     std::vector<std::map<std::string, int>> classTables_;  // per module: class name -> index into Program::classes
     std::vector<ClassInfo> cinfo_;
     std::map<std::string, int> uniqueClass_;             // ML class name -> index
+    std::vector<int> hierOrder_;                         // classes, supertypes before subtypes
+    std::map<std::pair<int, std::string>, int> dispatch_;  // (static class, method name) -> dispatcher method
     int curModule_ = 0;
     FnCtx* ctx_ = nullptr;
     std::vector<std::map<std::string, VarInfo>> scopes_;
@@ -216,15 +230,92 @@ private:
         return m;
     }
 
+    static StmtPtr makeExprStmt(ExprPtr e, SourceLoc loc) {
+        auto st = std::make_unique<Stmt>();
+        st->kind = Stmt::Kind::ExprStmt;
+        st->loc = loc;
+        st->expr = std::move(e);
+        return st;
+    }
+
+    bool hasBaseClass(const ClassDecl& c) const { return !c.supers.empty() && !prog_.classes[static_cast<size_t>(c.supers[0])].isInterface; }
+
+    // Resolves `class D : Base, I1, I2`: the base class (at most one) and the interfaces; orders the classes
+    // so supertypes come first, rejects cycles, and computes each class's set of supertypes.
+    void resolveSupers() {
+        const size_t n = prog_.classes.size();
+        for (size_t i = 0; i < n; ++i) {
+            ClassDecl& c = prog_.classes[i];
+            curModule_ = c.unit;
+            int base = -1;
+            std::vector<int> ifs;
+            for (size_t k = 0; k < c.superNames.size(); ++k) {
+                auto it = classTable().find(c.superNames[k]);
+                if (it == classTable().end()) { error(c.superLocs[k], "unknown base class or interface '" + c.superNames[k] + "'"); continue; }
+                const int sidx = it->second;
+                if (sidx == static_cast<int>(i)) { error(c.superLocs[k], "'" + c.name + "' cannot extend itself"); continue; }
+                if (sidx == base || std::find(ifs.begin(), ifs.end(), sidx) != ifs.end()) { error(c.superLocs[k], "'" + c.superNames[k] + "' is listed twice"); continue; }
+                if (prog_.classes[static_cast<size_t>(sidx)].isInterface) {
+                    ifs.push_back(sidx);
+                } else if (c.isInterface) {
+                    error(c.superLocs[k], "interface '" + c.name + "' can only extend interfaces, but '" + c.superNames[k] + "' is a class");
+                } else if (base >= 0) {
+                    error(c.superLocs[k], "class '" + c.name + "' already extends '" + className(base) + "'; a class has one base class (add interfaces for more)");
+                } else {
+                    base = sidx;
+                }
+            }
+            c.supers.clear();
+            if (base >= 0) c.supers.push_back(base);
+            for (int x : ifs) c.supers.push_back(x);
+        }
+        std::vector<int> state(n, 0);
+        std::function<void(int)> visit = [&](int i) {
+            if (state[static_cast<size_t>(i)] == 2) return;
+            state[static_cast<size_t>(i)] = 1;
+            ClassDecl& c = prog_.classes[static_cast<size_t>(i)];
+            for (size_t k = 0; k < c.supers.size();) {
+                const int sidx = c.supers[k];
+                if (state[static_cast<size_t>(sidx)] == 1) {
+                    curModule_ = c.unit;
+                    error(c.loc, "inheritance cycle: '" + c.name + "' and '" + className(sidx) + "' extend each other");
+                    c.supers.erase(c.supers.begin() + static_cast<std::ptrdiff_t>(k));
+                    continue;
+                }
+                visit(sidx);
+                ++k;
+            }
+            state[static_cast<size_t>(i)] = 2;
+            hierOrder_.push_back(i);
+        };
+        for (size_t i = 0; i < n; ++i) visit(static_cast<int>(i));
+        for (int i : hierOrder_) {
+            ClassInfo& info = cinfo_[static_cast<size_t>(i)];
+            info.isa.insert(i);
+            for (int sidx : prog_.classes[static_cast<size_t>(i)].supers) {
+                const ClassInfo& si = cinfo_[static_cast<size_t>(sidx)];
+                info.isa.insert(si.isa.begin(), si.isa.end());
+                info.depth = std::max(info.depth, si.depth + 1);
+            }
+            if (hasBaseClass(prog_.classes[static_cast<size_t>(i)])) cinfo_[static_cast<size_t>(prog_.classes[static_cast<size_t>(i)].supers[0])].hasSub = true;
+        }
+    }
+
     // Adds the constructor and static initializer every class needs, and moves field initializers
     // into them (instance field initializers run first in the constructor, in declaration order).
+    // A class that takes part in an inheritance hierarchy gets a `$init` method instead: the
+    // constructor (`$new`) allocates the object and calls `$init`, which first runs the base class's
+    // `$init` (`: base(args)`), then the field initializers, then the written constructor body.
     void synthesizeMembers() {
         for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
             ClassDecl& c = prog_.classes[ci];
             curModule_ = c.unit;
             const int cidx = static_cast<int>(ci);
-            MethodDecl* ctor = findMethod(cidx, [](const MethodDecl& m) { return m.isCtor; });
-            if (!ctor) {
+            if (c.isInterface) continue;
+            size_t ctorIdx = prog_.methods.size();
+            for (size_t mi = 0; mi < prog_.methods.size(); ++mi)
+                if (prog_.methods[mi].classIndex == cidx && prog_.methods[mi].isCtor) { ctorIdx = mi; break; }
+            if (ctorIdx == prog_.methods.size()) {
                 MethodDecl m;
                 m.unit = c.unit;
                 m.classIndex = cidx;
@@ -243,7 +334,6 @@ private:
                     }
                 }
                 prog_.methods.push_back(std::move(m));
-                ctor = &prog_.methods.back();
             }
             std::vector<StmtPtr> inits;
             MethodDecl staticInit;
@@ -254,7 +344,41 @@ private:
                 else
                     inits.push_back(makeAssign(makeMember(makeVar("this", f.loc), f.name, f.loc), std::move(f.init), f.loc));
             }
-            ctor->body.insert(ctor->body.begin(), std::make_move_iterator(inits.begin()), std::make_move_iterator(inits.end()));
+            const bool hasBase = hasBaseClass(c);
+            if (prog_.methods[ctorIdx].hasBaseCall && !hasBase)
+                error(prog_.methods[ctorIdx].baseLoc, "class '" + c.name + "' has no base class, so its constructor cannot call base(...)");
+            if (hasBase || cinfo_[ci].hasSub) {
+                MethodDecl init;
+                init.unit = c.unit;
+                init.classIndex = cidx;
+                init.isInit = true;
+                init.name = "$init";
+                init.loc = c.loc;
+                {
+                    MethodDecl& ctor = prog_.methods[ctorIdx];
+                    init.params = ctor.params;
+                    if (hasBase) {
+                        auto call = std::make_unique<Expr>();
+                        call->kind = Expr::Kind::MethodCall;
+                        call->loc = ctor.hasBaseCall ? ctor.baseLoc : ctor.loc;
+                        call->text = "$init";
+                        call->lhs = makeVar("base", call->loc);
+                        call->args = std::move(ctor.baseArgs);
+                        call->depth = 2;
+                        for (const auto& a : call->args) call->depth = std::max(call->depth, a->depth + 1);
+                        const SourceLoc callLoc = call->loc;
+                        init.body.push_back(makeExprStmt(std::move(call), callLoc));
+                    }
+                    for (auto& st : inits) init.body.push_back(std::move(st));
+                    for (auto& st : ctor.body) init.body.push_back(std::move(st));
+                    ctor.body.clear();
+                }
+                prog_.methods.push_back(std::move(init));
+                prog_.methods[ctorIdx].initMethod = static_cast<int>(prog_.methods.size()) - 1;
+            } else {
+                MethodDecl& ctor = prog_.methods[ctorIdx];
+                ctor.body.insert(ctor.body.begin(), std::make_move_iterator(inits.begin()), std::make_move_iterator(inits.end()));
+            }
             if (!staticInit.body.empty()) {
                 staticInit.unit = c.unit;
                 staticInit.classIndex = cidx;
@@ -335,6 +459,153 @@ private:
         }
     }
 
+    // A subclass's instance fields (and properties) start with a copy of its base class's, in the same
+    // order: that is the object layout the ML hierarchy rules require.
+    void flattenFields() {
+        for (int ci : hierOrder_) {
+            ClassDecl& c = prog_.classes[static_cast<size_t>(ci)];
+            if (!hasBaseClass(c)) continue;
+            curModule_ = c.unit;
+            const int bi = c.supers[0];
+            const ClassDecl& b = prog_.classes[static_cast<size_t>(bi)];
+            std::vector<FieldDecl> fields;
+            std::set<std::string> names;
+            for (const FieldDecl& f : b.fields) {
+                if (f.isStatic) continue;
+                FieldDecl cp;
+                cp.loc = f.loc; cp.name = f.name; cp.type = f.type;
+                cp.isPrivate = f.isPrivate; cp.isProtected = f.isProtected;
+                cp.owner = f.owner >= 0 ? f.owner : bi;
+                names.insert(f.name);
+                fields.push_back(std::move(cp));
+            }
+            for (FieldDecl& f : c.fields) {
+                if (f.isStatic) continue;
+                if (names.count(f.name)) error(f.loc, "field '" + f.name + "' of '" + c.name + "' hides a field inherited from '" + b.name + "'");
+                fields.push_back(std::move(f));
+            }
+            for (FieldDecl& f : c.fields)
+                if (f.isStatic) fields.push_back(std::move(f));
+            c.fields = std::move(fields);
+            std::vector<PropertyDecl> props;
+            std::set<std::string> pnames;
+            for (const PropertyDecl& p : b.properties) {
+                PropertyDecl cp = p;
+                cp.owner = p.owner >= 0 ? p.owner : bi;
+                pnames.insert(p.name);
+                props.push_back(std::move(cp));
+            }
+            for (PropertyDecl& p : c.properties) {
+                if (pnames.count(p.name)) error(p.loc, "property '" + p.name + "' of '" + c.name + "' hides a property inherited from '" + b.name + "'");
+                props.push_back(std::move(p));
+            }
+            c.properties = std::move(props);
+        }
+    }
+
+    static std::string sigOf(const MethodDecl& m) {
+        std::string s = m.name + "(";
+        for (size_t i = m.isStatic ? 0 : 1; i < m.params.size(); ++i) {
+            if (i > (m.isStatic ? 0u : 1u)) s += ", ";
+            s += typeName(m.params[i].type);
+        }
+        return s + ")" + (m.ret == Type::Void ? "" : ": " + typeName(m.ret));
+    }
+
+    static bool sameSig(const MethodDecl& a, const MethodDecl& b) {
+        if (a.isStatic != b.isStatic || a.params.size() != b.params.size() || !(a.ret == b.ret)) return false;
+        for (size_t i = a.isStatic ? 0 : 1; i < a.params.size(); ++i)
+            if (!(a.params[i].type == b.params[i].type)) return false;
+        return true;
+    }
+
+    // Methods are inherited: a class sees its supertypes' methods unless it declares one with the same
+    // name, which must then have the same signature (an override / implementation).
+    void inheritMethods() {
+        for (int ci : hierOrder_) {
+            ClassDecl& c = prog_.classes[static_cast<size_t>(ci)];
+            ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
+            curModule_ = c.unit;
+            std::set<std::string> matched;
+            for (int sidx : c.supers) {
+                const ClassInfo& si = cinfo_[static_cast<size_t>(sidx)];
+                for (const auto& [name, mi] : si.methods) {
+                    const MethodDecl& M = prog_.methods[static_cast<size_t>(mi)];
+                    if (M.isPrivate) continue;
+                    auto own = info.methods.find(name);
+                    if (own == info.methods.end()) { info.methods.emplace(name, mi); continue; }
+                    const MethodDecl& O = prog_.methods[static_cast<size_t>(own->second)];
+                    if (O.classIndex == ci) {
+                        if (!sameSig(O, M))
+                            error(O.loc, "method '" + sigOf(O) + "' of '" + c.name + "' does not match '" + sigOf(M) + "' of '" + className(M.classIndex) + "'");
+                        matched.insert(name);
+                    } else {
+                        if (!sameSig(O, M))
+                            error(c.loc, "'" + c.name + "' inherits method '" + name + "' with different signatures from '" + className(O.classIndex) + "' and '" + className(M.classIndex) + "'");
+                        else if (O.isAbstract && !M.isAbstract) own->second = mi;
+                    }
+                }
+            }
+            for (const auto& [name, mi] : info.methods) {
+                const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
+                if (m.classIndex == ci && m.isOverride && !matched.count(name))
+                    error(m.loc, "method '" + name + "' is marked 'override' but '" + c.name + "' inherits no method of that name");
+                if (!c.isInterface && m.isAbstract)
+                    error(c.loc, "class '" + c.name + "' must implement '" + sigOf(m) + "' required by '" + className(m.classIndex) + "'");
+            }
+        }
+    }
+
+    // Calls through a class or interface type may reach an override in a subclass. For every method that
+    // some subclass replaces (and every interface method) a dispatcher `T.m$v` is synthesized: a chain of
+    // `isinst` tests, most derived class first, ending in the method T itself uses.
+    void buildDispatchers() {
+        const int n = static_cast<int>(prog_.classes.size());
+        for (int t = 0; t < n; ++t) {
+            ClassDecl& tc = prog_.classes[static_cast<size_t>(t)];
+            curModule_ = tc.unit;
+            std::vector<std::pair<std::string, int>> entries(cinfo_[static_cast<size_t>(t)].methods.begin(), cinfo_[static_cast<size_t>(t)].methods.end());
+            for (const auto& [name, xi] : entries) {
+                const MethodDecl& X = prog_.methods[static_cast<size_t>(xi)];
+                if (X.isStatic || X.isPrivate || (X.isAbstract && !tc.isInterface)) continue;
+                std::vector<std::pair<int, int>> cases;
+                for (int c = 0; c < n; ++c) {
+                    if (c == t || prog_.classes[static_cast<size_t>(c)].isInterface || !cinfo_[static_cast<size_t>(c)].isa.count(t)) continue;
+                    auto it = cinfo_[static_cast<size_t>(c)].methods.find(name);
+                    if (it == cinfo_[static_cast<size_t>(c)].methods.end() || prog_.methods[static_cast<size_t>(it->second)].isAbstract) continue;
+                    const int y = it->second;
+                    if (tc.isInterface) {
+                        const ClassDecl& cc = prog_.classes[static_cast<size_t>(c)];
+                        if (hasBaseClass(cc) && cinfo_[static_cast<size_t>(cc.supers[0])].isa.count(t)) {
+                            auto bi = cinfo_[static_cast<size_t>(cc.supers[0])].methods.find(name);
+                            if (bi != cinfo_[static_cast<size_t>(cc.supers[0])].methods.end() && bi->second == y) continue;  // the base's test covers it
+                        }
+                    } else if (y == xi) {
+                        continue;
+                    }
+                    cases.emplace_back(c, y);
+                }
+                if (!tc.isInterface && cases.empty()) continue;
+                std::stable_sort(cases.begin(), cases.end(), [&](const auto& l, const auto& r) {
+                    return cinfo_[static_cast<size_t>(l.first)].depth > cinfo_[static_cast<size_t>(r.first)].depth;
+                });
+                MethodDecl d;
+                d.isDispatcher = true;
+                d.classIndex = t;
+                d.unit = tc.unit;
+                d.name = name + "$v";
+                d.loc = X.loc;
+                d.params = X.params;
+                d.params[0].type = cinfo_[static_cast<size_t>(t)].type;
+                d.ret = X.ret;
+                d.cases = std::move(cases);
+                d.defaultImpl = tc.isInterface ? -1 : xi;
+                prog_.methods.push_back(std::move(d));
+                dispatch_[{t, name}] = static_cast<int>(prog_.methods.size()) - 1;
+            }
+        }
+    }
+
     void buildClassInfo() {
         for (size_t ci = 0; ci < prog_.classes.size(); ++ci) {
             ClassDecl& c = prog_.classes[ci];
@@ -354,6 +625,8 @@ private:
                 const MethodDecl& m = prog_.methods[mi];
                 if (m.classIndex != static_cast<int>(ci)) continue;
                 if (m.isCtor) { info.ctor = static_cast<int>(mi); continue; }
+                if (m.isInit) { info.init = static_cast<int>(mi); continue; }
+                if (m.isDispatcher) continue;
                 if (m.isStaticInit) { info.staticInit = static_cast<int>(mi); continue; }
                 if (!info.methods.emplace(m.name, static_cast<int>(mi)).second)
                     error(m.loc, "duplicate method '" + m.name + "' in class '" + c.name + "' (overloading is not supported)");
@@ -655,6 +928,14 @@ private:
             e = makeConvert(std::move(e), Expr::Conv::IntToDouble, target);
             return true;
         }
+        if (from.kind == Type::Class && target.kind == Type::Class) {  // a subclass value where its base class or interface is expected
+            const int fi = classOfType(from), ti = classOfType(target);
+            if (fi >= 0 && ti >= 0 && cinfo_[static_cast<size_t>(fi)].isa.count(ti)) {
+                e = makeConvert(std::move(e), Expr::Conv::Upcast, target);
+                return true;
+            }
+            return false;
+        }
         if (target.isNullable() && !from.isNullable()) {
             if (!coerce(e, *target.elem)) return false;
             e = makeConvert(std::move(e), Expr::Conv::Wrap, target);
@@ -754,6 +1035,13 @@ private:
                 e.type = Type::Bool;
                 if (t == Type::Invalid) return;
                 if (t == Type::Null) { error(e.loc, "'is' cannot test the null literal"); return; }
+                if (t.kind == Type::Class) {  // class test: isinst
+                    const int li = classOfType(t), ti = classOfType(e.newType);
+                    if (ti < 0) { if (e.newType != Type::Invalid) error(e.loc, "a class value can only be tested against a class or interface type"); return; }
+                    if (!cinfo_[static_cast<size_t>(li)].isa.count(ti) && !cinfo_[static_cast<size_t>(ti)].isa.count(li))
+                        error(e.loc, "'" + className(li) + "' and '" + className(ti) + "' are unrelated, so this test is always false");
+                    return;
+                }
                 coerce(e.lhs, Type::Obj);
                 return;
             }
@@ -862,7 +1150,12 @@ private:
         return true;
     }
 
-    bool canAccess(bool isPrivate, int memberClass) const { return !isPrivate || ctx_->cls == memberClass; }
+    // private: only inside the declaring class; protected: also inside its subclasses.
+    bool canAccess(bool isPrivate, int memberClass, bool isProtected = false) const {
+        if (isPrivate) return ctx_->cls == memberClass;
+        if (isProtected) return ctx_->cls >= 0 && cinfo_[static_cast<size_t>(ctx_->cls)].isa.count(memberClass) > 0;
+        return true;
+    }
 
     void checkMember(Expr& e) {
         int ci;
@@ -890,7 +1183,9 @@ private:
             auto f = info.inst.find(e.text);
             if (f != info.inst.end()) {
                 const FieldDecl& fd = decl.fields[static_cast<size_t>(info.instDecl[static_cast<size_t>(f->second)])];
-                if (!canAccess(fd.isPrivate, ci)) error(e.loc, "'" + e.text + "' is private to class '" + className(ci) + "'");
+                const int owner = fd.owner >= 0 ? fd.owner : ci;
+                if (!canAccess(fd.isPrivate, owner, fd.isProtected))
+                    error(e.loc, "'" + e.text + "' is " + (fd.isPrivate ? "private" : "protected") + " to class '" + className(owner) + "'");
                 e.classIndex = ci;
                 e.type = fd.type;
                 return;
@@ -898,14 +1193,17 @@ private:
             auto p = info.props.find(e.text);
             if (p != info.props.end()) {
                 const PropertyDecl& pd = decl.properties[static_cast<size_t>(p->second)];
-                if (!canAccess(pd.isPrivate, ci)) error(e.loc, "property '" + e.text + "' is private to class '" + className(ci) + "'");
+                const int powner = pd.owner >= 0 ? pd.owner : ci;
+                if (!canAccess(pd.isPrivate, powner, pd.isProtected))
+                    error(e.loc, "property '" + e.text + "' is " + (pd.isPrivate ? "private" : "protected") + " to class '" + className(powner) + "'");
                 const bool wantSet = writeTarget_;
                 if (wantSet && !pd.hasSet) { error(e.loc, "property '" + e.text + "' has no setter"); e.type = Type::Invalid; return; }
                 if (!wantSet && !pd.hasGet) { error(e.loc, "property '" + e.text + "' has no getter"); e.type = Type::Invalid; return; }
                 int mi = info.methods.at(std::string(wantSet ? "set_" : "get_") + e.text);
-                e.classIndex = ci;
+                e.classIndex = prog_.methods[static_cast<size_t>(mi)].classIndex;
                 e.methodIndex = mi;
                 e.type = pd.type;
+                adaptReceiver(e.lhs, mi);
                 if (!wantSet) {  // a read is a call of the getter
                     e.kind = Expr::Kind::MethodCall;
                     e.text = prog_.methods[static_cast<size_t>(mi)].name;
@@ -935,13 +1233,29 @@ private:
     }
 
     // Checks the arguments of a call to method `mi` (skipping the implicit `this`) and sets the result type.
-    void finishClassCall(Expr& e, int mi, bool instanceCall) {
+    // An instance method is declared for its own class; a receiver of a subclass type is upcast to it.
+    void adaptReceiver(ExprPtr& lhs, int mi) {
+        if (!lhs || lhs->type == Type::Invalid) return;
+        const Type& want = prog_.methods[static_cast<size_t>(mi)].params.empty() ? lhs->type : prog_.methods[static_cast<size_t>(mi)].params[0].type;
+        if (lhs->type.kind == Type::Class && want.kind == Type::Class && !(lhs->type == want)) coerce(lhs, want);
+    }
+
+    // `nonVirtual`: call exactly `mi` (base.m(...)); otherwise a call through class type `recvClass` goes
+    // through that class's dispatcher when a subclass can override the method.
+    void finishClassCall(Expr& e, int mi, bool instanceCall, bool nonVirtual = false, int recvClass = -1) {
         const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
         const int ci = m.classIndex;
-        if (!canAccess(m.isPrivate, ci)) error(e.loc, "method '" + e.text + "' is private to class '" + className(ci) + "'");
-        e.methodIndex = mi;
-        e.classIndex = ci;
+        if (!canAccess(m.isPrivate, ci, m.isProtected)) error(e.loc, "method '" + e.text + "' is " + (m.isPrivate ? "private" : "protected") + " to class '" + className(ci) + "'");
+        if (m.isAbstract && nonVirtual) error(e.loc, "cannot call abstract method '" + e.text + "' of '" + className(ci) + "' with base");
+        int target = mi;
+        if (instanceCall && !nonVirtual && recvClass >= 0) {
+            auto d = dispatch_.find({recvClass, m.name});
+            if (d != dispatch_.end()) target = d->second;
+        }
+        e.methodIndex = target;
+        e.classIndex = prog_.methods[static_cast<size_t>(target)].classIndex;
         e.isStatic = !instanceCall;
+        if (instanceCall) adaptReceiver(e.lhs, target);
         e.type = m.ret;
         const size_t skip = instanceCall ? 1 : 0;
         const size_t want = m.params.size() - skip;
@@ -956,14 +1270,20 @@ private:
     void checkNewObj(Expr& e) {
         auto it = classTable().find(e.text);
         for (auto& a : e.args) checkValue(a, "an argument");
+        if (e.text == "$invalid") { e.type = Type::Invalid; return; }  // generic expansion already reported it
         if (it == classTable().end()) {
             error(e.loc, "unknown class '" + e.text + "'");
             e.type = Type::Invalid;
             return;
         }
         const int ci = it->second;
+        if (prog_.classes[static_cast<size_t>(ci)].isInterface) {
+            error(e.loc, "cannot create an instance of interface '" + className(ci) + "'");
+            e.type = Type::Invalid;
+            return;
+        }
         const MethodDecl& ctor = prog_.methods[static_cast<size_t>(cinfo_[static_cast<size_t>(ci)].ctor)];
-        if (!canAccess(ctor.isPrivate, ci)) error(e.loc, "the constructor of '" + className(ci) + "' is private");
+        if (!canAccess(ctor.isPrivate, ci, ctor.isProtected)) error(e.loc, "the constructor of '" + className(ci) + "' is " + (ctor.isPrivate ? "private" : "protected"));
         e.classIndex = ci;
         e.methodIndex = cinfo_[static_cast<size_t>(ci)].ctor;
         e.type = cinfo_[static_cast<size_t>(ci)].type;
@@ -1052,6 +1372,32 @@ private:
 
     void checkMethodCall(Expr& e) {
         int ci;
+        if (e.lhs && e.lhs->kind == Expr::Kind::Var && e.lhs->text == "base" && !lookup("base")) {  // base.m(args) / constructor chain
+            const bool inInstance = ctx_->cls >= 0 && !ctx_->isStatic;
+            const ClassDecl* cd = ctx_->cls >= 0 ? &prog_.classes[static_cast<size_t>(ctx_->cls)] : nullptr;
+            for (auto& a : e.args) checkValue(a, "an argument");
+            e.type = Type::Invalid;
+            if (!inInstance || !hasBaseClass(*cd)) {
+                error(e.lhs->loc, inInstance ? "'base' is only available in a class that has a base class" : "'base' is only available inside instance methods and constructors");
+                return;
+            }
+            const int bi = cd->supers[0];
+            const ClassInfo& binfo = cinfo_[static_cast<size_t>(bi)];
+            int mi = -1;
+            if (e.text == "$init") {
+                mi = binfo.init;
+            } else {
+                auto it = binfo.methods.find(e.text);
+                if (it != binfo.methods.end()) mi = it->second;
+            }
+            if (mi < 0) { error(e.loc, "base class '" + className(bi) + "' has no method '" + e.text + "'"); return; }
+            e.lhs = makeVar("this", e.lhs->loc);
+            check(*e.lhs);
+            if (prog_.methods[static_cast<size_t>(mi)].isStatic) { error(e.loc, "method '" + e.text + "' is static; call it as " + className(bi) + "." + e.text + "(...)"); return; }
+            if (e.text == "$init") e.text = "base";
+            finishClassCall(e, mi, true, true, bi);
+            return;
+        }
         if (isClassRef(*e.lhs, ci)) {  // static call: Class.method(...)
             for (auto& a : e.args) checkValue(a, "an argument");
             const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
@@ -1081,7 +1427,7 @@ private:
                 error(e.loc, "method '" + e.text + "' is static; call it as " + className(ci) + "." + e.text + "(...)");
                 e.type = Type::Invalid;
             } else {
-                finishClassCall(e, it->second, true);
+                finishClassCall(e, it->second, true, false, ci);
             }
             return;
         }
@@ -1133,6 +1479,23 @@ private:
         e.type = to;
         if (from == Type::Invalid) { e.type = Type::Invalid; return; }
         using C = Expr::Conv;
+        if (e.conv == C::Downcast) {  // value as Class
+            resolveType(e.newType, e.loc);
+            to = e.newType;
+            e.type = to;
+            if (to == Type::Invalid) return;
+            const int fi = classOfType(from), ti = classOfType(to);
+            if (fi < 0 || ti < 0) {
+                error(e.loc, "'as' converts between class types, but " + typeName(from) + " as " + typeName(to) + " is not one");
+                e.type = Type::Invalid;
+            } else if (cinfo_[static_cast<size_t>(fi)].isa.count(ti)) {
+                e.conv = C::Upcast;
+            } else if (!cinfo_[static_cast<size_t>(ti)].isa.count(fi)) {
+                error(e.loc, "cannot cast '" + className(fi) + "' to '" + className(ti) + "': they are unrelated");
+                e.type = Type::Invalid;
+            }
+            return;
+        }
         auto fail = [&]() {
             std::string hint = from.isNullable() ? " (the value may be null; use '?" "?' or '!' first)" : "";
             error(e.loc, "cannot convert " + typeName(from) + " to " + typeName(to) + hint);
@@ -1356,6 +1719,7 @@ bool analyze(Program& program, const std::string& file, std::vector<Diagnostic>&
         program.modules.push_back(std::move(m));
     }
     size_t before = diagnostics.size();
+    expandGenerics(program, diagnostics);
     Sema sema(program, diagnostics);
     sema.setFirstDiag(before);
     sema.run();

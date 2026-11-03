@@ -52,12 +52,25 @@ struct Manifest {
     std::string type = "app";                   // "app" (runnable) or "library" (packed into a .lib)
     std::map<std::string, Workflow> workflows;  // declared plus synthesized defaults
     std::vector<Dependency> dependencies;       // sorted by name
+
+    // Optional `output` and `run` sections (any project file; written by Coyote Studio's Project Manager).
+    std::string description;
+    bool hasOutput = false;                     // an "output" section is present: it drives the default build/start workflows
+    std::string outDir = "bin";                 // output.directory: where Build writes its result
+    std::string outName;                        // output.name: file name without extension (default: the project name)
+    std::string outKind = "native";             // output.kind: "native" (executable) or "ml" (a .ml file for the PVM)
+    std::string outMode = "auto";               // output.mode: "auto", "bundle" or "native-only" (coyote-llvm)
+    bool keepUnused = false;                    // output.keepUnused: keep methods that are never called
+    std::vector<std::string> runArgs;           // run.args: arguments the program gets when started
 };
 
 struct ManifestError {
     int line, col;  // 0 when the problem is not tied to a position
     std::string message;
 };
+
+// The project file of `dir`: packages.json, else the first (by name) *.cyproj. Empty when there is none.
+std::string findManifestFile(const std::string& dir);
 
 // Parses and validates packages.json text. Throws ManifestError on the first problem.
 Manifest loadManifest(const std::string& text);

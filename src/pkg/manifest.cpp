@@ -1,6 +1,7 @@
 #include "manifest.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <set>
 
 #include "json.hpp"
@@ -241,6 +242,21 @@ std::string stemOf(const std::string& entry) {
 
 } // namespace
 
+std::string findManifestFile(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const bool here = dir.empty() || dir == ".";
+    fs::path d = here ? fs::path(".") : fs::path(dir);
+    auto shown = [&](const fs::path& file) { return here ? file.filename().string() : file.string(); };
+    if (fs::is_regular_file(d / "packages.json", ec)) return shown(d / "packages.json");
+    std::vector<std::string> found;
+    for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec) && it->path().extension() == ".cyproj") found.push_back(it->path().string());
+    if (found.empty()) return "";
+    std::sort(found.begin(), found.end());
+    return shown(found.front());
+}
+
 std::string Dependency::canonical() const {
     switch (kind) {
         case Path: return "path:" + path + "|" + version;
@@ -260,11 +276,12 @@ Manifest loadManifest(const std::string& text) {
     }
     if (root.kind != Json::Object) bad(root, "packages.json must contain a JSON object");
 
-    static const std::set<std::string> known = {"schemaVersion", "name", "version", "entry", "type", "requires", "workflows", "dependencies"};
+    static const std::set<std::string> known = {"schemaVersion", "name", "version", "entry", "type", "requires", "workflows", "dependencies",
+                                                "description", "output", "run", "editor", "cyprojVersion"};
     for (const auto& m : root.members)
         if (!known.count(m.first)) {
             Json at = m.second;
-            bad(at, "unknown key '" + m.first + "' (known keys: schemaVersion, name, version, entry, type, requires, workflows, dependencies)");
+            bad(at, "unknown key '" + m.first + "' (known keys: schemaVersion, name, version, entry, type, requires, workflows, dependencies, description, output, run)");
         }
 
     Manifest m;
@@ -297,6 +314,50 @@ Manifest loadManifest(const std::string& text) {
     if (const Json* e = root.find("entry")) {
         checkEntry(*e);
         m.entry = e->string;
+    }
+
+    if (const Json* ds = root.find("description")) {
+        if (ds->kind != Json::String) bad(*ds, "'description' must be a string");
+        m.description = ds->string;
+    }
+    if (const Json* o = root.find("output")) {
+        if (o->kind != Json::Object) bad(*o, "'output' must be an object");
+        m.hasOutput = true;
+        for (const auto& kv : o->members) {
+            const Json& v = kv.second;
+            if (kv.first == "directory") {
+                if (v.kind != Json::String || v.string.empty() || v.string[0] == '/' || v.string.find("..") != std::string::npos || v.string.find(':') != std::string::npos)
+                    bad(v, "'output.directory' must be a relative folder inside the project (no '..')");
+                m.outDir = v.string;
+            } else if (kv.first == "name") {
+                if (v.kind != Json::String || v.string.empty() || v.string.find_first_of("/\\:") != std::string::npos) bad(v, "'output.name' must be a file name without folders");
+                m.outName = v.string;
+            } else if (kv.first == "kind") {
+                if (v.kind != Json::String || (v.string != "native" && v.string != "ml")) bad(v, "'output.kind' must be \"native\" or \"ml\"");
+                m.outKind = v.string;
+            } else if (kv.first == "mode") {
+                if (v.kind != Json::String || (v.string != "auto" && v.string != "bundle" && v.string != "native-only")) bad(v, "'output.mode' must be \"auto\", \"bundle\" or \"native-only\"");
+                m.outMode = v.string;
+            } else if (kv.first == "keepUnused") {
+                if (v.kind != Json::Bool) bad(v, "'output.keepUnused' must be true or false");
+                m.keepUnused = v.boolean;
+            } else {
+                Json at = v;
+                bad(at, "unknown key 'output." + kv.first + "' (known: directory, name, kind, mode, keepUnused)");
+            }
+        }
+    }
+    if (const Json* r = root.find("run")) {
+        if (r->kind != Json::Object) bad(*r, "'run' must be an object");
+        for (const auto& kv : r->members) {
+            const Json& v = kv.second;
+            if (kv.first != "args") { Json at = v; bad(at, "unknown key 'run." + kv.first + "' (known: args)"); }
+            if (v.kind != Json::Array) bad(v, "'run.args' must be an array of strings");
+            for (const Json& item : v.items) {
+                if (item.kind != Json::String) bad(item, "'run.args' entries must be strings");
+                m.runArgs.push_back(item.string);
+            }
+        }
     }
 
     if (const Json* d = root.find("dependencies")) {
@@ -335,24 +396,72 @@ Manifest loadManifest(const std::string& text) {
         Workflow b;
         b.name = "build";
         b.synthesized = true;
-        Step mk;
-        mk.kind = Step::Mkdir;
-        mk.argv = {".coyote/out"};
-        Step run;
-        run.argv = {"coyote", "build", m.entry, "-o", ".coyote/out/" + stemOf(m.entry) + ".ml"};
-        b.steps = {mk, run};
+        if (m.hasOutput) {
+            // Built according to the project's output settings: <directory>/<name>[.exe] (native) or <name>.ml.
+            const std::string stem = m.outName.empty() ? m.name : m.outName;
+            Step mk;
+            mk.kind = Step::Mkdir;
+            mk.argv = {m.outDir};
+            b.steps.push_back(mk);
+            std::vector<std::string> cc = {"coyote", "build", m.entry};
+            if (m.keepUnused) cc.push_back("--keep-unused");
+            if (m.outKind == "ml") {
+                cc.push_back("-o");
+                cc.push_back(m.outDir + "/" + stem + ".ml");
+                Step run;
+                run.argv = cc;
+                b.steps.push_back(run);
+            } else {
+                Step mk2;
+                mk2.kind = Step::Mkdir;
+                mk2.argv = {".coyote/out"};
+                b.steps.push_back(mk2);
+                cc.push_back("-o");
+                cc.push_back(".coyote/out/" + stemOf(m.entry) + ".ml");
+                Step run;
+                run.argv = cc;
+                b.steps.push_back(run);
+                Step nat;
+#ifdef _WIN32
+                const std::string exe = m.outDir + "/" + stem + ".exe";
+#else
+                const std::string exe = m.outDir + "/" + stem;
+#endif
+                nat.argv = {"coyote", "llvm", ".coyote/out/" + stemOf(m.entry) + ".ml", "-o", exe};
+                if (m.outMode == "bundle") nat.argv.push_back("--bundle");
+                else if (m.outMode == "native-only") nat.argv.push_back("--native-only");
+                b.steps.push_back(nat);
+            }
+        } else {
+            Step mk;
+            mk.kind = Step::Mkdir;
+            mk.argv = {".coyote/out"};
+            Step run;
+            run.argv = {"coyote", "build", m.entry, "-o", ".coyote/out/" + stemOf(m.entry) + ".ml"};
+            b.steps = {mk, run};
+        }
         m.workflows["build"] = std::move(b);
     }
     if (!m.workflows.count("start")) {
         Workflow s;
         s.name = "start";
         s.synthesized = true;
-        Step ref;
-        ref.kind = Step::Ref;
-        ref.ref = "build";
-        Step run;
-        run.argv = {"pvm", ".coyote/out/" + stemOf(m.entry) + ".ml"};
-        s.steps = {ref, run};
+        if (m.hasOutput) {  // compile and run on the PVM with every permission; run.args reach the program
+            Step run;
+            run.argv = {"coyote", "run", m.entry};
+            if (!m.runArgs.empty()) {
+                run.argv.push_back("--");
+                run.argv.insert(run.argv.end(), m.runArgs.begin(), m.runArgs.end());
+            }
+            s.steps = {run};
+        } else {
+            Step ref;
+            ref.kind = Step::Ref;
+            ref.ref = "build";
+            Step run;
+            run.argv = {"pvm", ".coyote/out/" + stemOf(m.entry) + ".ml"};
+            s.steps = {ref, run};
+        }
         m.workflows["start"] = std::move(s);
     }
 

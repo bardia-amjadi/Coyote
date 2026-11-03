@@ -32,6 +32,7 @@ void usage(std::ostream& os) {
        << "  coyote run <file.coy> [-- args...]      compile and run on the PVM (all permissions; args via Environment.Arg)\n"
        << "  coyote lib pack <project-dir> [-o <file.lib>] | lib info <file.lib>   build / inspect a library (docs/libraries.md)\n"
        << "  coyote pvm|cpx|cpm|cdt|llvm <args...>  run the named tool of this toolchain\n"
+       << "  (build and run: --keep-unused keeps methods that are never called; by default they are removed)\n"
        << "  coyote --version | --help\n"
        << "default output for 'build' is <name>.ml in the current directory.\n";
 }
@@ -45,6 +46,8 @@ std::string defaultOutput(const std::string& src) {
 }
 
 // Returns 0 on success, 1 on compile errors, 2 on usage/IO errors.
+bool g_keepUnused = false;  // --keep-unused: do not remove unreachable methods
+
 int compile(const std::string& path, bool write, const std::string& outPath) {
     coyote::Program prog;
     std::vector<coyote::Diagnostic> diags;
@@ -65,7 +68,7 @@ int compile(const std::string& path, bool write, const std::string& outPath) {
     }
     if (!write) return 0;
 
-    std::string ml = coyote::generateMl(prog, path);
+    std::string ml = coyote::generateMl(prog, path, !g_keepUnused);
     if (outPath == "-") {
         std::cout << ml;
         std::cout.flush();
@@ -130,6 +133,8 @@ int main(int argc, char** argv) {
         if (args[i] == "-o" && cmd == "build") {
             if (i + 1 >= args.size()) { std::cerr << "coyote: error: '-o' needs a value\n"; return 2; }
             output = args[++i];
+        } else if (args[i] == "--keep-unused") {
+            g_keepUnused = true;
         } else if (!args[i].empty() && args[i][0] == '-' && args[i] != "-") {
             std::cerr << "coyote: error: unknown option '" << args[i] << "'\n";
             return 2;

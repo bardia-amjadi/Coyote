@@ -567,6 +567,32 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 stack.pop_back();
                 break;
             }
+            case Op::Upcast: break;  // checked statically by the verifier
+            case Op::Downcast: {
+                Obj* o = stack.back().ref;
+                if (o && o->type) {
+                    const ClassDecl& target = m.classes[static_cast<size_t>(in.cls)];
+                    (void)target;
+                    size_t from = 0;
+                    while (from < m.classes.size() && m.classes[from].name != o->type->name) ++from;
+                    if (from == m.classes.size() || !m.classes[from].isa[static_cast<size_t>(in.cls)])
+                        throw rtError("invalid cast: " + o->type->name + " is not a " + in.str);
+                } else if (!o) {
+                    /* null stays null */
+                }
+                break;
+            }
+            case Op::IsInst: {
+                Obj* o = stack.back().ref;
+                bool r = false;
+                if (o && o->type) {
+                    size_t from = 0;
+                    while (from < m.classes.size() && m.classes[from].name != o->type->name) ++from;
+                    r = from < m.classes.size() && m.classes[from].isa[static_cast<size_t>(in.cls)];
+                }
+                stack.back() = Value::ofBool(r);
+                break;
+            }
             case Op::GetGlobal: stack.push_back(globals[static_cast<size_t>(in.target)]); break;
             case Op::SetGlobal:
                 globals[static_cast<size_t>(in.target)] = std::move(stack.back());

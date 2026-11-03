@@ -19,7 +19,7 @@ const std::set<std::string>& keywords() {
     static const std::set<std::string> w = {"hand", "method", "var", "int", "string", "boolean",
                                             "if", "else", "while", "for", "break", "continue", "return", "true", "false", "array", "new",
                                             "double", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use",
-                                            "class", "model", "property", "constructor", "public", "private", "static", "this"};
+                                            "class", "model", "interface", "property", "constructor", "public", "private", "protected", "override", "static", "this"};
     return w;
 }
 
@@ -48,16 +48,16 @@ public:
                 p.imports.push_back(std::move(imp));
             } else if (isWord("export")) {
                 take();
-                if (isWord("class") || isWord("model")) {
+                if (isWord("class") || isWord("model") || isWord("interface")) {
                     p.classes.push_back(classDecl());
                     p.classes.back().exported = true;
                 } else if (isWord("method")) {
                     p.methods.push_back(methodDecl());
                     p.methods.back().exported = true;
                 } else {
-                    fail(peek(), "'export' must be followed by 'method', 'class' or 'model', found " + describe(peek()));
+                    fail(peek(), "'export' must be followed by 'method', 'class', 'interface' or 'model', found " + describe(peek()));
                 }
-            } else if (isWord("class") || isWord("model")) {
+            } else if (isWord("class") || isWord("model") || isWord("interface")) {
                 p.classes.push_back(classDecl());
             } else if (isWord("hand")) {
                 p.hands.push_back(handDecl());
@@ -127,6 +127,19 @@ private:
         if (t.kind != Tok::Ident || keywords().count(t.text) || unsupportedWords().count(t.text)) return false;
         const Token& n = peekNext();
         auto isName = [&](const Token& x) { return x.kind == Tok::Ident && !keywords().count(x.text); };
+        if (tokIsPunct(n, "<")) {  // Box<int> b / Pair<string, int>? p: scan the balanced <...> and look at what follows
+            size_t k = pos_ + 1;
+            int depth = 0;
+            for (; k < toks_.size() && k < pos_ + 80; ++k) {
+                const Token& x = toks_[k];
+                if (x.kind == Tok::Punct && x.text == "<") ++depth;
+                else if (x.kind == Tok::Punct && x.text == ">") { if (--depth == 0) break; }
+                else if (!(x.kind == Tok::Ident || (x.kind == Tok::Punct && (x.text == "," || x.text == "?")))) return false;
+            }
+            if (k + 1 >= toks_.size() || depth != 0) return false;
+            if (isName(toks_[k + 1])) return true;
+            return tokIsPunct(toks_[k + 1], "?") && k + 2 < toks_.size() && isName(toks_[k + 2]);
+        }
         if (isName(n)) return true;
         return tokIsPunct(n, "?") && pos_ + 2 < toks_.size() && isName(toks_[pos_ + 2]);
     }
@@ -200,7 +213,40 @@ private:
         }
         if (unsupportedWords().count(t.text)) fail(t, "type '" + t.text + "' is not supported yet");
         if (keywords().count(t.text)) fail(t, "expected a type, found keyword '" + t.text + "'");
-        return Type::classOf(take().text);  // a class name; semantic analysis checks that it exists
+        Type ct = Type::classOf(take().text);  // a class name; semantic analysis checks that it exists
+        if (isPunct("<")) ct.targs = typeArgList();
+        return ct;
+    }
+
+    // '<' type {',' type} '>'   (generic arguments)
+    std::vector<Type> typeArgList() {
+        std::vector<Type> args;
+        const Token open = take();  // '<'
+        Depth guard(*this, open);
+        for (;;) {
+            args.push_back(typeName());
+            if (isPunct(",")) { take(); continue; }
+            break;
+        }
+        expectPunct(">", "to close the generic arguments");
+        return args;
+    }
+
+    // '<' name {',' name} '>'   (declaring type parameters)
+    std::vector<std::string> typeParamList() {
+        std::vector<std::string> names;
+        take();  // '<'
+        for (;;) {
+            const SourceLoc at = peek().loc;
+            std::string n = expectName("a type parameter name");
+            for (const std::string& o : names)
+                if (o == n) throw CompileError{Diagnostic{file_, at, "duplicate type parameter '" + n + "'"}};
+            names.push_back(std::move(n));
+            if (isPunct(",")) { take(); continue; }
+            break;
+        }
+        expectPunct(">", "to close the type parameters");
+        return names;
     }
 
     // allowThis: a leading `this T name` makes an extension method (reported through *isExtension).
@@ -257,15 +303,24 @@ private:
         return h;
     }
 
-    MethodDecl methodDecl(bool topLevel = true) {
+    MethodDecl methodDecl(bool topLevel = true, bool signatureOnly = false) {
         MethodDecl m;
         take();  // 'method'
         m.loc = peek().loc;
         m.name = expectName("a method name");
+        if (isPunct("<")) {
+            if (!topLevel) fail(peek(), "generic methods are only supported at the top level; make the class generic instead");
+            m.typeParams = typeParamList();
+        }
         m.params = paramList(topLevel, &m.isExtension);
         if (isPunct(":")) {
             take();
             m.ret = typeName();
+        }
+        if (signatureOnly) {  // interface method: no body
+            m.isAbstract = true;
+            endStatement();
+            return m;
         }
         m.body = block("to start the body of method '" + m.name + "'");
         return m;
@@ -281,9 +336,24 @@ private:
     ClassDecl classDecl() {
         ClassDecl c;
         c.isModel = isWord("model");
-        take();  // 'class' / 'model'
+        c.isInterface = isWord("interface");
+        take();  // 'class' / 'model' / 'interface'
         c.loc = peek().loc;
         c.name = expectName("a class name");
+        if (isPunct("<")) c.typeParams = typeParamList();
+        if (isPunct(":")) {  // class D : Base, Interface1, Interface2
+            if (c.isModel) fail(peek(), "a model cannot have a base class or interfaces");
+            take();
+            for (;;) {
+                c.superLocs.push_back(peek().loc);
+                if (peek().kind != Tok::Ident || keywords().count(peek().text)) fail(peek(), "expected a base class or interface name, found " + describe(peek()));
+                Type st = typeName();
+                c.superNames.push_back(st.name);
+                c.superTypes.push_back(std::move(st));
+                if (!isPunct(",")) break;
+                take();
+            }
+        }
         if (!isPunct("{")) fail(peek(), "expected '{' to start the body of '" + c.name + "', found " + describe(peek()));
         const Token open = take();
         Depth guard(*this, open);
@@ -315,12 +385,17 @@ private:
     }
 
     void classMember(ClassDecl& c) {
-        bool isPrivate = false, isStatic = false, sawAccess = false;
+        bool isPrivate = false, isProtected = false, isStatic = false, isOverride = false, sawAccess = false;
         for (;;) {
-            if (isWord("public") || isWord("private")) {
-                if (sawAccess) fail(peek(), "a member can have only one of 'public' and 'private'");
+            if (isWord("public") || isWord("private") || isWord("protected")) {
+                if (sawAccess) fail(peek(), "a member can have only one of 'public', 'private' and 'protected'");
                 sawAccess = true;
                 isPrivate = peek().text == "private";
+                isProtected = peek().text == "protected";
+                take();
+            } else if (isWord("override")) {
+                if (isOverride) fail(peek(), "duplicate 'override'");
+                isOverride = true;
                 take();
             } else if (isWord("static")) {
                 if (isStatic) fail(peek(), "duplicate 'static'");
@@ -338,23 +413,44 @@ private:
             MethodDecl m;
             m.isCtor = true;
             m.isPrivate = isPrivate;
+            m.isProtected = isProtected;
             m.loc = take().loc;
             m.name = "$new";
             m.params = paramList();
+            if (isPunct(":")) {  // constructor(...) : base(args)
+                take();
+                if (!isWord("base")) fail(peek(), "expected 'base(...)' after ':' in a constructor, found " + describe(peek()));
+                m.hasBaseCall = true;
+                m.baseLoc = take().loc;
+                if (!isPunct("(")) fail(peek(), "expected '(' after 'base', found " + describe(peek()));
+                take();
+                while (!isPunct(")")) {
+                    m.baseArgs.push_back(expression());
+                    if (isPunct(",")) take(); else break;
+                }
+                if (!isPunct(")")) fail(peek(), "expected ')' to close the base(...) arguments, found " + describe(peek()));
+                take();
+            }
             m.body = block("to start the constructor body");
             c.methods.push_back(std::move(m));
             return;
         }
         if (isWord("method")) {
-            MethodDecl m = methodDecl(false);
+            MethodDecl m = methodDecl(false, c.isInterface);
             m.isStatic = isStatic;
             m.isPrivate = isPrivate;
+            m.isProtected = isProtected;
+            m.isOverride = isOverride;
+            if (c.isInterface && (isStatic || isPrivate || isProtected || isOverride))
+                fail(t, "interface methods cannot be static, private, protected or override");
             c.methods.push_back(std::move(m));
             return;
         }
+        if (c.isInterface) fail(t, "an interface can only contain method signatures (method name(params): type)");
+        if (isOverride) fail(t, "'override' applies to methods only");
         if (isWord("property")) {
             if (isStatic) fail(t, "static properties are not supported; use a static field");
-            propertyDecl(c, isPrivate);
+            propertyDecl(c, isPrivate, isProtected);
             return;
         }
         if (t.kind != Tok::Ident) fail(t, "expected a member of class '" + c.name + "', found " + describe(t));
@@ -366,6 +462,7 @@ private:
         f.loc = peek().loc;
         f.name = expectName("a field name");
         f.isPrivate = isPrivate;
+        f.isProtected = isProtected;
         f.isStatic = isStatic;
         if (isPunct("=")) {
             take();
@@ -377,13 +474,14 @@ private:
         c.fields.push_back(std::move(f));
     }
 
-    void propertyDecl(ClassDecl& c, bool isPrivate) {
+    void propertyDecl(ClassDecl& c, bool isPrivate, bool isProtected) {
         take();  // 'property'
         PropertyDecl p;
         p.type = typeName();
         p.loc = peek().loc;
         p.name = expectName("a property name");
         p.isPrivate = isPrivate;
+        p.isProtected = isProtected;
         for (const PropertyDecl& other : c.properties)
             if (other.name == p.name) fail(toks_[pos_ - 1], "duplicate property '" + p.name + "' in class '" + c.name + "'");
         for (const FieldDecl& other : c.fields)
@@ -393,6 +491,7 @@ private:
             MethodDecl m;
             m.loc = p.loc;
             m.isPrivate = isPrivate;
+            m.isProtected = isProtected;
             m.name = (getter ? "get_" : "set_") + p.name;
             if (getter) {
                 m.ret = p.type;
@@ -800,6 +899,18 @@ private:
                 lhs = std::move(e);
                 continue;
             }
+            if (level == 3 && isWord("as")) {  // downcast: animal as Dog
+                auto e = std::make_unique<Expr>();
+                e->kind = Expr::Kind::Convert;
+                e->conv = Expr::Conv::Downcast;
+                e->loc = t.loc;
+                take();
+                e->lhs = std::move(lhs);
+                e->newType = typeName();
+                measure(*e);
+                lhs = std::move(e);
+                continue;
+            }
             if (t.kind != Tok::Punct ||
                 std::find(levels[level].begin(), levels[level].end(), t.text) == levels[level].end())
                 return lhs;
@@ -883,6 +994,7 @@ private:
                         e->kind = Expr::Kind::NewObj;  // new Point(1, 2)
                         e->loc = peek().loc;
                         e->text = take().text;
+                        if (isPunct("<")) e->newType = [&] { Type ct = Type::classOf(e->text); ct.targs = typeArgList(); return ct; }();
                         e->args = argList();
                         measure(*e);
                         return e;
@@ -913,6 +1025,30 @@ private:
                 if (keywords().count(t.text)) fail(t, "'" + t.text + "' cannot be used in an expression");
                 if (unsupportedWords().count(t.text)) fail(t, "'" + t.text + "' is not supported yet");
                 if (tokIsPunct(peekNext(), "(")) return callExpr();
+                if (tokIsPunct(peekNext(), "<")) {  // Id<int>(x): explicit generic arguments (otherwise `a < b`)
+                    const size_t savePos = pos_;
+                    const int saveDepth = depth_;
+                    std::vector<Type> targs;
+                    bool ok = false;
+                    const Token& name = peek();
+                    try {
+                        take();
+                        targs = typeArgList();
+                        ok = isPunct("(");
+                    } catch (const CompileError&) {
+                    }
+                    if (ok) {
+                        e->kind = Expr::Kind::Call;
+                        e->loc = name.loc;
+                        e->text = name.text;
+                        e->typeArgs = std::move(targs);
+                        e->args = argList();
+                        measure(*e);
+                        return e;
+                    }
+                    pos_ = savePos;
+                    depth_ = saveDepth;
+                }
                 e->kind = Expr::Kind::Var;
                 e->text = take().text;
                 return e;

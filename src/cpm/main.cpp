@@ -34,7 +34,7 @@ void usage(std::ostream& os) {
        << "  lock                 re-resolve and write the lock file without installing\n"
        << "  list                 list the locked packages\n"
        << "  verify               check the installed packages against the lock file\n"
-       << "  init [name] [--structured|--library]  create packages.json and app.coy, or a library project (never overwrites)\n"
+       << "  init [name] [--structured|--library|--cyproj]  create packages.json and app.coy (or <name>.cyproj and src/main.coy), or a library project (never overwrites)\n"
        << "  layout --structured [--apply]  show (or with --apply, perform) the move of root .coy files into src/\n"
        << "exit codes: 0 ok; 1 operation failed; 64 usage error or invalid packages.json\n";
 }
@@ -61,9 +61,10 @@ struct Project {
 // Returns 0 or the exit code to stop with.
 int loadProject(const std::string& dir, Project& p) {
     p.dir = dir;
-    fs::path file = p.dir / "packages.json";
+    const std::string found = coyote::pkg::findManifestFile(dir);
+    fs::path file = found.empty() ? p.dir / "packages.json" : fs::path(found);
     std::error_code ec;
-    if (!fs::is_regular_file(file, ec)) {
+    if (found.empty()) {
         std::cerr << "cpm: error: no packages.json in " << (dir == "." ? "the current directory" : "'" + dir + "'") << " (use 'cpm init' to create one)\n";
         return kExitUsage;
     }
@@ -71,7 +72,7 @@ int loadProject(const std::string& dir, Project& p) {
         std::cerr << "cpm: error: packages.json is larger than the 1 MiB limit\n";
         return kExitUsage;
     }
-    const std::string shown = dir == "." ? "packages.json" : file.string();
+    const std::string shown = dir == "." ? file.filename().string() : file.string();
     try {
         p.manifest = loadManifest(readFile(file));
     } catch (const ManifestError& e) {
@@ -229,22 +230,35 @@ std::string sanitizeName(const std::string& s) {
 }
 
 int cmdInit(const std::string& dir, std::vector<std::string> args) {
-    bool structured = false, library = false;
+    bool structured = false, library = false, cyproj = false;
     std::string name;
     for (const std::string& a : args) {
-        if (a == "--structured") structured = true;
+        if (a == "--cyproj") cyproj = true;
+        else if (a == "--structured") structured = true;
         else if (a == "--library") library = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "cpm: error: unknown option '" << a << "'\n"; return kExitUsage; }
         else if (name.empty()) name = a;
         else { std::cerr << "cpm: error: only one project name is allowed\n"; return kExitUsage; }
     }
     if (library && structured) { std::cerr << "cpm: error: --library and --structured cannot be combined\n"; return kExitUsage; }
+    if (cyproj && structured) { std::cerr << "cpm: error: --cyproj and --structured cannot be combined\n"; return kExitUsage; }
     fs::path root = dir;
     std::error_code ec;
     if (name.empty()) name = sanitizeName(fs::absolute(root, ec).lexically_normal().filename().string());
 
     std::string manifest;
-    if (structured) {
+    std::string manifestFile = "packages.json";
+    std::string appEntry = "app.coy";
+    if (cyproj) {  // a Visual-Studio-style project file: <Name>.cyproj with build and run settings
+        manifestFile = name + ".cyproj";
+        appEntry = "src/main.coy";
+        if (library)
+            manifest = "{\n  \"schemaVersion\": 1,\n  \"name\": \"" + name + "\",\n  \"version\": \"1.0.0\",\n  \"type\": \"library\",\n  \"description\": \"\"\n}\n";
+        else
+            manifest = "{\n  \"schemaVersion\": 1,\n  \"name\": \"" + name + "\",\n  \"version\": \"1.0.0\",\n  \"type\": \"app\",\n  \"entry\": \"src/main.coy\",\n  \"description\": \"\",\n"
+                       "  \"output\": { \"directory\": \"bin\", \"name\": \"" + name + "\", \"kind\": \"native\", \"mode\": \"auto\", \"keepUnused\": false },\n"
+                       "  \"run\": { \"args\": [] }\n}\n";
+    } else if (structured) {
         manifest = "{\n  \"schemaVersion\": 1,\n  \"name\": \"" + name + "\",\n  \"version\": \"0.1.0\",\n  \"entry\": \"app.coy\",\n"
                    "  \"workflows\": {\n    \"build\": [[\"coyote\", \"build\", \"app.coy\", \"-o\", \"bin/" + name + ".ml\"]],\n"
                    "    \"start\": [\"@build\", [\"pvm\", \"bin/" + name + ".ml\"]]\n  },\n  \"dependencies\": {}\n}\n";
@@ -265,7 +279,7 @@ int cmdInit(const std::string& dir, std::vector<std::string> args) {
     for (char c : name) if (std::isalnum(static_cast<unsigned char>(c))) cls += c;
     if (cls.empty() || std::isdigit(static_cast<unsigned char>(cls[0]))) cls = "Lib" + cls;
     cls[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(cls[0])));
-    std::vector<std::pair<std::string, std::string>> files = {{"packages.json", manifest}};
+    std::vector<std::pair<std::string, std::string>> files = {{manifestFile, manifest}};
     if (library)
         files.push_back({"src/" + cls + ".coy",
                          "# Library '" + name + "': build it with `coyote lib pack .`, then `use \"" + name + "\"` (or `use \"./path/" + name + ".lib\"`).\n"
@@ -276,7 +290,7 @@ int cmdInit(const std::string& dir, std::vector<std::string> args) {
                          "    }\n"
                          "}\n"});
     else
-        files.push_back({"app.coy", "use \"Standard\"\n\nShell.PrintLine(\"Hello from " + name + "\")\n"});
+        files.push_back({appEntry, "use \"Standard\"\n\nShell.PrintLine(\"Hello from " + name + "\")\n"});
     if (structured) files.push_back({"appsettings.json", "{\n  \"appName\": \"" + name + "\"\n}\n"});
     for (const auto& f : files)
         if (fs::exists(root / f.first, ec)) {

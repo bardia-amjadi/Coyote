@@ -54,7 +54,8 @@ int pack(const std::string& dirArg, std::string outPath, std::ostream& out, std:
     fs::path dir = dirArg;
     if (!fs::is_directory(dir, ec)) { err << "coyote: error: '" << dirArg << "' is not a directory\n"; return 2; }
     std::string manifestText;
-    if (!readFile(dir / "packages.json", manifestText)) { err << "coyote: error: " << dirArg << " has no packages.json\n"; return 2; }
+    const std::string manifestFile = pkg::findManifestFile(dir.string());
+    if (manifestFile.empty() || !readFile(manifestFile, manifestText)) { err << "coyote: error: " << dirArg << " has no packages.json or .cyproj project file\n"; return 2; }
     pkg::Manifest m;
     try {
         m = pkg::loadManifest(manifestText);

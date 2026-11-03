@@ -141,7 +141,8 @@ private:
             fs::path pkg = dir / ".coyote" / "packages" / name;
             if (fs::is_directory(pkg, ec)) {
                 std::string text, err;
-                if (!readSource((pkg / "packages.json").string(), text, err)) {
+                const std::string manifestFile = pkg::findManifestFile(pkg.string());
+                if (manifestFile.empty() || !readSource(manifestFile, text, err)) {
                     why = "package '" + name + "' has no readable packages.json (" + err + ")";
                     return false;
                 }

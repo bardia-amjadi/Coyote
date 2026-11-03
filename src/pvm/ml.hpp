@@ -135,7 +135,9 @@ enum class Op {
     // version 5: classes and globals
     NewObj, GetField, SetField, GetGlobal, SetGlobal,
     // version 6: function values
-    MkClosure, CallFn
+    MkClosure, CallFn,
+    // version 7: class hierarchies
+    Upcast, Downcast, IsInst
 };
 
 // Instruction names and the ML version that introduced each.
@@ -189,6 +191,7 @@ inline const std::vector<OpInfo>& opTable() {
         {Op::NewObj, "newobj", 5},      {Op::GetField, "getfield", 5},  {Op::SetField, "setfield", 5},
         {Op::GetGlobal, "getglobal", 5}, {Op::SetGlobal, "setglobal", 5},
         {Op::MkClosure, "mkclosure", 6}, {Op::CallFn, "callfn", 6},
+        {Op::Upcast, "upcast", 7}, {Op::Downcast, "downcast", 7}, {Op::IsInst, "isinst", 7},
     };
     return t;
 }
@@ -233,6 +236,8 @@ struct ClassDecl {
     std::string name;
     int mlLine = 0;
     std::vector<FieldDecl> fields;
+    std::vector<std::string> supers;  // version 7: `class D extends A B`: base class and interfaces (resolved by the verifier into isa)
+    std::vector<char> isa;            // isa[j] != 0 when this class is class j or a subtype of it (computed by the verifier)
 };
 
 struct GlobalDecl {

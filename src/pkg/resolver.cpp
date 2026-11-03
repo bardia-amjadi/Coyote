@@ -156,9 +156,10 @@ private:
 };
 
 std::string readManifestFile(const fs::path& dir, const std::string& pkg) {
-    fs::path p = dir / "packages.json";
+    const std::string found = findManifestFile(dir.string());
+    fs::path p = found.empty() ? dir / "packages.json" : fs::path(found);
     std::error_code ec;
-    if (!fs::is_regular_file(p, ec)) throw ResolveError{"package '" + pkg + "' has no packages.json"};
+    if (found.empty()) throw ResolveError{"package '" + pkg + "' has no packages.json or .cyproj file"};
     if (fs::file_size(p, ec) > 1024 * 1024) throw ResolveError{"package '" + pkg + "' has a packages.json larger than 1 MiB"};
     return readAll(p);
 }
