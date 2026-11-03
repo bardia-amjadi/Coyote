@@ -4,7 +4,7 @@ ML is the textual, versioned interface between the Coyote compiler and execution
 compiler (`coyote`) emits it; the PVM (`pvm`) loads, verifies and executes it. The two programs
 share **no code**, only this document.
 
-Versions: the compiler emits **version 5**, or **version 6** when the program uses function values. The PVM accepts versions **1 to 6**. Each version is a
+Versions: the compiler emits **version 5**, or **version 6** when the program uses function values. The PVM accepts versions **1 to 7**. Each version is a
 strict superset of the previous one; a file that uses a construct newer than its declared version
 is rejected with a message naming the construct. Any future change that breaks existing ML bumps the version.
 
@@ -307,5 +307,17 @@ method fib(int n) : int {          ml 2
 
 ## Planned (not implemented)
 
-Inheritance and virtual dispatch, exceptions, type metadata, and an optional
+Exceptions, type metadata, and an optional
 instruction budget.
+
+## Version 7: class hierarchies
+
+`class D extends A B ...` declares supertypes (a base class and/or interfaces; interfaces are classes without fields). A class must start with the fields of each supertype it extends (same names, types and order) and the hierarchy must be acyclic; the verifier checks both. Three instructions work with hierarchies:
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `upcast C` | `D -> C` | statically checked: `D` must be `C` or a subtype; no runtime cost |
+| `downcast C` | `B -> C` | `C` must be a subtype of `B`; at run time the object must be a `C` (or a subtype), otherwise `invalid cast`; null stays null |
+| `isinst C` | `B -> boolean` | true when the object is a `C` or a subtype (null gives false) |
+
+Method dispatch is compiled by the Coyote compiler into `isinst` chains; the PVM has no virtual-call instruction.

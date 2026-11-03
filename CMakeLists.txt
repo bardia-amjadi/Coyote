@@ -44,6 +44,7 @@ add_library(coyote_compiler STATIC
   src/compiler/lexer.cpp
   src/compiler/parser.cpp
   src/compiler/sema.cpp
+  src/compiler/generics.cpp
   src/compiler/mlgen.cpp
   src/compiler/modules.cpp
   src/compiler/libpack.cpp)
@@ -107,7 +108,7 @@ coyote_target_defaults(cdt)
 
 # The standard library: every project under stdlib/ is packed with the compiler we just built into <tools>/libs
 # (standard.io.lib, standard.text.lib, ..., and the umbrella standard.lib that requires them all).
-set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard)
+set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard.Collections Standard.Testing Standard)
 file(GLOB_RECURSE COYOTE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/*.coy ${CMAKE_SOURCE_DIR}/stdlib/*/packages.json)
 if(CMAKE_CROSSCOMPILING)
   message(STATUS "cross-compiling: the standard libraries are not packed (the compiler cannot run on this machine); copy them into <tools>/libs")
@@ -133,7 +134,8 @@ install(FILES README.md LICENSE DESTINATION share/coyote OPTIONAL)
 install(DIRECTORY docs samples DESTINATION share/coyote)
 install(DIRECTORY assets/brand DESTINATION share/coyote/assets)
 
-if(COYOTE_BUILD_TESTS)
+# Tests are kept out of the tree on purpose (see FORAI.md). If a tests/ folder is added back for a task, it is picked up here.
+if(COYOTE_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
   enable_testing()
   add_subdirectory(tests)
 endif()

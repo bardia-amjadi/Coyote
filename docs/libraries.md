@@ -22,7 +22,7 @@ A missing library is an error that lists every folder it looked in.
 
 ## What a `.lib` is
 
-A single text file that bundles a library's `.coy` source files (see `src/pkg/lib.hpp` for the format). It is a **source** bundle: `use` compiles the library's files together with your program, the same way `import` does. Consequences, stated plainly: there is no separate compilation, no binary compatibility, and a program contains the code of every class in a library it uses (unused ones included, because there is no dead-code removal yet). The native backend (`coyote-llvm`) cannot compile programs that use the Standard library yet, since it supports only `con.print`/`con.println` host functions.
+A single text file that bundles a library's `.coy` source files (see `src/pkg/lib.hpp` for the format). It is a **source** bundle: `use` compiles the library's files together with your program, the same way `import` does. Consequences, stated plainly: there is no separate compilation, no binary compatibility, and but the compiler removes methods your program never calls (dead-code removal, see [compiler.md](compiler.md)), so using a big library costs only what you use. `coyote-llvm` turns programs that use libraries into bundled executables (see [llvm.md](llvm.md)).
 
 ## Writing a library (also in Coyote Studio: New Project, type `library`)
 
@@ -69,11 +69,13 @@ Under the debugger, `readLine` works too: the PVM sends an `inputRequested` even
 | Library | Classes |
 |---|---|
 | `Standard.IO` | `Shell` (`Print PrintLine ReadLine ReadInt ReadDouble HasInput Prompt`), `File`, `Directory`, `Path` |
-| `Standard.Text` | `Text` (`Length IsEmpty IsBlank Substring CharAt IndexOf Contains StartsWith EndsWith Upper Lower Trim Replace Repeat PadLeft PadRight Join` ...) |
-| `Standard.Math` | `Math`, `Random` |
+| `Standard.Text` | `Text` (`Length IsEmpty IsBlank Substring CharAt IndexOf Contains StartsWith EndsWith Upper Lower Trim Replace Repeat PadLeft PadRight Join` ...; also usable as extension methods: `s.Upper()`), `StringBuilder` (`Append AppendLine ToString Length Clear`) |
+| `Standard.Math` | `Math`, `Random`, `Numbers` (`Gcd Lcm IsPrime Factorial Fibonacci ClampInt Sign ToRadians ToDegrees`) |
 | `Standard.Time` | `Time` |
 | `Standard.System` | `Environment` (environment variables, arguments, `Exit`, current directory, OS) |
 | `Standard.Http` | `Http` (`Get Post PostJson Send`), `HttpResponse` |
+| `Standard.Collections` | generic `List<T>`, `Stack<T>`, `Queue<T>`, `Set<T>`, `Pair<A, B>`; `Arrays` (`SumInt SortInt MaxInt AverageInt` ...); generic `Reversed<T>`, `IndexOfValue<T>`, `ContainsValue<T>` |
+| `Standard.Testing` | `Assert` (`True False EqualInt EqualString EqualDouble Fail Finish`) |
 
 Hover or complete any member in Coyote Studio to see its documentation (the `#` comment lines above each member in `stdlib/`).
 
@@ -83,3 +85,32 @@ There is no method overloading yet, so names such as `AbsInt` / `MinInt` exist n
 
 
 Library versions are recorded but not checked or resolved (`use` takes the first library it finds); `cpm` does not install libraries; there is no `.lib` signing; no way to hide a library's source.
+
+### Collections example
+
+```
+use "Standard"
+
+List<int> xs = new List<int>()          # generic: the element type goes in angle brackets
+xs.Add(3)
+xs.Add(1)
+Shell.PrintLine("count " + xs.Count)     # Count is a property
+for (var x in xs.ToArray()) { Shell.PrintLine("" + x) }
+
+Stack<string> st = new Stack<string>()
+st.Push("a")
+Shell.PrintLine(st.Pop())
+
+Assert.EqualInt(2, xs.Count, "two elements")   # Standard.Testing
+Assert.Finish()                                  # prints "1 passed, 0 failed"; exit code 1 on failures
+```
+
+Collections compare elements with `==`, so lists of `int`, `string`, `double`, `char` and `boolean` compare by value and lists of objects by identity.
+Generic methods of the library need their type argument (`Reversed<int>(xs)`); see *Generics* in [language.md](language.md).
+
+## Source bundles, not compiled libraries (status)
+
+A `.lib` is a **bundle of source files**: `use "Name"` compiles those sources together with your program (and dead-code
+removal then drops what you do not call). There is **no separately compiled library format** yet (precompiled ML with
+headers, linking at load time). That needs a design for exported signatures, generic templates (which must stay as
+source) and ML-level linking; it is planned, not started, so nothing here claims it.

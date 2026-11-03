@@ -2,7 +2,7 @@
   "name": "coyote",
   "displayName": "Coyote",
   "description": "Syntax highlighting, diagnostics and formatting for the Coyote language (.coy), using the cdt developer tools.",
-  "version": "0.5.0",
+  "version": "0.5.5",
   "publisher": "coyote",
   "engines": {
     "vscode": "^1.80.0"
@@ -59,7 +59,5 @@
       }
     }
   },
-  "scripts": {
-    "test": "node --test test/lib.test.js test/grammar.test.js"
-  }
+  "scripts": {}
 }

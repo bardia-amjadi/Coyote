@@ -45,16 +45,19 @@ Coyote is an early work in progress. Only what is marked "working" exists.
 | ML v5/v6 generation with `.coy` line mapping | **Working** (v6 = function values: the PVM runs them, the compiler does not emit them yet) ([spec](docs/ml-spec.md)); the PVM also accepts ML v1 to v4 |
 | ML loader and verifier | **Working**, including operand-stack typing across branches and loops |
 | PVM interpreter, call frames, host registry with permissions | **Working** (`con.print`, `con.println`); runtime errors for division by zero, `int` overflow, call depth, array bounds/null/size, heap limit |
-| Classes, models, constructors, properties, static fields/methods, `public`/`private` | **Working** (ML v5 `class`/`global`/`newobj`/`getfield`...; no inheritance, interfaces, overloading) ([docs](docs/language.md)) |
+| Classes, models, constructors, properties, static fields/methods, `public`/`private`/`protected` | **Working** (ML v5 `class`/`global`/`newobj`/`getfield`...; no overloading) ([docs](docs/language.md)) |
+| Inheritance, interfaces, `override`/`base`, `as`/`is` | **Working** (single base class + interfaces, virtual methods through compiler-generated dispatchers; ML v7 only for programs that use it) ([docs](docs/language.md)) |
+| Generics (classes, interfaces, top-level methods) | **Working** by compile-time expansion; type arguments are explicit (`First<int>(xs)`), no inference, no generic methods inside classes ([docs](docs/language.md)) |
+| Dead-code removal | **Working** (unreachable methods and classes are dropped from the ML; `--keep-unused` disables) ([docs](docs/compiler.md)) |
 | Variadic parameters, extension methods | **Working** (compile-time rewrites; [docs](docs/language.md)) |
-| Libraries: `use`, `.lib` files, Standard library (`Shell`, `Math`, `Text`, `Time`, `Random`), host functions with return values | **Working**; `.lib` is a source bundle, no versioning or install tool yet ([docs](docs/libraries.md)) |
-| Closures/lambdas, LINQ-like APIs, generics | Not implemented (lambdas need function values in ML, which do not exist yet; LINQ-like APIs depend on them) |
+| Libraries: `use`, `.lib` files, Standard libraries (`Standard.IO`, `.Math`, `.Text` with extension methods, `.Time`, `.Random`, `.Collections`, `.Testing`, HTTP, ...), host functions with return values | **Working**; `.lib` is a **source bundle** (compiled/linked libs are not implemented) ([docs](docs/libraries.md)) |
+| Closures/lambdas, LINQ-like APIs | Not implemented (lambdas need function values in ML, which do not exist yet; LINQ-like APIs depend on them) |
 | Garbage collector | **Working** for arrays, maps, boxed values and class instances: precise, non-moving mark-and-sweep; `--gc-stress`, `--gc-stats`, `--heap-limit` ([design](docs/architecture.md)). Strings are copied by value and are not on the heap. Nothing with finalizers or native resources exists yet |
-| LLVM native backend (`coyote-llvm`) | **Working for a small subset** (int/boolean/string, calls, control flow, console print); everything else is rejected with a clear error; no GC, strings leak ([docs](docs/llvm.md)). Needs `clang` to build executables; `--emit-ll` does not |
-| `cpx` (workflows, `packages.json` schema v1) | **Working** for workflows: `cpx start`/`build`/`list`/`check`, exit-code and output pass-through ([docs](docs/cpx.md)); dependencies are rejected as not implemented. Windows process code is written but never compiled |
+| LLVM native backend (`coyote-llvm`) | **Working for a small subset** (int/boolean/string, calls, control flow, console print); outside the subset it falls back to a **bundled executable** (the PVM plus the program) unless `--native-only`; no GC, strings leak ([docs](docs/llvm.md)). The installer ships clang (llvm-mingw); **not yet verified on Windows** |
+| `cpx` (workflows, `.cyproj` / `packages.json` schema v1) | **Working**: `cpx start`/`build`/`list`/`check`, project output and run settings from the project file ([docs](docs/cpx.md), [projects](docs/projects.md)); dependencies are rejected as not implemented. Windows process code is written but never compiled on Windows |
 | `cpm` (dependencies, lock file) | **Working** for `path` and `git` dependencies: deterministic resolution, integrity-checked lock file, `install`/`update`/`lock`/`verify`/`init`/`layout` ([docs](docs/cpm.md)). `url`/registry providers are interfaces only. Installed packages are consumed through `import "name"` |
 | `cdt` (check/tokens/ast/fmt/doctor) | **Working** ([docs](docs/cdt.md)); the formatter is conservative (re-indents, never changes tokens) |
-| Coyote Studio (desktop IDE) + debugger | **Working on Linux under Electron** (editor, diagnostics, run, `pvm --debug` debugger, UI test); the Windows package is built by CI and **never run on Windows** ([studio](docs/studio.md), [debugging](docs/debugging.md)) |
+| Coyote Studio (desktop IDE) + debugger | **Working on Linux under Electron**: editor with context-aware completion (imports, inheritance, generics), Project Manager (`.cyproj`), Build/Rebuild/Clean, separate app window for debugging, Settings page with themes, `pvm --debug` debugger; UI-tested. The Windows package is built by CI and **never run on Windows** ([studio](docs/studio.md), [debugging](docs/debugging.md)) |
 | Windows installer (`Coyote-Setup-<version>.exe`) | Script compiled and lifecycle-tested under Wine (install, update detection, downgrade refusal, repair, uninstall); the CI job producing it **has not run** ([studio](docs/studio.md)) |
 | VS Code extension | Written and unit-tested (diagnostic mapping, grammar scopes with the real TextMate engine); **never loaded in VS Code**; no language server ([docs](editors/vscode/README.md)) |
 | `coyote` as unified entry point | **Working**: `build`, `check`, `run`, and `coyote pvm|cpx|cpm|cdt|llvm ...` forward to the tool next to it |
@@ -92,9 +95,9 @@ ctest --test-dir build --output-on-failure
 
 ## CI
 
-`.github/workflows/ci.yml` builds with the tests switched off (`-DCOYOTE_BUILD_TESTS=OFF`) so a repository without `tests/cases` still builds. It builds on Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64, uploads one archive per platform, packages the VS Code extension, and builds the Windows installer (`Coyote-Setup-<version>.exe`). On a pushed tag `v*` it publishes a GitHub release with all of these and a `SHA256SUMS.txt`.
+`.github/workflows/ci.yml` builds with the tests switched off (`-DCOYOTE_BUILD_TESTS=OFF`) because the repository carries no tests (see [FORAI.md](FORAI.md)). It builds on Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64, uploads one archive per platform, packages the VS Code extension, and builds the Windows installer (`Coyote-Setup-<version>.exe`). On a pushed tag `v*` it publishes a GitHub release with all of these and a `SHA256SUMS.txt`.
 
-The test suite is still in the repository: run it locally with a normal configure (`-DCOYOTE_BUILD_TESTS=ON`, the default) and `ctest --test-dir build`. The sanitizer and native-backend CI jobs were removed because they need the whole suite.
+There is no test suite in the repository on purpose: it kept growing and slowed down AI-assisted work. [FORAI.md](FORAI.md) explains the policy (write only the tests relevant to the change at hand). The full suite remains in git history (commit `97453e2` and earlier: `git show 97453e2:tests/CMakeLists.txt`, `git checkout 97453e2 -- tests`).
 
 * Permissions are read-only except the release job (`contents: write`).
 * Actions are pinned to exact version tags, **not yet commit SHAs**.
@@ -104,6 +107,9 @@ The test suite is still in the repository: run it locally with a normal configur
 
 * [Language (what is implemented)](docs/language.md)
 * [Libraries, `use` and the Standard library](docs/libraries.md)
+* [Projects and `.cyproj` files](docs/projects.md)
+* [Compiler options and dead-code removal](docs/compiler.md)
+* [LLVM backend](docs/llvm.md)
 * [Coyote Studio and the installer](docs/studio.md)
 * [Debugging protocol](docs/debugging.md)
 * [ML specification](docs/ml-spec.md)

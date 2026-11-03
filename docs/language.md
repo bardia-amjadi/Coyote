@@ -211,8 +211,89 @@ c.bump()
   `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `private`.
 * `export class` / `export model` make a class importable (`import "file.coy"`); a class can be named as a type in the importing file.
 * Compound assignment (`+=` ...) works on variables and on fields (`x.count += 1`, `count += Step`).
-* Not implemented: inheritance, interfaces, overloading, static properties, operators on objects, `==` structural comparison
+* Inheritance and interfaces: see the next section. Not implemented: overloading, static properties, operators on objects, `==` structural comparison
   (`==` on two objects compares identity), object printing (`string(obj)` is an error).
+
+## Inheritance and interfaces
+
+```
+interface Shape {                       # signatures only: no fields, no bodies
+    method Area(): double
+    method Name(): string
+}
+interface Solid : Shape { method Volume(): double }    # an interface can extend interfaces
+
+class Animal {
+    string name
+    protected int legs = 4              # visible in Animal and its subclasses
+    constructor(string n) { name = n }
+    method Speak(): string { return "..." }
+    method Describe(): string { return name + " says " + Speak() }   # Speak() is virtual
+}
+class Dog : Animal {                    # base class first, then interfaces: class D : Base, I1, I2
+    constructor(string n) : base(n) { } # runs Animal's constructor body first
+    override method Speak(): string { return "Woof" }
+}
+class Puppy : Dog {
+    constructor(string n) : base(n) { }
+    override method Speak(): string { return base.Speak() + "!" }    # base.m(...) calls the base version
+}
+Animal a = new Puppy("Bit")             # a subclass value can be used wherever its base class or interface is expected
+println(a.Describe())                   # Bit says Woof!
+if (a is Dog) { Dog d = a as Dog }      # 'is' tests the real class; 'as' is a checked downcast
+```
+
+* A class has **one** base class and any number of interfaces. A subclass inherits fields, properties and methods.
+  Every instance method is virtual: a call through `Animal` runs the override of the object's real class.
+* `override` is optional, but when written it must replace an inherited method (otherwise it is an error). An override
+  must have exactly the same parameter types and return type. Fields cannot be redeclared (no hiding).
+* A class must implement every interface method (itself or through its base class), otherwise
+  `class 'C' must implement 'M(): int' required by 'I'`. Interfaces cannot be instantiated.
+* `constructor(...) : base(args)` calls the base constructor first; if omitted, `base()` is called implicitly (so the base
+  needs a constructor that takes no arguments). Field initializers of each class run before its own constructor body.
+* `private` members are visible only inside their own class; `protected` also in subclasses.
+* `x as T` converts a class value to `T`: an upcast is always fine, a downcast fails at run time with `invalid cast` when
+  the object is not a `T`. `x is T` is true for `T` or any subclass. Unrelated classes are a compile-time error.
+* `a == b` between objects still compares identity; arrays and `T?` are not covariant (`array<Dog>` is not an `array<Animal>`).
+* How it works: programs that use inheritance are emitted as ML version 7 (`class D extends A I`, `upcast`, `downcast`,
+  `isinst`, see ml-spec.md). The compiler synthesizes a dispatcher `Class.m$v` per overridable method (a chain of `isinst`
+  tests, most derived class first), so the PVM needs no virtual-call instruction. Programs without hierarchies still
+  emit ML 5.
+
+## Generics
+
+```
+class Box<T> {                              # a generic class: T is replaced by the type you give
+    T value
+    constructor(T v) { value = v }
+    method Get(): T { return value }
+}
+class Pair<K, V> {
+    K key
+    V val
+    constructor(K k, V v) { key = k; val = v }
+    method Swap(): Pair<V, K> { return new Pair<V, K>(val, key) }
+}
+class Node<T> { T item; Node<T>? next }     # recursive generics work (a field of its own type must be nullable)
+interface Source<T> { method Next(): T }    # generic interfaces too: class Counter : Source<int>
+
+method First<T>(array<T> xs): T { return xs[0] }     # a generic top-level method
+Box<int> b = new Box<int>(41)
+Pair<string, int> p = new Pair<string, int>("a", 1)
+Box<Box<int>> nested = new Box<Box<int>>(new Box<int>(5))
+println("" + First<int>([7, 8]))                     # generic methods need their type arguments: First<int>(...)
+```
+
+* Generics are expanded at compile time (monomorphization): `Box<int>` and `Box<string>` are two separate classes
+  generated from the same source, internally named `Box$int$` and `Box$string$`. There is no run-time cost and the PVM,
+  the ML format and the native backend need no generics support. Error messages show the readable `Box<int>` form.
+* `Box<int>` and `Box<string>` are unrelated types: a `Box<string>` cannot be assigned to a `Box<int>`.
+* A type parameter can be any type (`int`, `string`, `array<int>`, another generic, a class...). There are no constraints:
+  the generic code is checked after substitution, so `a.Foo()` on a `T` is accepted exactly when the argument type has a `Foo`.
+* Type arguments are always written explicitly. Not supported: inferring `First([1, 2])`, generic methods inside
+  classes (make the class generic instead), generic base classes with type parameters of the derived class used as
+  a different shape, and `new T()`.
+* Using a generic class without arguments, the wrong number of arguments, or arguments on a non-generic class is an error.
 
 ## Variadic parameters and extension methods
 
@@ -293,7 +374,7 @@ Using any of these gives `'<word>' is not supported yet` (and they cannot be use
 `hidden created here operator module use`
 
 Also not implemented: `++`/`--`, compound assignment on array elements, `else` without braces, negative literals
-in `hand` calls (use an expression), top-level globals (use `static` class fields), inheritance, interfaces, method overloading, static properties, closures/lambdas, generics, map literals, iterating strings or maps directly,
+in `hand` calls (use an expression), top-level globals (use `static` class fields), method overloading, static properties, closures/lambdas, map literals, iterating strings or maps directly,
 member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in array/map ones.
 
 ## Design decisions recorded so far

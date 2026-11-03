@@ -31,7 +31,7 @@
 | `parser.*` | tokens to AST; first syntax error aborts; rejects reserved-but-unimplemented words |
 | `sema.*` | scopes, type checking, resolves calls to `hand` declarations and methods, checks that non-void methods return on every path; collects *all* semantic errors without cascades |
 | `mlgen.*` | AST to ML text with `.line` mapping |
-| `main.cpp` | CLI: `coyote build|check` |
+| `main.cpp` | CLI: `coyote build|check|run|lib` (see [compiler.md](compiler.md)) |
 
 Exit codes: 0 success, 1 compile errors, 2 usage or I/O errors. No output file is written when
 compilation fails.
@@ -79,7 +79,7 @@ heap references; the collector marks through them.
 
 ## Testing
 
-`tests/` drives the real binaries through CTest. Case kinds: `ok` (compile+run, stdout compared),
+The repository carries no tests now (see FORAI.md); history has a `tests/` folder that drove the real binaries through CTest. Case kinds: `ok` (compile+run, stdout compared),
 `err` (compile must fail, diagnostics compared), `ml_ok`, `ml_err` (hand-written ML the PVM must
 accept or reject, output or diagnostics compared), `gc` (as `ok`, plus the collector must have run and freed garbage), `ct_pvm_err` (valid source that fails in the PVM,
 e.g. a runtime error or an unregistered host function; diagnostics compared). The shipped

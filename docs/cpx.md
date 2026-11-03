@@ -1,6 +1,6 @@
 # cpx — project executer
 
-`cpx` runs the **workflows** declared in a project's `packages.json`. A workflow is an ordered
+`cpx` runs the **workflows** declared in a project's `packages.json` or `<Name>.cyproj` (see [projects.md](projects.md)). A workflow is an ordered
 list of steps; each step runs a program (never through a shell) or another workflow.
 
 ## Commands
@@ -13,7 +13,7 @@ cpx [-C dir] check               validate packages.json
 ```
 
 `-C dir` uses the project in `dir`; `-q` suppresses the `cpx: <workflow>> <command>` lines that
-are otherwise printed to **stderr** before each step. cpx looks for `packages.json` only in the
+are otherwise printed to **stderr** before each step. cpx looks for `packages.json` (or else a `*.cyproj`) only in the
 project directory (it does not search parent directories).
 
 ## Semantics
