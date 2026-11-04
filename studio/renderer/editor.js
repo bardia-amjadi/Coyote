@@ -48,45 +48,75 @@ function fileOfModel(model) {
   const t = key && S.tabs.get(key);
   return t && t.path ? t.path : '';
 }
-function resolveImport(fromPath, spec) {
-  if (!/[\\/]/.test(spec) && !/\.coy$/i.test(spec)) return null;  // a package name
-  let p = spec.endsWith('.coy') ? spec : spec + '.coy';
-  p = isAbs(p) ? p : cleanPath(dirOf(norm(fromPath)) + '/' + p);
-  return S.ws.get(keyOf(p)) || null;
+const usedNamespaces = (text) => new Set([...text.matchAll(/^\s*use\s+"([^"]+)"/gm)].map((m) => m[1]));
+const ownNamespace = (text) => { const m = /^\s*namespace\s+([A-Za-z_][\w.]*)/m.exec(text); return m ? m[1] : ''; };
+// Default namespace for a file: <project name>.<folders below the project, without src>, each part capitalised.
+function suggestNamespace(path) {
+  const cap = (s) => s.replace(/[^A-Za-z0-9_]/g, '').replace(/^./, (c) => c.toUpperCase());
+  const root = norm(S.project || S.root || '');
+  const parts = [cap((S.manifest && S.manifest.name) || base(root) || 'App')];
+  const dir = norm(dirOf(norm(path || '')));
+  if (root && dir.toLowerCase().startsWith(root.toLowerCase()) && dir.length > root.length) {
+    for (const seg of dir.slice(root.length + 1).split('/')) if (seg && seg.toLowerCase() !== 'src' && cap(seg)) parts.push(cap(seg));
+  }
+  return parts.filter(Boolean).join('.');
 }
 const langHost = {
   libs: () => S.libs,
   settings: () => S.info.settings,
   generation: () => S.gen,
+  // Exported symbols of the namespaces this file uses, plus its own namespace (files of one namespace see each other).
   importedSymbols(model) {
     const out = { classes: [], methods: [] };
+    const text = model.getValue();
     const from = fileOfModel(model);
-    if (!from) return out;
-    for (const m of model.getValue().matchAll(/^\s*import\s+"([^"]+)"/gm)) {
-      const e = resolveImport(from, m[1]);
-      if (!e) continue;
+    const names = usedNamespaces(text);
+    const own = ownNamespace(text);
+    if (own) names.add(own);
+    if (!names.size) return out;
+    for (const e of S.ws.values()) {
+      if (!e.ix.namespace || !names.has(e.ix.namespace) || (from && keyOf(e.path) === keyOf(from))) continue;
       for (const c of e.ix.classes) if (c.exported) out.classes.push(c);
       for (const x of e.ix.methods) if (x.exported && !x.extension) out.methods.push(x);
     }
     return out;
   },
+  // Exported symbols of namespaces not used yet: choosing one adds `use "<namespace>"`.
   importCandidates(model) {
+    const text = model.getValue();
     const from = fileOfModel(model);
-    if (!from) return [];
-    const have = new Set([...model.getValue().matchAll(/^\s*import\s+"([^"]+)"/gm)].map((m) => { const e = resolveImport(from, m[1]); return e ? keyOf(e.path) : ''; }));
+    const have = usedNamespaces(text);
+    const own = ownNamespace(text);
+    if (own) have.add(own);
     const out = [];
-    for (const [k, e] of S.ws) {
-      if (k === keyOf(from) || have.has(k)) continue;
-      const spec = relativeSpec(from, e.path);
+    for (const e of S.ws.values()) {
+      const spec = e.ix.namespace;
+      if (!spec || have.has(spec) || (from && keyOf(e.path) === keyOf(from))) continue;
       for (const c of e.ix.classes) if (c.exported) out.push({ sym: c, spec });
       for (const m of e.ix.methods) if (m.exported && !m.extension) out.push({ sym: m, spec });
     }
     return out;
   },
-  importFiles(model) {
-    const from = fileOfModel(model);
-    if (!from) return [];
-    return [...S.ws.values()].filter((e) => keyOf(e.path) !== keyOf(from) && /\.coy$/i.test(e.path)).map((e) => ({ spec: relativeSpec(from, e.path), path: e.path, exports: e.ix.classes.filter((c) => c.exported).map((c) => c.name).concat(e.ix.methods.filter((m) => m.exported && !m.extension).map((m) => m.name)) }));
+  // Namespaces of this project for `use "..."` completion.
+  namespaces(model) {
+    const own = ownNamespace(model.getValue());
+    const map = new Map();
+    for (const e of S.ws.values()) {
+      const ns = e.ix.namespace;
+      if (!ns || ns === own) continue;
+      const item = map.get(ns) || { ns, files: 0, exports: [] };
+      item.files++;
+      for (const c of e.ix.classes) if (c.exported) item.exports.push(c.name);
+      for (const m of e.ix.methods) if (m.exported && !m.extension) item.exports.push(m.name);
+      map.set(ns, item);
+    }
+    return [...map.values()].sort((a, b) => a.ns.localeCompare(b.ns));
+  },
+  // Namespaces for the `namespace ...` line: the ones already in the project plus the one that matches this file's folder.
+  namespaceSuggestions(model) {
+    const names = new Set([suggestNamespace(fileOfModel(model))]);
+    for (const e of S.ws.values()) if (e.ix.namespace) names.add(e.ix.namespace);
+    return [...names];
   },
   ensureLibModel(libName, file) {
     const uri = monaco.Uri.parse(`coyote-lib://${encodeURIComponent(libName)}/${file}`);

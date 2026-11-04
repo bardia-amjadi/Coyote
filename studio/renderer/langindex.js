@@ -7,7 +7,7 @@
   else root.CoyoteLang = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'var', 'new', 'method', 'hand', 'class', 'model',
-    'property', 'constructor', 'public', 'private', 'protected', 'static', 'override', 'interface', 'base', 'as', 'this', 'import', 'export', 'use', 'get', 'set'];
+    'property', 'constructor', 'public', 'private', 'protected', 'static', 'override', 'interface', 'base', 'as', 'this', 'namespace', 'export', 'use', 'get', 'set'];
   const TYPES = ['int', 'double', 'boolean', 'string', 'char', 'Guid', 'obj', 'dyn', 'array', 'map', 'void'];
   const LITERALS = ['true', 'false', 'null'];
   const MODIFIERS = new Set(['public', 'private', 'protected', 'static', 'override', 'export']);
@@ -15,9 +15,9 @@
   const KEYWORD_DOCS = {
     method: 'Declares a method: `method name(int a, string b): int { ... }`. The return type is optional (no value).',
     hand: 'Declares a host function: `hand:module name(type param): returnType`. Usually you get these from the Standard libraries.',
-    use: 'Brings in a library: `use "Standard.IO"` (installed) or `use "./My.lib"` (a file).',
-    import: 'Brings in the exports of another source file: `import "lib/math.coy"`.',
-    export: 'Makes a class, model or method visible to files that `import` or `use` this one.',
+    use: 'Brings in a namespace of this project, an installed package or a library: `use "MyApp.Models"`, `use "Standard.IO"`, or a library file `use "./My.lib"`.',
+    namespace: 'Puts every declaration of the file into a namespace; it must be the first line: `namespace MyApp.Models`. Other files see its exports with `use "MyApp.Models"` (files of the same namespace see each other without it).',
+    export: 'Makes a class, model or method visible to files that `use` its namespace (or library).',
     class: 'Declares a class with fields, properties, a constructor and methods.',
     model: 'Declares a class whose constructor takes every field in order.',
     var: 'Declares a variable whose type is taken from its initializer.',
@@ -151,9 +151,9 @@
     }
   }
 
-  // Indexes declarations: { classes, methods, hands, uses, imports }. Every symbol has {kind, name, line, doc, ...}.
+  // Indexes declarations: { namespace, classes, methods, hands, uses }. Every symbol has {kind, name, line, doc, ...}.
   function indexSource(text) {
-    const res = { classes: [], methods: [], hands: [], uses: [], imports: [], locals: [] };
+    const res = { namespace: '', classes: [], methods: [], hands: [], uses: [], imports: [], locals: [] };
     const raw = text.split(/\r?\n/);
     const scanned = raw.map(scanLine);
     let depth = 0;
@@ -183,9 +183,8 @@
         if ((mm = /^use\s+"/.exec(line))) {
           const um = /^use\s+"([^"]*)"/.exec(raw[i].trim());
           if (um) res.uses.push({ name: um[1], line: i + 1 });
-        } else if ((mm = /^import\s+"/.exec(line))) {
-          const im = /^import\s+"([^"]*)"/.exec(raw[i].trim());
-          if (im) res.imports.push({ name: im[1], line: i + 1 });
+        } else if ((mm = /^namespace\s+([A-Za-z_][\w.]*)/.exec(line))) {
+          if (!res.namespace) res.namespace = mm[1];
         } else if ((mm = /^hand\s*:\s*(\w+)\s+(\w+)\s*\(([^)]*)\)\s*(?::\s*(\w+))?/.exec(line))) {
           res.hands.push({ kind: 'hand', module: mm[1], name: mm[2], params: parseParams(mm[3]), ret: mm[4] || '', line: i + 1, doc: docText(doc) });
         } else {
@@ -311,15 +310,16 @@
     return map;
   }
 
-  // Where to put `use "<name>"` in a file: after the last use/import, else after the leading comment block.
+  // Where to put `use "<name>"` in a file: after the last use, else after the namespace line / leading comment block.
   // Returns { line, text } for an insertion at the start of `line` (1-based).
   function useInsertion(text, libName) {
     const lines = text.split(/\r?\n/);
     let lastUse = 0;
-    for (let i = 0; i < lines.length; i++) if (/^\s*(use|import)\s+"/.test(lines[i])) lastUse = i + 1;
+    for (let i = 0; i < lines.length; i++) if (/^\s*use\s+"/.test(lines[i])) lastUse = i + 1;
     if (lastUse) return { line: lastUse + 1, text: `use "${libName}"\n` };
     let at = 0;
     while (at < lines.length && /^\s*#/.test(lines[at])) at++;
+    if (at < lines.length && /^\s*namespace\s/.test(lines[at])) at++;  // a `use` goes below the namespace line
     const next = lines[at];
     const needBlank = next !== undefined && next.trim() !== '';
     return { line: at + 1, text: `use "${libName}"\n` + (needBlank ? '\n' : '') };

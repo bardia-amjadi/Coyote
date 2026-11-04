@@ -1,11 +1,11 @@
 'use strict';
 /* global CoyoteLang */
 // Registers the Coyote language in Monaco: tokenizer, themes, semantic colors and the language service
-// (completion with automatic `use`/`import`, hover, signature help, go to definition, outline, quick fixes, formatting).
+// (completion with automatic `use`, hover, signature help, go to definition, outline, quick fixes, formatting).
 (function () {
   const L = CoyoteLang;
   const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return'];
-  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'import', 'export', 'use', 'var', 'new', 'in', 'is', 'as', 'this', 'base', 'get', 'set'];
+  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'namespace', 'export', 'use', 'var', 'new', 'in', 'is', 'as', 'this', 'base', 'get', 'set'];
   const MOD = ['public', 'private', 'protected', 'static', 'override'];
   const KW_SET = new Set(L.KEYWORDS.filter((k) => k !== 'get' && k !== 'set'));
   const TYPE_SET = new Set(L.TYPES);
@@ -37,7 +37,7 @@
         root: [
           [/#.*$/, 'comment'],
           [/\b(use)(\s+)(")/, ['keyword.declaration', '', { token: 'string', next: '@libname' }]],
-          [/\b(import)(\s+)(")/, ['keyword.declaration', '', { token: 'string', next: '@string' }]],
+          [/\b(namespace)(\s+)([A-Za-z_][\w.]*)/, ['keyword.declaration', '', 'namespace']],
           [/\b(hand)(\s*)(:)(\s*)([A-Za-z_]\w*)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'delimiter', '', 'namespace', '', 'entity.name.function']],
           [/\b(method)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', 'entity.name.function']],
           [/\b(class|model|interface)(\s+)([A-Za-z_]\w*)/, ['keyword.declaration', '', { token: 'type.identifier', next: '@header' }]],
@@ -124,14 +124,7 @@
       const ins = L.useInsertion(model.getValue(), lib);
       return [{ range: new monaco.Range(ins.line, 1, ins.line, 1), text: ins.text }];
     };
-    const importEdit = (model, spec) => {
-      const text = model.getValue();
-      const lines = text.split(/\r?\n/);
-      let last = 0;
-      for (let i = 0; i < lines.length; i++) if (/^\s*(use|import)\s+"/.test(lines[i])) last = i + 1;
-      const at = last ? last + 1 : L.useInsertion(text, 'x').line;
-      return [{ range: new monaco.Range(at, 1, at, 1), text: `import "${spec}"\n` + (!last && lines[at - 1] && lines[at - 1].trim() ? '\n' : '') }];
-    };
+    const importEdit = (model, ns) => useEdit(model, ns);  // a namespace is added with `use` like a library
 
     // ------------------------------------------------------------ completion
     monaco.languages.registerCompletionItemProvider('coyote', {
@@ -149,9 +142,19 @@
         const items = [];
         let m;
 
-        // use "<library>"
+        // namespace <name>
+        if ((m = /^\s*namespace\s+([\w.]*)$/.exec(prefix))) {
+          const r = new monaco.Range(pos.lineNumber, pos.column - m[1].length, pos.lineNumber, pos.column);
+          host.namespaceSuggestions(model).forEach((ns, i) => items.push({ label: ns, kind: K.Module, insertText: ns, range: r, sortText: String(i).padStart(3, '0'), detail: i === 0 ? 'matches this file\'s folder' : 'namespace of this project' }));
+          return { suggestions: items };
+        }
+        // use "<namespace | package | library>"
         if ((m = /^\s*use\s+"([^"]*)$/.exec(prefix))) {
           const r = new monaco.Range(pos.lineNumber, pos.column - m[1].length, pos.lineNumber, pos.column);
+          for (const n of host.namespaces(model)) {
+            items.push({ label: n.ns, kind: K.Module, insertText: n.ns, range: r, detail: 'namespace of this project (' + n.files + ' file' + (n.files === 1 ? '' : 's') + ')', sortText: '0' + n.ns.toLowerCase(),
+              documentation: { value: 'Exports: ' + (n.exports.join(', ') || '(none)') } });
+          }
           for (const lib of host.libs().values()) {
             items.push({ label: lib.name, kind: K.Module, insertText: lib.name, range: r, detail: 'library ' + lib.version, sortText: lib.name.toLowerCase(),
               documentation: { value: (lib.requires.length ? 'Includes: ' + lib.requires.join(', ') + '\n\n' : '') + 'Classes: ' + (lib.classes.map((c) => c.name).join(', ') || '(none)') } });
@@ -182,12 +185,6 @@
           return { suggestions: items };
         }
 
-        // import "<file of this project>"
-        if ((m = /^\s*import\s+"([^"]*)$/.exec(prefix))) {
-          const r = new monaco.Range(pos.lineNumber, pos.column - m[1].length, pos.lineNumber, pos.column);
-          for (const f of host.importFiles(model)) items.push({ label: f.spec, kind: K.File, insertText: f.spec, range: r, detail: f.exports.length ? 'exports: ' + f.exports.join(', ') : 'no exported symbols', sortText: f.spec.toLowerCase() });
-          return { suggestions: items };
-        }
         const enc = L.localsAt(ctx, pos.lineNumber);
         // class Name<T> : <base class, interfaces>
         if ((m = /^\s*(?:(?:public|private|export)\s+)*(class|interface)\s+\w+\s*(?:<[^>]*>)?\s*:\s*(?:[^{]*,\s*)?(\w*)$/.exec(prefix))) {
@@ -298,12 +295,12 @@
             additionalTextEdits: useEdit(model, lib), commitCharacters: isClass ? ['.'] : undefined,
           });
         }
-        // exported symbols of other project files: choosing one adds an import
+        // exported symbols of other namespaces of the project: choosing one adds a `use`
         for (const cand of host.importCandidates(model)) {
           if (seenNames.has(cand.sym.name) || have.has(cand.sym.name)) continue;
           const isClass = cand.sym.kind === 'class' || cand.sym.kind === 'model';
           items.push({ label: { label: cand.sym.name, description: cand.spec }, kind: isClass ? K.Class : K.Function, insertText: isClass ? cand.sym.name : methodSnippet(cand.sym.name, cand.sym.params),
-            insertTextRules: isClass ? undefined : monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, filterText: cand.sym.name, range, detail: `adds: import "${cand.spec}"`, documentation: md(cand.sym), sortText: '3' + cand.sym.name,
+            insertTextRules: isClass ? undefined : monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, filterText: cand.sym.name, range, detail: `${cand.spec} - adds: use "${cand.spec}"`, documentation: md(cand.sym), sortText: '3' + cand.sym.name,
             additionalTextEdits: importEdit(model, cand.spec) });
         }
         for (const k of L.KEYWORDS) if (k !== 'get' && k !== 'set') add(k, K.Keyword, { sortText: '5' + k, documentation: L.KEYWORD_DOCS[k] ? { value: L.KEYWORD_DOCS[k] } : undefined });
@@ -460,7 +457,7 @@
           }
           for (const cand of host.importCandidates(model)) {
             if (cand.sym.name !== name) continue;
-            actions.push({ title: `Add import "${cand.spec}"`, kind: 'quickfix', diagnostics: [mk], edit: { edits: importEdit(model, cand.spec).map((e) => ({ resource: model.uri, textEdit: e, versionId: undefined })) } });
+            actions.push({ title: `Add use "${cand.spec}"`, kind: 'quickfix', diagnostics: [mk], edit: { edits: importEdit(model, cand.spec).map((e) => ({ resource: model.uri, textEdit: e, versionId: undefined })) } });
           }
           if (!hits.length && ctx.visible.size === 0 && libSymbols().some((x) => x.sym.name === name) === false && host.libs().has('standard')) {
             actions.push({ title: 'Add use "Standard" (all standard libraries)', kind: 'quickfix', diagnostics: [mk], edit: { edits: useEdit(model, 'Standard').map((e) => ({ resource: model.uri, textEdit: e, versionId: undefined })) } });

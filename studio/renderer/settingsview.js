@@ -35,7 +35,7 @@
       ['quickSuggestions', 'Suggest while typing', 'check', null, 'Show the completion list as you type, without pressing Ctrl+Space.', true],
       ['acceptOnEnter', 'Accept a suggestion with Enter', 'select', [['on', 'Always'], ['smart', 'Only when it changes the text'], ['off', 'Never (Tab only)']], '', 'on'],
       ['parameterHints', 'Parameter hints', 'check', null, 'Show the parameters of a method while writing a call.', true],
-      ['suggestImports', 'Suggest classes from libraries not yet imported', 'check', null, 'Picking one adds the matching use line.', true],
+      ['suggestImports', 'Suggest classes from libraries and namespaces not yet used', 'check', null, 'Picking one adds the matching use line.', true],
     ],
     run: [
       ['appWindow', 'Show the running program in its own window', 'select', [['debug', 'When debugging'], ['always', 'Run and debug'], ['never', 'Never (Terminal panel only)']], 'The window mirrors the Terminal panel and takes input.', 'debug'],
