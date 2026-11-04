@@ -1,4 +1,4 @@
-# Coyote language — what is implemented today (milestone 9)
+# Coyote language — what is implemented today (0.6)
 
 This page describes only what the current compiler accepts. Everything else in the language
 design is **rejected with an error**, never silently ignored. Syntax marked *provisional* is a
@@ -108,6 +108,16 @@ as a literal (the literal `2147483648` is out of range); compute it as `0 - 2147
 Literals: integers (decimal, `0` to `2147483647`), doubles, characters, `null`, strings (`"..."` with escapes `\n \t \r \\ \"`,
 single line), `true`, `false`.
 
+### Interpolated strings
+
+```
+string name = "Coyote"
+println($"Hello {name}, 2 + 3 = {2 + 3}, braces: {{ok}}")    # Hello Coyote, 2 + 3 = 5, braces: {ok}
+```
+
+`$"..."` is a normal string in which each `{expression}` is converted to text and joined (`"Hello " + name + ...`); `{{` and `}}` are literal braces.
+The expression may be any expression that does not contain a double quote (the string would end there). Plain strings without `$` never treat `{` specially.
+
 ## Arrays
 
 ```
@@ -128,25 +138,45 @@ var alias = nums                   # same array: alias[0] = 9 changes nums too
 * `[`, `.` after an expression must be on the same line as the expression.
 * Arrays are garbage collected (see `architecture.md`).
 
-## Modules
+## Namespaces, `use` and `export`
 
 ```
-import "lib/math.coy"        # a file, relative to the importing file (".coy" may be omitted)
-import "greeter"            # an installed package (see cpm)
+# src/models/point.coy
+namespace MyApp.Models                 # must be the first line of the file (comments may come before it)
+export model Point {
+    int x
+    int y
+}
 
-export method add(int a, int b) : int { return a + b }   # visible to importers
-method helper() : int { return 1 }                       # private to its file
+# src/main.coy  (the entry file)
+namespace MyApp
+use "Standard"                         # a library
+use "MyApp.Models"                     # a namespace of this project: you now see its exports
+var p = new Point(3, 4)
 ```
 
-* `import` and `export` appear only at the top level. Only `export method` is exportable today.
-* An imported file may contain imports, `hand` declarations and methods, **not** top-level
-  statements; only the entry file runs code. Private methods of different files may share a name.
-* Imports are not transitive: a file sees the exports of the files it imports directly. Two imports
-  that export the same name, or an import that clashes with a local method, is an error.
-* `import "name"` (no `/` and no `.coy`) looks for `.coyote/packages/<name>/` next to the importing
-  file and in every directory above it, and uses the `entry` of that package's `packages.json`.
-  Run `cpm install` first. Import cycles are allowed.
-* Errors and runtime errors in an imported file are reported with that file's path.
+* **`namespace Name`** puts every declaration of the file into that namespace. Names are dotted (`MyApp.Models`); `MyApp.Models`
+  is a separate namespace from `MyApp` (there is no nesting or inheritance between them). A file without a `namespace` line is in no
+  namespace; the entry file may do without one.
+* **`use "Name"`** is the only way to see another file's code. `Name` is one of three things, looked up in this order of kinds:
+  1. a **namespace of the project**: every `.coy` file under the project folder (the folder with the `.cyproj` / `packages.json`, otherwise
+     the folder of the file) whose first declaration is `namespace Name`. Folders called `bin`, `obj`, `dist`, `node_modules` and
+     folders starting with `.` are not searched (at most 5000 files);
+  2. an **installed package** (`.coyote/packages/<name>/` next to the file or any folder above it; run `cpm install`);
+  3. a **library** (`use "Standard"`, see [libraries](libraries.md)); `use "./My.lib"` names a library file directly.
+
+  If a name matches more than one kind, `use` reports it as ambiguous. `use` accepts only quoted names, never a `.coy` path.
+* **The files of one namespace see each other's exports without `use`**: a file declaring `namespace MyApp.Models` sees the exports of
+  every other file of `MyApp.Models`. Only the entry file may contain top-level statements; another program's statements in a file
+  that is merely a same-namespace neighbour are ignored (a file named by `use` that has top-level statements is an error).
+* **`export`** controls what other namespaces see: `export method`, `export class`, `export model`, `export interface`. A method that is not
+  exported is private to its file. Private methods of different files may share a name.
+* `use` and `namespace` appear only at the top level. `use` is not transitive: a file sees the exports of what *it* uses (and of its own
+  namespace), not of what those files use. Two uses that export the same name, or a use that clashes with a local declaration, is an error.
+* **`import` was removed in 0.6.** Replace `import "lib/math.coy"` by `namespace Lib` at the top of that file and `use "Lib"`;
+  the compiler's message says so.
+* Errors and runtime errors in another file are reported with that file's path.
+* Not implemented: qualified names (`MyApp.Models.Point`), `use` with an alias or a list of names, namespaces that contain other namespaces.
 
 ## Maps
 
@@ -197,7 +227,10 @@ class Counter {
     method bump() { count += Step }
     static method total(): int { return made }
 }
-model Point { int x  int y }      # 'model': a constructor taking every field in order is generated
+model Point {                      # 'model': a constructor taking every field in order is generated
+    int x
+    int y
+}
 Counter c = new Counter("a", 3)
 c.bump()
 ```
@@ -209,7 +242,7 @@ c.bump()
   static methods cannot use instance members.
 * A class has at most one constructor (no overloading); without one, a class gets a no-argument constructor and a model gets the all-fields one.
   `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `private`.
-* `export class` / `export model` make a class importable (`import "file.coy"`); a class can be named as a type in the importing file.
+* `export class` / `export model` make a class visible to the files that `use` its namespace; it can be named as a type there.
 * Compound assignment (`+=` ...) works on variables and on fields (`x.count += 1`, `count += Step`).
 * Inheritance and interfaces: see the next section. Not implemented: overloading, static properties, operators on objects, `==` structural comparison
   (`==` on two objects compares identity), object printing (`string(obj)` is an error).
@@ -314,7 +347,7 @@ method total(this array<int> a): int { return sum(a) }
 * An extension method is a top-level method whose first parameter is marked `this`. `recv.name(...)`
   uses it only when the receiver has no built-in method (`push`, `copy`, map methods...) or class method
   of that name, so extensions cannot override those. It is also callable as a plain function. Extensions
-  from another file need `export method` and an `import`, like any method. Class members cannot be extensions,
+  from another file need `export method` and a `use` of its namespace, like any method. Class members cannot be extensions,
   and extensions do not apply to `dyn` receivers (their calls are resolved at run time).
 * Both are compile-time rewrites: the ML and the PVM are unchanged.
 
@@ -335,7 +368,9 @@ return            # in a void method
 return value      # in a method with a return type
 { ... }           # a block
 name = value      # assignment
-name += value     # also -= *= /= %= (variables only, not array elements)
+name += value     # also -= *= /= %=; works on variables, fields and array elements (x.n += 1, a[i] *= 2)
+name++            # also name-- ; a statement (and a 'for' step), not an expression
+# += and ++ need a target without side effects: a[i] and a[i + 1] are fine, a[next()] is not (write the full assignment)
 call(args)        # call used as a statement; a returned value is discarded
 ```
 
@@ -355,7 +390,7 @@ method name(int a, string b) : int {
 method log(string text) { ... }      # no ': type' means void
 ```
 
-* Declared at the top level only. Parameters and return values may be `int`, `string`, `boolean` or `array<T>`.
+* Declared at the top level only. Parameters and return values may be any type (`int`, `string`, `double`, `char`, arrays, maps, nullable types, classes...).
 * Recursion and mutual recursion work. Nesting deeper than 5000 calls is a runtime error.
 * A method with a return type must return a value on **every** code path (the compiler checks
   `return`, and `if`/`else` where both branches return; a `while` never counts). Otherwise:
@@ -371,9 +406,11 @@ host function; the PVM runs it only if it is registered and permitted (see `ml-s
 
 Using any of these gives `'<word>' is not supported yet` (and they cannot be used as names):
 
-`hidden created here operator module use`
+`hidden created here operator module`
 
-Also not implemented: `++`/`--`, compound assignment on array elements, `else` without braces, negative literals
+`import` was removed in 0.6 (use `namespace` + `use`); `namespace` is a keyword now.
+
+Also not implemented: `else` without braces, negative literals
 in `hand` calls (use an expression), top-level globals (use `static` class fields), method overloading, static properties, closures/lambdas, map literals, iterating strings or maps directly,
 member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in array/map ones.
 
@@ -387,5 +424,6 @@ member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in a
 * **No silent integer wraparound.** `int` overflow is an error, so results are never quietly wrong.
 * **Host access is explicit.** `hand` declarations never grant native access (see ML spec).
 * **Errors are deterministic**: `file:line:col: error: message`, sorted by position, no
-  environment-dependent text. The parser stops at the first syntax error; semantic analysis
-  reports all errors it finds, without cascades from an earlier mistake.
+  environment-dependent text. The parser reports several syntax errors per run: after an error it skips to the end of the broken
+  statement (or declaration) and carries on, at most 50 errors, and never two on the same line; semantic analysis
+  reports all errors it finds, without cascades from an earlier mistake. (Semantic analysis only runs when there are no syntax errors.)

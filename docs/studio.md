@@ -38,13 +38,13 @@ Layout (like Visual Studio / VS Code): activity bar (Explorer, Find in Files, Ru
 
 **Language service.** Highlighting knows every keyword (`interface`, `protected`, `override`, `base`, `as`, `is`, generics `<T>`, class headers `class D : Base, I`). Completion covers keywords, locals, methods, classes and members after a dot (arrays and maps included, **inherited members and generic type arguments** too: `Box<int>.Get()` is an `int`), with the documentation written as `#` comments in the source. Context-aware suggestions:
 
-* `use "` lists the installed libraries (with their classes); `import "` lists the project's source files and what they export.
+* `use "` lists the namespaces of the project (with what they export) and the installed libraries (with their classes); `namespace ` lists the namespaces already in the project plus the one that matches the file's folder (`<Project>.<Folder>`).
 * `class X : ` and `interface X : ` list the classes and interfaces you can extend (including ones from libraries you have not `use`d: choosing one adds the `use` line).
 * `override ` lists the inherited methods you can override and writes the whole declaration; `base.` lists the base class's members.
 * `x as `, `x is ` and `new ` list classes and types; `new` of a generic class inserts `<T>`.
 * Snippets: `classinherit`, `interface`, `generic class`, `generic method`, `override`.
 
-Picking a symbol from a library you have not `use`d yet **adds the `use "<Library>"` line for you** (the same for exported symbols of other files: it adds an `import`). The quick fix (`Ctrl+.`) on "unknown variable/class" does the same. Hover, signature help, Go to Definition (`F12`, library sources open read-only), outline, semantic highlighting, format document, and diagnostics as you type (the unsaved text is checked).
+Picking a symbol from a library you have not `use`d yet **adds the `use "<Library>"` line for you** (the same for exported symbols of other namespaces of the project: it adds `use "<Namespace>"`). The quick fix (`Ctrl+.`) on "unknown variable/class" does the same. Hover, signature help, Go to Definition (`F12`, library sources open read-only), outline, semantic highlighting, format document, and diagnostics as you type (the unsaved text is checked).
 
 **Libraries view.** Lists every installed `.lib` with its classes and members; click to read the source.
 
@@ -69,6 +69,6 @@ Built by the `windows-installer` CI job with Inno Setup. Components: **Coyote to
 
 ## What is verified
 
-On Linux: the Studio unit tests, an end-to-end UI test under Electron (opening a file from the command line, diagnostics, run, Project Manager build/clean, the app window, settings and themes, completion for inheritance and imports, debugger, show ML), `electron-packager` producing the Windows app directory, and the installer script **compiled and exercised under Wine with a 32-bit test build**: fresh install, update, same-version repair, downgrade refusal, cli-only type, uninstall and PATH cleanup.
+On Linux: the Studio unit tests, an end-to-end UI test under Electron (opening a file from the command line, diagnostics, run, Project Manager build/clean, the app window, settings and themes, completion for inheritance and imports (before 0.6; the namespace completion of 0.6 was only checked with a unit test of the language index and a syntax check, not in the running app), debugger, show ML), `electron-packager` producing the Windows app directory, and the installer script **compiled and exercised under Wine with a 32-bit test build**: fresh install, update, same-version repair, downgrade refusal, cli-only type, uninstall and PATH cleanup.
 The installed `coyote.exe` (Wine, 32-bit test build) found `libs\standard.lib` and ran `use "Standard"` programs, including after an update.
 **Not verified:** the real `windows-2022` CI job, an MSVC build, the packaged `CoyoteStudio.exe` actually running on Windows, and the installer's UI (only silent mode was exercised).

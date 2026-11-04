@@ -15,7 +15,7 @@ Options for `build` and `run`: `--keep-unused` (see below).
 
 ## Passes
 
-1. **Lex / parse** each file (`import` and `use` pull in more files and libraries).
+1. **Lex / parse** each file (`use` pulls in more files: namespaces of the project, installed packages and libraries; a file's `namespace` line puts it in a namespace). A syntax error does not stop the parse: the parser skips the broken statement and reports up to 50 errors in one run.
 2. **Generic expansion** (`generics.cpp`): every `Box<int>` / `Id<int>(x)` becomes its own generated class or method;
    generic declarations are removed. See *Generics* in [language.md](language.md).
 3. **Semantic analysis** (`sema.cpp`): name and type checking, class hierarchies (interfaces, base classes, overrides,

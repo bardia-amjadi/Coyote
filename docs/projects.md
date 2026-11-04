@@ -5,7 +5,7 @@ A Coyote project is a folder with a **project file**:
 * `<Name>.cyproj` — the project file used by Coyote Studio (like `MyApp.csproj`): `MyApp/MyApp.cyproj`.
 * `packages.json` — the same format, still supported everywhere. If both exist, `packages.json` wins.
 
-Both are JSON, validated by `cpx check` (schema version 1). `cpx`, `cpm`, `coyote lib pack` and `import "package"` all
+Both are JSON, validated by `cpx check` (schema version 1). `cpx`, `cpm`, `coyote lib pack` and `use "package"` all
 find the project file in a project folder (`packages.json` first, otherwise the first `*.cyproj` by name).
 `cpm init MyApp --cyproj` creates a `.cyproj` project (`cpm init MyApp` still creates `packages.json`).
 
@@ -50,6 +50,12 @@ find the project file in a project folder (`packages.json` first, otherwise the 
 You decide *what* a build produces in the project file — not with buttons: Studio's **Build** button, `cpx build` and
 CI all read the same settings. Declaring your own `build` or `start` workflow replaces the default one.
 Without an `output` section (a plain `packages.json`) the old defaults apply: `build` writes `.coyote/out/<entry>.ml`.
+
+## Namespaces and the project folder
+
+The folder that holds the project file is also the **namespace root**: `use "MyApp.Models"` finds the files under it whose first line is
+`namespace MyApp.Models` (see [language](language.md)). `File > New Project` and `cpm init` start the entry file with `namespace <ProjectName>`
+only when you write it yourself; existing programs without a namespace keep working.
 
 ## Coyote Studio: Project Manager
 

@@ -9,7 +9,7 @@ use "./My.lib"                 # by path, relative to the file that writes it
 Shell.PrintLine("Hello world")
 ```
 
-`use` is allowed only at the top level of a file. A library's exported classes and methods (`export class`, `export method`) become visible, exactly as with `import`. Name lookup is case-insensitive on the file name (`use "Standard"` finds `standard.lib`).
+`use` is allowed only at the top level of a file. A library's exported classes and methods (`export class`, `export method`) become visible, exactly as the exports of a namespace do (see [language](language.md), *Namespaces, `use` and `export`*). `use "Name"` also finds namespaces of your own project and installed packages; if a name matches more than one kind it is reported as ambiguous. Name lookup is case-insensitive on the file name (`use "Standard"` finds `standard.lib`).
 
 ### Where `use "Name"` looks (first match wins)
 
@@ -22,7 +22,7 @@ A missing library is an error that lists every folder it looked in.
 
 ## What a `.lib` is
 
-A single text file that bundles a library's `.coy` source files (see `src/pkg/lib.hpp` for the format). It is a **source** bundle: `use` compiles the library's files together with your program, the same way `import` does. Consequences, stated plainly: there is no separate compilation, no binary compatibility, and but the compiler removes methods your program never calls (dead-code removal, see [compiler.md](compiler.md)), so using a big library costs only what you use. `coyote-llvm` turns programs that use libraries into bundled executables (see [llvm.md](llvm.md)).
+A single text file that bundles a library's `.coy` source files (see `src/pkg/lib.hpp` for the format). It is a **source** bundle: `use` compiles the library's files together with your program, the same way the files of a namespace are. Consequences, stated plainly: there is no separate compilation, no binary compatibility, and but the compiler removes methods your program never calls (dead-code removal, see [compiler.md](compiler.md)), so using a big library costs only what you use. `coyote-llvm` turns programs that use libraries into bundled executables (see [llvm.md](llvm.md)).
 
 ## Writing a library (also in Coyote Studio: New Project, type `library`)
 
@@ -32,7 +32,7 @@ coyote lib pack MyLib          # -> mylib.lib (use -o to choose the path)
 coyote lib info mylib.lib      # name, version, files
 ```
 
-All `.coy` files under `src/` (or the project folder when there is no `src/`) are packed. Packing **compiles the library first**: errors are reported against your source files and nothing is written. Library files see each other's exports without `import`.
+All `.coy` files under `src/` (or the project folder when there is no `src/`) are packed. Packing **compiles the library first**: errors are reported against your source files and nothing is written. Library files see each other's exports without `use`.
 
 ## Host functions (`hand:`) with return values
 

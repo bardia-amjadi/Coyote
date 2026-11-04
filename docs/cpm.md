@@ -6,8 +6,8 @@
 **Status:** local (`path`) and `git` dependencies work. `url` and registry dependencies are parsed
 and validated, but their providers are explicit interfaces that fail with a clear message — there is
 no HTTPS client and no registry yet. Installed packages are used from Coyote code with
-`import "<name>"`: the compiler looks in `.coyote/packages/<name>/` and compiles the package's `entry`
-(see `language.md`, *Modules*). Only methods declared with `export method` are visible to importers.
+`use "<name>"`: the compiler looks in `.coyote/packages/<name>/` and compiles the package's `entry`
+(see `language.md`, *Namespaces, `use` and `export`*). Only declarations marked `export` are visible to the files that use the package.
 
 ## Commands
 
