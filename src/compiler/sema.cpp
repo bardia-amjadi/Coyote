@@ -107,7 +107,7 @@ public:
                     if (m.unit != t || !m.exported || m.classIndex >= 0) continue;
                     auto ins = tables_[mi].emplace(m.name, Target{true, static_cast<int>(i)});
                     if (!ins.second && !(ins.first->second.isMethod && ins.first->second.index == static_cast<int>(i)))
-                        error(mod.imports[k].loc, "importing '" + mod.imports[k].spec + "' brings '" + m.name +
+                        error(mod.imports[k].loc, "use \"" + mod.imports[k].spec + "\" brings '" + m.name +
                                                       "', which conflicts with another declaration of that name");
                 }
             }
@@ -190,7 +190,7 @@ private:
                     if (c.unit != t || !c.exported) continue;
                     auto ins = classTables_[mi].emplace(c.name, static_cast<int>(ci));
                     if (!ins.second && ins.first->second != static_cast<int>(ci))
-                        error(mod.imports[k].loc, "importing '" + mod.imports[k].spec + "' brings class '" + c.name +
+                        error(mod.imports[k].loc, "use \"" + mod.imports[k].spec + "\" brings class '" + c.name +
                                                       "', which conflicts with another class of that name");
                 }
             }

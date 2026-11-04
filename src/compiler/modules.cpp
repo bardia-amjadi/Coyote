@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 
 #include "lexer.hpp"
@@ -87,10 +88,15 @@ private:
     }
 
     // Parses one file and merges its declarations. Returns its module index, or -1 on a syntax error.
-    int add(const std::string& path, const std::string& text) {
+    int add(const std::string& path, const std::string& text, bool ignoreStatements = false) {
         Program p;
         try {
-            p = parse(lex(text, path), path);
+            std::vector<Diagnostic> found;
+            p = parseRecovering(lex(text, path), path, found);
+            if (!found.empty()) {
+                for (Diagnostic& d : found) diags_.push_back(std::move(d));
+                return -1;
+            }
         } catch (const CompileError& e) {
             diags_.push_back(e.diag);
             return -1;
@@ -99,6 +105,7 @@ private:
         byCanonical_[canonical(path)] = idx;
         Module m;
         m.path = path;
+        m.ns = p.ns;
         m.imports = std::move(p.imports);
         out_.modules.push_back(std::move(m));
         for (HandDecl& h : p.hands) {
@@ -122,15 +129,16 @@ private:
         }
         if (idx == 0) {
             out_.stmts = std::move(p.stmts);
-        } else if (!p.stmts.empty()) {
+        } else if (!p.stmts.empty() && !ignoreStatements) {
             error(path, p.stmts.front()->loc,
-                  "an imported file may only contain imports, 'hand' declarations and methods; top-level statements belong in the entry file");
+                  "only the entry file may contain top-level statements; this file may only contain 'use', 'hand' declarations, methods and classes");
         }
         return idx;
     }
 
     // Finds <dir or ancestor>/.coyote/packages/<name>/ and returns the package's entry file.
-    bool findPackage(const std::string& fromFile, const std::string& name, std::string& entryPath, std::string& why) {
+    bool findPackage(const std::string& fromFile, const std::string& name, std::string& entryPath, std::string& why, bool* notInstalled = nullptr) {
+        if (notInstalled) *notInstalled = false;
         if (name.find("..") != std::string::npos) {
             why = "invalid package name '" + name + "'";
             return false;
@@ -158,6 +166,7 @@ private:
             if (dir == dir.parent_path()) break;
             dir = dir.parent_path();
         }
+        if (notInstalled) *notInstalled = true;
         why = "package '" + name + "' is not installed (looked for .coyote/packages/" + name + " next to " + fromFile +
               " and in the directories above it; run 'cpm install')";
         return false;
@@ -294,55 +303,155 @@ private:
         return fs::path(file).parent_path().string();
     }
 
+    // ---- namespaces ----
+
+    struct NsIndex { std::map<std::string, std::vector<std::string>> files; };  // namespace -> its files (sorted)
+    std::map<std::string, NsIndex> nsIndex_;                                    // project root -> index
+
+    // The folder whose .coy files form "the project" of `file`: the nearest ancestor holding a project file
+    // (packages.json / *.cyproj), otherwise the file's own folder.
+    static std::string projectRoot(const std::string& file) {
+        std::error_code ec;
+        fs::path dir = fs::absolute(fs::path(file), ec).parent_path();
+        for (fs::path d = dir;;) {
+            if (!pkg::findManifestFile(d.string()).empty()) return d.string();
+            if (d == d.parent_path()) break;
+            d = d.parent_path();
+        }
+        return dir.string();
+    }
+
+    // The namespace named by the first declaration of a file ("" when it has none). Reads only the file's head.
+    static std::string declaredNamespace(const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return "";
+        std::string head(8192, '\0');
+        in.read(&head[0], static_cast<std::streamsize>(head.size()));
+        head.resize(static_cast<size_t>(in.gcount()));
+        size_t i = head.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+        while (i < head.size()) {
+            size_t e = head.find('\n', i);
+            if (e == std::string::npos) e = head.size();
+            size_t a = i;
+            while (a < e && (head[a] == ' ' || head[a] == '\t' || head[a] == '\r')) ++a;
+            i = e + 1;
+            if (a >= e || head[a] == '#') continue;  // blank line or comment
+            if (head.compare(a, 9, "namespace") != 0 || a + 9 >= e || (head[a + 9] != ' ' && head[a + 9] != '\t')) return "";
+            a += 9;
+            while (a < e && (head[a] == ' ' || head[a] == '\t')) ++a;
+            std::string ns;
+            while (a < e && (std::isalnum(static_cast<unsigned char>(head[a])) || head[a] == '_' || head[a] == '.')) ns += head[a++];
+            return ns;
+        }
+        return "";
+    }
+
+    const NsIndex& indexFor(const std::string& root) {
+        auto known = nsIndex_.find(root);
+        if (known != nsIndex_.end()) return known->second;
+        NsIndex idx;
+        std::error_code ec;
+        size_t seen = 0;
+        fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), endIt;
+        for (; !ec && it != endIt; it.increment(ec)) {
+            const fs::path& p = it->path();
+            const std::string name = p.filename().string();
+            std::error_code ec2;
+            if (it->is_directory(ec2)) {
+                if (name.empty() || name[0] == '.' || name == "bin" || name == "obj" || name == "node_modules" || name == "dist") it.disable_recursion_pending();
+                continue;
+            }
+            if (p.extension() != ".coy") continue;
+            if (++seen > 5000) break;
+            const std::string ns = declaredNamespace(p.string());
+            if (!ns.empty()) idx.files[ns].push_back(p.string());
+        }
+        for (auto& kv : idx.files) std::sort(kv.second.begin(), kv.second.end());
+        return nsIndex_.emplace(root, std::move(idx)).first->second;
+    }
+
+    // Files of namespace `ns` in the project of `fromFile` (empty when there is none).
+    std::vector<std::string> namespaceFiles(const std::string& fromFile, const std::string& ns) {
+        const NsIndex& idx = indexFor(projectRoot(fromFile));
+        auto it = idx.files.find(ns);
+        return it == idx.files.end() ? std::vector<std::string>{} : it->second;
+    }
+
+    // Loads (once) every file of a namespace; pushes the module index of each (-1 after a reported error).
+    // `sibling`: the files are implicit same-namespace neighbours, so another program's top-level statements are ignored, not an error.
+    void loadNamespace(const std::string& fromFile, const ImportDecl& imp, const std::vector<std::string>& files, std::vector<int>& idxs, bool sibling = false) {
+        for (const std::string& f : files) {
+            auto known = byCanonical_.find(canonical(f));
+            if (known != byCanonical_.end()) { idxs.push_back(known->second); continue; }
+            if (out_.modules.size() >= kMaxModules) {
+                error(fromFile, imp.loc, "too many files (limit " + std::to_string(kMaxModules) + ")");
+                idxs.push_back(-1);
+                return;
+            }
+            std::string text, err;
+            if (!readSource(f, text, err)) { error(fromFile, imp.loc, "cannot use \"" + imp.spec + "\": " + err); idxs.push_back(-1); continue; }
+            idxs.push_back(add(f, text, sibling));
+        }
+    }
+
+    static bool endsWith(const std::string& s, const std::string& suffix) {
+        return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
     void resolveImports(size_t mi) {
         // Copy: `out_.modules` may grow (and reallocate) while imports are resolved.
         const std::string file = out_.modules[mi].path;
         const std::vector<ImportDecl> imports = out_.modules[mi].imports;
         const std::vector<int> siblings = out_.modules[mi].libSiblings;
         const std::string libName = out_.modules[mi].libName;
+        const std::string myNs = out_.modules[mi].ns;
         const std::vector<std::string> libRequires = out_.modules[mi].libRequires;
         std::vector<int> resolved;
-        std::vector<ImportDecl> shown;  // parallel to `resolved`; a `use` expands to one entry per file of the library
+        std::vector<ImportDecl> shown;  // parallel to `resolved`; a `use` expands to one entry per file
         auto push = [&](const ImportDecl& imp, int idx) { shown.push_back(imp); resolved.push_back(idx); };
         for (const ImportDecl& imp : imports) {
-            if (imp.isUse) {
+            if (endsWith(imp.spec, ".coy")) {
+                error(file, imp.loc, "'use' no longer takes a file ('" + imp.spec + "'): put 'namespace Name' at the top of that file and write use \"Name\"");
+                push(imp, -1);
+                continue;
+            }
+            if (endsWith(lowered(imp.spec), ".lib")) {  // an explicit library file
                 std::vector<int> idxs;
                 if (!useLib(file, imp, idxs)) { push(imp, -1); continue; }
                 for (int i : idxs) push(imp, i);
                 continue;
             }
-            std::string target;
-            if (isPathSpec(imp.spec)) {
-                fs::path rel(imp.spec);
-                if (rel.extension() != ".coy") rel += ".coy";
-                fs::path base = fs::path(baseDirOf(file));
-                target = (base / rel).lexically_normal().string();
-            } else {
-                std::string why;
-                if (!findPackage(file, imp.spec, target, why)) {
-                    error(file, imp.loc, why);
-                    push(imp, -1);
-                    continue;
-                }
-                target = fs::path(target).lexically_normal().string();
-            }
-            auto it = byCanonical_.find(canonical(target));
-            if (it != byCanonical_.end()) {
-                push(imp, it->second);
-                continue;
-            }
-            if (out_.modules.size() >= kMaxModules) {
-                error(file, imp.loc, "too many imported files (limit " + std::to_string(kMaxModules) + ")");
+            // `use "Name"` is a namespace of this project, an installed package or a library.
+            const bool plain = imp.spec.find('/') == std::string::npos && imp.spec.find('\\') == std::string::npos && imp.spec.find("..") == std::string::npos;
+            std::vector<std::string> nsFiles = plain ? namespaceFiles(file, imp.spec) : std::vector<std::string>{};
+            std::string pkgEntry, pkgWhy, libPath, libWhy;
+            bool pkgMissing = true;
+            const bool isPkg = plain && findPackage(file, imp.spec, pkgEntry, pkgWhy, &pkgMissing);
+            const bool isLib = plain && findLib(file, imp, libPath, libWhy);
+            const int kinds = (nsFiles.empty() ? 0 : 1) + (isPkg ? 1 : 0) + (isLib ? 1 : 0);
+            if (kinds == 0) {
+                if (plain && !pkgMissing) { error(file, imp.loc, pkgWhy); }
+                else error(file, imp.loc, "cannot use \"" + imp.spec + "\": it is not a namespace of this project, an installed package or a library. " + libWhy);
                 push(imp, -1);
                 continue;
             }
-            std::string text, err;
-            if (!readSource(target, text, err)) {
-                error(file, imp.loc, "cannot import '" + imp.spec + "': " + err);
+            if (kinds > 1) {
+                error(file, imp.loc, "use \"" + imp.spec + "\" is ambiguous: it names " + std::string(nsFiles.empty() ? "" : "a namespace of this project") +
+                                         std::string(!nsFiles.empty() && isPkg ? " and " : "") + std::string(isPkg ? "an installed package" : "") +
+                                         std::string((!nsFiles.empty() || isPkg) && isLib ? " and " : "") + std::string(isLib ? "a library" : "") +
+                                         "; rename one of them");
                 push(imp, -1);
                 continue;
             }
-            push(imp, add(target, text));
+            std::vector<int> idxs;
+            if (!nsFiles.empty()) {
+                loadNamespace(file, imp, nsFiles, idxs);
+            } else if (isPkg) {
+                loadNamespace(file, imp, {fs::path(pkgEntry).lexically_normal().string()}, idxs);
+            } else if (!useLib(file, imp, idxs)) {
+                idxs.assign(1, -1);
+            }
+            for (int i : idxs) push(imp, i);
         }
         // A library file also sees the libraries its .lib requires.
         for (const std::string& req : libRequires) {
@@ -359,6 +468,15 @@ private:
             ImportDecl self;
             self.spec = libName;
             push(self, sib);
+        }
+        // The files of one namespace see each other's exports (no `use` needed for your own namespace).
+        if (!myNs.empty() && libName.empty()) {
+            ImportDecl self;
+            self.spec = myNs;
+            std::vector<int> idxs;
+            loadNamespace(file, self, namespaceFiles(file, myNs), idxs, true);
+            for (int i : idxs)
+                if (i != static_cast<int>(mi)) push(self, i);
         }
         out_.modules[mi].imports = std::move(shown);
         out_.modules[mi].importIndex = std::move(resolved);

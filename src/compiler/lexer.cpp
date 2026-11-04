@@ -146,8 +146,9 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
             advance();  // closing quote
             t.kind = Tok::Char;
             t.ival = cp;
-        } else if (c == '"') {
+        } else if (c == '"' || (c == '$' && i + 1 < s.size() && s[i + 1] == '"')) {
             SourceLoc start = t.loc;
+            if (c == '$') { t.ival = 1; advance(); }  // $"...": an interpolated string (the parser splits it)
             advance();  // opening quote
             bool closed = false;
             while (i < s.size() && s[i] != '\n') {
@@ -178,7 +179,7 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
         } else if (i + 1 < s.size() &&
                    ((c == '=' && s[i + 1] == '=') || (c == '!' && s[i + 1] == '=') ||
                     (c == '<' && s[i + 1] == '=') || (c == '>' && s[i + 1] == '=') ||
-                    (c == '&' && s[i + 1] == '&') || (c == '?' && s[i + 1] == '?') || (c == '|' && s[i + 1] == '|') ||
+                    (c == '&' && s[i + 1] == '&') || (c == '+' && s[i + 1] == '+') || (c == '-' && s[i + 1] == '-') || (c == '?' && s[i + 1] == '?') || (c == '|' && s[i + 1] == '|') ||
                     ((c == '+' || c == '-' || c == '*' || c == '/' || c == '%') && s[i + 1] == '='))) {
             t.kind = Tok::Punct;
             t.text = s.substr(i, 2);

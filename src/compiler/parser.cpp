@@ -18,7 +18,7 @@ const std::set<std::string>& unsupportedWords() {
 const std::set<std::string>& keywords() {
     static const std::set<std::string> w = {"hand", "method", "var", "int", "string", "boolean",
                                             "if", "else", "while", "for", "break", "continue", "return", "true", "false", "array", "new",
-                                            "double", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use",
+                                            "double", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use", "namespace",
                                             "class", "model", "interface", "property", "constructor", "public", "private", "protected", "override", "static", "this"};
     return w;
 }
@@ -32,18 +32,103 @@ class Parser {
 public:
     Parser(const std::vector<Token>& toks, std::string file) : toks_(toks), file_(std::move(file)) {}
 
-    Program run() {
+    // `errors` null: stop at (throw) the first syntax error. Otherwise errors are collected and parsing resumes at the next
+    // declaration or statement, so one run reports several syntax errors.
+    Program run(std::vector<Diagnostic>* errors = nullptr) {
+        errs_ = errors;
         Program p;
         while (peek().kind != Tok::Eof) {
+            const size_t itemStart = pos_;
+            try {
+                topLevelItem(p);
+            } catch (const CompileError& e) {
+                if (!errs_) throw;
+                report(e.diag);
+                recoverItem(itemStart);
+                if (errs_->size() >= kMaxReportedErrors) break;
+            }
+        }
+        return p;
+    }
+
+private:
+    std::vector<Diagnostic>* errs_ = nullptr;
+    static constexpr size_t kMaxReportedErrors = 50;
+
+    // Records an error unless the previous one was on the same line (a follow-up of the same mistake).
+    void report(const Diagnostic& d) {
+        if (!errs_->empty() && errs_->back().loc.line == d.loc.line) return;
+        errs_->push_back(d);
+    }
+
+    // After an error inside a top-level item: skip to the end of that item (its closing '}' or its line).
+    void recoverItem(size_t start) {
+        int depth = 0;
+        for (size_t i = start; i < pos_ && i < toks_.size(); ++i) {
+            if (tokIsPunct(toks_[i], "{")) ++depth;
+            else if (tokIsPunct(toks_[i], "}") && depth > 0) --depth;
+        }
+        while (peek().kind != Tok::Eof) {
+            if (isPunct("{")) {
+                ++depth;
+            } else if (isPunct("}")) {
+                if (depth <= 1) { take(); break; }
+                --depth;
+            } else if (depth == 0 && pos_ > start && peek().nlBefore) {
+                break;
+            }
+            take();
+        }
+        if (pos_ == start) take();
+    }
+
+    // After an error inside a block: skip the rest of the broken statement, leaving the block's own '}' alone.
+    void recoverStatement(size_t start) {
+        int depth = 0;
+        for (size_t i = start; i < pos_ && i < toks_.size(); ++i) {
+            if (tokIsPunct(toks_[i], "{")) ++depth;
+            else if (tokIsPunct(toks_[i], "}") && depth > 0) --depth;
+        }
+        while (peek().kind != Tok::Eof) {
+            if (isPunct("{")) {
+                ++depth;
+            } else if (isPunct("}")) {
+                if (depth == 0) break;  // closes the enclosing block
+                if (--depth == 0) { take(); if (isWord("else")) continue; break; }
+            } else if (depth == 0 && pos_ > start && peek().nlBefore) {
+                break;
+            }
+            take();
+        }
+        if (pos_ == start) take();
+    }
+
+    void topLevelItem(Program& p) {
+        {
             if (isPunct("}")) fail(peek(), "unexpected '}'");
-            if (isWord("import") || isWord("use")) {
+            if (isWord("namespace")) {
+                const Token& kw = take();
+                if (&kw != &toks_[0])
+                    fail(kw, "'namespace' must be the first declaration of the file");
+                p.nsLoc = kw.loc;
+                for (;;) {
+                    if (peek().kind != Tok::Ident || keywords().count(peek().text))
+                        fail(peek(), "expected a namespace name (letters, digits and '_', parts separated by '.'), found " + describe(peek()));
+                    p.ns += take().text;
+                    if (!isPunct(".")) break;
+                    take();
+                    p.ns += ".";
+                }
+                endStatement();
+            } else if (isWord("import")) {
+                fail(peek(), "'import' was removed in Coyote 0.6: put 'namespace Name' at the top of the file and write use \"Name\" to see its exports");
+            } else if (isWord("use")) {
                 ImportDecl imp;
-                imp.isUse = isWord("use");
-                const std::string kw = imp.isUse ? "use" : "import";
+                imp.isUse = true;
                 imp.loc = take().loc;
-                if (peek().kind != Tok::String) fail(peek(), "expected a quoted " + std::string(imp.isUse ? "library name or .lib path" : "path or package name") + " after '" + kw + "', found " + describe(peek()));
+                if (peek().kind != Tok::String) fail(peek(), "expected a quoted namespace, library or package name (or a .lib path) after 'use', found " + describe(peek()));
                 imp.spec = take().text;
-                if (imp.spec.empty()) fail(toks_[pos_ - 1], "the " + kw + " path is empty");
+                if (imp.spec.empty()) fail(toks_[pos_ - 1], "the use name is empty");
                 endStatement();
                 p.imports.push_back(std::move(imp));
             } else if (isWord("export")) {
@@ -68,10 +153,8 @@ public:
                 p.stmts.push_back(statement());
             }
         }
-        return p;
     }
 
-private:
     const std::vector<Token>& toks_;
     std::string file_;
     size_t pos_ = 0;
@@ -557,7 +640,15 @@ private:
         while (!isPunct("}")) {
             if (peek().kind == Tok::Eof)
                 fail(peek(), "expected '}' to close the block opened at line " + std::to_string(open.loc.line));
-            body.push_back(statement());
+            const size_t stmtStart = pos_;
+            try {
+                body.push_back(statement());
+            } catch (const CompileError& e) {
+                if (!errs_) throw;
+                report(e.diag);
+                if (errs_->size() >= kMaxReportedErrors) throw;
+                recoverStatement(stmtStart);
+            }
         }
         take();  // '}'
         return body;
@@ -601,39 +692,56 @@ private:
         return exprStatement(true);
     }
 
+    // Copies an expression that can be evaluated twice without changing the program: variables, literals, fields,
+    // elements and arithmetic of those. Returns null for anything else (calls, `new`, ...).
+    ExprPtr cloneSimple(const Expr& e) {
+        auto c = std::make_unique<Expr>();
+        c->kind = e.kind;
+        c->loc = e.loc;
+        c->text = e.text;
+        c->ival = e.ival;
+        c->dval = e.dval;
+        c->depth = e.depth;
+        switch (e.kind) {
+            case Expr::Kind::Var: case Expr::Kind::Int: case Expr::Kind::Char: case Expr::Kind::Bool: case Expr::Kind::String:
+                return c;
+            case Expr::Kind::Member:
+                if (!e.lhs || !(c->lhs = cloneSimple(*e.lhs))) return nullptr;
+                return c;
+            case Expr::Kind::Index: case Expr::Kind::Binary:
+                if (!e.lhs || !e.rhs || !(c->lhs = cloneSimple(*e.lhs)) || !(c->rhs = cloneSimple(*e.rhs))) return nullptr;
+                return c;
+            default:
+                return nullptr;
+        }
+    }
+
     // A statement that starts with an expression: a call, a method call, or an assignment (plain or
     // compound). `terminate` is false inside a 'for' header, which has its own separators.
     StmtPtr exprStatement(bool terminate) {
         const Token& t = peek();
         ExprPtr lhs = postfix(primary());
         if (peek().kind == Tok::Punct && (peek().text == "+=" || peek().text == "-=" || peek().text == "*=" ||
-                                          peek().text == "/=" || peek().text == "%=")) {
-            if (lhs->kind != Expr::Kind::Var && !(lhs->kind == Expr::Kind::Member && lhs->lhs->kind == Expr::Kind::Var))
-                fail(peek(), "compound assignment '" + peek().text + "' is only supported on variables and fields of a variable (like this.count), not array elements; write the full assignment");
+                                          peek().text == "/=" || peek().text == "%=" || peek().text == "++" || peek().text == "--")) {
+            const bool step = peek().text == "++" || peek().text == "--";
             const Token op = take();
+            ExprPtr copy = cloneSimple(*lhs);
+            if (!copy)
+                fail(op, "'" + op.text + "' needs a target without side effects (a variable, a field or an element with a simple index); write the full assignment");
             auto bin = std::make_unique<Expr>();
             bin->kind = Expr::Kind::Binary;
             bin->loc = op.loc;
             bin->text = op.text.substr(0, 1);
-            auto cloneVar = [](const Expr& v) {
-                auto c = std::make_unique<Expr>();
-                c->kind = Expr::Kind::Var;
-                c->loc = v.loc;
-                c->text = v.text;
-                return c;
-            };
-            if (lhs->kind == Expr::Kind::Var) {
-                bin->lhs = cloneVar(*lhs);
-            } else {  // field of a variable: the receiver is evaluated twice, which is harmless for a variable
-                auto m = std::make_unique<Expr>();
-                m->kind = Expr::Kind::Member;
-                m->loc = lhs->loc;
-                m->text = lhs->text;
-                m->lhs = cloneVar(*lhs->lhs);
-                m->depth = 2;
-                bin->lhs = std::move(m);
+            bin->lhs = std::move(copy);
+            if (step) {
+                auto one = std::make_unique<Expr>();
+                one->kind = Expr::Kind::Int;
+                one->loc = op.loc;
+                one->ival = 1;
+                bin->rhs = std::move(one);
+            } else {
+                bin->rhs = expression();
             }
-            bin->rhs = expression();
             measure(*bin);
             auto s = make(Stmt::Kind::Assign, t.loc);
             s->target = std::move(lhs);
@@ -942,12 +1050,85 @@ private:
         return postfix(primary());
     }
 
+    // $"Hello {name}, {a + b}!" becomes "Hello " + (name) + ", " + (a + b) + "!". `{{` and `}}` are literal braces.
+    // The expressions cannot contain double quotes (the string would end there).
+    ExprPtr interpolated(const Token& t) {
+        const std::string& s = t.text;
+        ExprPtr acc;
+        auto strExpr = [&](const std::string& v) {
+            auto x = std::make_unique<Expr>();
+            x->kind = Expr::Kind::String;
+            x->loc = t.loc;
+            x->text = v;
+            return x;
+        };
+        auto add = [&](ExprPtr part) {
+            if (!acc) {
+                if (part->kind == Expr::Kind::String) { acc = std::move(part); return; }
+                acc = strExpr("");
+            }
+            auto bin = std::make_unique<Expr>();
+            bin->kind = Expr::Kind::Binary;
+            bin->loc = t.loc;
+            bin->text = "+";
+            bin->lhs = std::move(acc);
+            bin->rhs = std::move(part);
+            measure(*bin);
+            acc = std::move(bin);
+        };
+        std::string lit;
+        auto flush = [&]() { if (!lit.empty()) { add(strExpr(lit)); lit.clear(); } };
+        for (size_t i = 0; i < s.size();) {
+            if (s[i] == '{') {
+                if (i + 1 < s.size() && s[i + 1] == '{') { lit += '{'; i += 2; continue; }
+                size_t j = i + 1;
+                int d = 1;
+                while (j < s.size()) {
+                    if (s[j] == '{') ++d;
+                    else if (s[j] == '}' && --d == 0) break;
+                    ++j;
+                }
+                if (d != 0) fail(t, "unterminated '{' in an interpolated string (write '{{' for a literal brace)");
+                flush();
+                add(interpolatedExpr(s.substr(i + 1, j - i - 1), t));
+                i = j + 1;
+            } else if (s[i] == '}') {
+                if (i + 1 < s.size() && s[i + 1] == '}') { lit += '}'; i += 2; continue; }
+                fail(t, "a single '}' in an interpolated string: write '}}' for a literal brace");
+            } else {
+                lit += s[i++];
+            }
+        }
+        flush();
+        return acc ? std::move(acc) : strExpr("");
+    }
+
+    ExprPtr interpolatedExpr(const std::string& text, const Token& at) {
+        if (text.find_first_not_of(" \t") == std::string::npos) fail(at, "empty expression '{}' in an interpolated string");
+        std::vector<Token> toks;
+        try {
+            toks = lex(text, file_);
+        } catch (const CompileError& e) {
+            fail(at, "in the interpolated expression {" + text + "}: " + e.diag.message);
+        }
+        for (Token& k : toks) k.loc = at.loc;  // diagnostics point at the string
+        Parser sub(toks, file_);
+        sub.depth_ = depth_;
+        ExprPtr x = sub.expression();
+        if (sub.peek().kind != Tok::Eof) fail(at, "unexpected " + describe(sub.peek()) + " in the interpolated expression {" + text + "}");
+        return x;
+    }
+
     ExprPtr primary() {
         const Token& t = peek();
         auto e = std::make_unique<Expr>();
         e->loc = t.loc;
         switch (t.kind) {
             case Tok::String:
+                if (t.ival == 1) {  // $"text {expression} text"
+                    const Token& st = take();
+                    return interpolated(st);
+                }
                 e->kind = Expr::Kind::String;
                 e->text = t.text;
                 take();
@@ -1085,6 +1266,10 @@ private:
 
 Program parse(const std::vector<Token>& tokens, const std::string& file) {
     return Parser(tokens, file).run();
+}
+
+Program parseRecovering(const std::vector<Token>& tokens, const std::string& file, std::vector<Diagnostic>& errors) {
+    return Parser(tokens, file).run(&errors);
 }
 
 } // namespace coyote

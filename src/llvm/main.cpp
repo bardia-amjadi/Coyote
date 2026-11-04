@@ -512,7 +512,10 @@ int main(int argc, char** argv) {
         pvm::verify(module, registry, input);
         ir = Gen(module).run(problems);
     } catch (const pvm::MlError& e) {  // valid ML, but it uses a host function the native subset does not have
-        problems.push_back(pvm::formatMlError(e));
+        std::string msg = pvm::formatMlError(e);
+        if (msg.find("is not registered with this PVM") != std::string::npos)
+            msg = "the program uses a host function that the native subset does not have (" + msg + ")";
+        problems.push_back(msg);
     }
     if (!problems.empty()) {
         if (!nativeOnly && !emitLl) {

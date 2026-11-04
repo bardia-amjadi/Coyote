@@ -252,7 +252,7 @@ struct ClassDecl {
 // The ML name of a class: its own name in the entry file, prefixed with the file index elsewhere.
 inline std::string classMlName(const ClassDecl& c) { return c.unit == 0 ? c.name : "m" + std::to_string(c.unit) + "." + c.name; }
 
-// import "<path or package>"
+// use "<namespace, library or package>"
 struct ImportDecl {
     SourceLoc loc;
     std::string spec;
@@ -262,6 +262,7 @@ struct ImportDecl {
 // One source file of the program. Module 0 is the entry file.
 struct Module {
     std::string path;                 // as shown in diagnostics and in the ML '.file' directive
+    std::string ns;                   // the namespace the file declares (empty: none)
     std::vector<ImportDecl> imports;
     std::vector<int> importIndex;     // resolved module of each import (filled by the loader)
     std::vector<int> libSiblings;     // other files of the same .lib (they see each other's exports)
@@ -270,6 +271,8 @@ struct Module {
 };
 
 struct Program {
+    std::string ns;                   // `namespace A.B` at the top of the file (empty: the global namespace)
+    SourceLoc nsLoc;
     std::vector<ImportDecl> imports;  // parser output for a single file; the loader moves them into `modules`
     std::vector<Module> modules;      // filled by the loader (a bare parse leaves it empty)
     std::vector<ClassDecl> classes;
