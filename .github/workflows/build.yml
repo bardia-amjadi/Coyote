@@ -169,29 +169,43 @@ jobs:
       - name: Locate Inno Setup
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
 
-          if (!(Test-Path $iscc)) {
-              $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
-          }
+          $iscc = $candidates | Where-Object {
+              Test-Path -LiteralPath $_
+          } | Select-Object -First 1
 
-          if (!(Test-Path $iscc)) {
+          if (!$iscc) {
               throw "Inno Setup compiler (ISCC.exe) was not found."
           }
 
-          & $iscc /?
-          if ($LASTEXITCODE -ne 0) {
-              throw "Inno Setup compiler verification failed."
-          }
-
+          Write-Host "Found Inno Setup: $iscc"
           echo "ISCC_PATH=$iscc" >> $env:GITHUB_ENV
 
       - name: Build setup.exe
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DAppVersion=${{ steps.ver.outputs.full }}" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\setup-out" installer\coyote.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          New-Item -ItemType Directory -Force -Path setup-out | Out-Null
+
+          & "$env:ISCC_PATH" `
+            "/DAppVersion=${{ steps.ver.outputs.full }}" `
+            "/DStageDir=$PWD\stage" `
+            "/DOutDir=$PWD\setup-out" `
+            "installer\coyote.iss"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
+          }
+
+          $installer = Get-ChildItem setup-out -Filter "*.exe"
+
+          if (!$installer) {
+              throw "Installer was not generated."
+          }
+
           Get-ChildItem setup-out
 
       - name: Upload setup.exe
