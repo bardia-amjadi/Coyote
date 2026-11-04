@@ -166,8 +166,25 @@ jobs:
           COYOTE_CLANG_DIR: ${{ github.workspace }}/clang-dir
         run: bash tools/stage.sh build/${CONFIG} studio/dist/CoyoteStudio-win32-x64 stage editors/vscode/coyote-vscode.vsix
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y --version=6.3.3
+      - name: Locate Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+          if (!(Test-Path $iscc)) {
+              $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          }
+
+          if (!(Test-Path $iscc)) {
+              throw "Inno Setup compiler (ISCC.exe) was not found."
+          }
+
+          & $iscc /?
+          if ($LASTEXITCODE -ne 0) {
+              throw "Inno Setup compiler verification failed."
+          }
+
+          echo "ISCC_PATH=$iscc" >> $env:GITHUB_ENV
 
       - name: Build setup.exe
         shell: pwsh
