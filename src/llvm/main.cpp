@@ -55,18 +55,29 @@ void rt_fail(const char* file, int line, const char* msg) {
 void rt_print(const char* s) { fputs(s, stdout); }
 void rt_println(const char* s) { fputs(s, stdout); fputc('\n', stdout); }
 bool rt_streq(const char* a, const char* b) { return strcmp(a, b) == 0; }
-/* Strings are never freed: the native backend has no collector (documented limitation). */
+/* Call depth, like the PVM: the entry function is frame 1 and a call that would make it more than 5000 is a runtime error
+   (the generated code checks rt_depth before every call). */
+int32_t rt_depth = 1;
+/* Strings are reference counted. A string value points at its characters; the count is the int64 just before them.
+   Constants have a huge count (immortal). Every string on the operand stack or in a local owns one reference. */
+#define RT_IMMORTAL 0x4000000000000000LL
+static char* rt_alloc(size_t n) {
+    int64_t* h = (int64_t*)malloc(sizeof(int64_t) + n);
+    if (!h) rt_fail("native", 0, "out of memory");
+    *h = 1;
+    return (char*)(h + 1);
+}
+void rt_retain(const char* s) { int64_t* h = (int64_t*)s - 1; if (*h < RT_IMMORTAL) ++*h; }
+void rt_release(const char* s) { int64_t* h = (int64_t*)s - 1; if (*h < RT_IMMORTAL && --*h == 0) free(h); }
 const char* rt_concat(const char* a, const char* b) {
     size_t la = strlen(a), lb = strlen(b);
-    char* r = (char*)malloc(la + lb + 1);
-    if (!r) rt_fail("native", 0, "out of memory");
+    char* r = rt_alloc(la + lb + 1);
     memcpy(r, a, la);
     memcpy(r + la, b, lb + 1);
     return r;
 }
 const char* rt_str_int(int32_t v) {
-    char* r = (char*)malloc(16);
-    if (!r) rt_fail("native", 0, "out of memory");
+    char* r = rt_alloc(16);
     snprintf(r, 16, "%d", (int)v);
     return r;
 }
@@ -106,20 +117,24 @@ public:
         o << "declare void @rt_fail(ptr, i32, ptr) noreturn\n"
           << "declare void @rt_print(ptr)\ndeclare void @rt_println(ptr)\n"
           << "declare zeroext i1 @rt_streq(ptr, ptr)\ndeclare ptr @rt_concat(ptr, ptr)\ndeclare ptr @rt_str_int(i32)\n"
+          << "declare void @rt_retain(ptr)\ndeclare void @rt_release(ptr)\n"
+          << "@rt_depth = external global i32\n"
           << "declare i32 @main_flush()\n"
           << "declare {i32, i1} @llvm.sadd.with.overflow.i32(i32, i32)\n"
           << "declare {i32, i1} @llvm.ssub.with.overflow.i32(i32, i32)\n"
           << "declare {i32, i1} @llvm.smul.with.overflow.i32(i32, i32)\n\n";
-        o << "@.true = private unnamed_addr constant [5 x i8] c\"true\\00\"\n"
-          << "@.false = private unnamed_addr constant [6 x i8] c\"false\\00\"\n"
-          << "@.empty = private unnamed_addr constant [1 x i8] zeroinitializer\n";
+        // String constants carry the reference-count header (immortal) in front of their characters.
+        const char* kImmortal = "4611686018427387904";
+        o << "@.true = private unnamed_addr constant { i64, [5 x i8] } { i64 " << kImmortal << ", [5 x i8] c\"true\\00\" }\n"
+          << "@.false = private unnamed_addr constant { i64, [6 x i8] } { i64 " << kImmortal << ", [6 x i8] c\"false\\00\" }\n"
+          << "@.empty = private unnamed_addr constant { i64, [1 x i8] } { i64 " << kImmortal << ", [1 x i8] zeroinitializer }\n";
         for (size_t i = 0; i < pool_.size(); ++i) {
-            o << "@.s" << i << " = private unnamed_addr constant [" << pool_[i].size() + 1 << " x i8] c\"";
+            o << "@.s" << i << " = private unnamed_addr constant { i64, [" << pool_[i].size() + 1 << " x i8] } { i64 " << kImmortal << ", [" << pool_[i].size() + 1 << " x i8] c\"";
             for (unsigned char c : pool_[i]) {
                 if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') o << c;
                 else { char b[8]; std::snprintf(b, sizeof b, "\\%02X", c); o << b; }
             }
-            o << "\\00\"\n";
+            o << "\\00\" }\n";
         }
         o << "\n" << body_.str();
         o << "define i32 @main() {\n  call void @\"f." << m_.entry << "\"()\n  call i32 @main_flush()\n  ret i32 0\n}\n";
@@ -140,8 +155,10 @@ private:
             it = poolIndex_.emplace(s, pool_.size()).first;
             pool_.push_back(s);
         }
-        return "@.s" + std::to_string(it->second);
+        return cstr("@.s" + std::to_string(it->second));
     }
+    // The characters of a constant string start after its 8-byte count.
+    static std::string cstr(const std::string& global) { return "getelementptr inbounds (i8, ptr " + global + ", i64 8)"; }
     std::string t() { return "%t" + std::to_string(tmp_++); }
 
     void emitFunction(const pvm::Function& f) {
@@ -171,6 +188,12 @@ private:
             std::string r = t();
             code << "  " << r << " = load " << llType(k) << ", ptr %stk." << stack.size() << "." << k << "\n";
             return r;
+        };
+        auto retain = [&](const std::string& v) { code << "  call void @rt_retain(ptr " << v << ")\n"; };
+        auto release = [&](const std::string& v) { code << "  call void @rt_release(ptr " << v << ")\n"; };
+        auto releaseLocals = [&]() {
+            for (size_t i = 0; i < slotKinds.size(); ++i)
+                if (slotKinds[i] == 's') { std::string r = t(); code << "  " << r << " = load ptr, ptr %loc." << i << "\n"; release(r); }
         };
         auto fail = [&](const pvm::Instr& in, const std::string& msg) {
             code << "  call void @rt_fail(ptr " << str(m_.fileName(in.srcFile)) << ", i32 " << in.srcLine << ", ptr " << str(msg) << ")\n  unreachable\n";
@@ -221,12 +244,20 @@ private:
                     char k = slotKinds[static_cast<size_t>(in.ival)];
                     std::string r = t();
                     code << "  " << r << " = load " << llType(k) << ", ptr %loc." << in.ival << "\n";
+                    if (k == 's') retain(r);  // the operand stack owns its own reference
                     push(k, r);
                     break;
                 }
                 case Op::Store: {
                     char k = slotKinds[static_cast<size_t>(in.ival)];
                     std::string v = pop(k);
+                    if (k == 's') {  // the local takes over the reference from the stack and drops its old string
+                        std::string old = t();
+                        code << "  " << old << " = load ptr, ptr %loc." << in.ival << "\n";
+                        code << "  store ptr " << v << ", ptr %loc." << in.ival << "\n";
+                        release(old);
+                        break;
+                    }
                     code << "  store " << llType(k) << " " << v << ", ptr %loc." << in.ival << "\n";
                     break;
                 }
@@ -256,13 +287,15 @@ private:
                 case Op::Concat: {
                     std::string b = pop('s'), a = pop('s'), r = t();
                     code << "  " << r << " = call ptr @rt_concat(ptr " << a << ", ptr " << b << ")\n";
+                    release(a);
+                    release(b);
                     push('s', r);
                     break;
                 }
                 case Op::StrInt: { std::string a = pop('i'), r = t(); code << "  " << r << " = call ptr @rt_str_int(i32 " << a << ")\n"; push('s', r); break; }
                 case Op::StrBool: {
                     std::string a = pop('b'), r = t();
-                    code << "  " << r << " = select i1 " << a << ", ptr @.true, ptr @.false\n";
+                    code << "  " << r << " = select i1 " << a << ", ptr " << cstr("@.true") << ", ptr " << cstr("@.false") << "\n";
                     push('s', r);
                     break;
                 }
@@ -282,6 +315,8 @@ private:
                 case Op::EqS: case Op::NeS: {
                     std::string b = pop('s'), a = pop('s'), r = t();
                     code << "  " << r << " = call zeroext i1 @rt_streq(ptr " << a << ", ptr " << b << ")\n";
+                    release(a);
+                    release(b);
                     if (in.op == Op::NeS) { std::string n = t(); code << "  " << n << " = xor i1 " << r << ", true\n"; r = n; }
                     push('b', r);
                     break;
@@ -308,6 +343,13 @@ private:
                     const pvm::Function& callee = m_.funcs[static_cast<size_t>(in.target)];
                     std::vector<std::string> args(callee.sig.params.size());
                     for (size_t i = callee.sig.params.size(); i-- > 0;) args[i] = pop(kindOf(callee.sig.params[i], "a parameter"));
+                    // Same limit and message as the PVM: more than 5000 nested calls is a runtime error at the call.
+                    const int did = tmp_++;
+                    const std::string dv = t(), dc = t(), dn = t();
+                    code << "  " << dv << " = load i32, ptr @rt_depth\n  " << dc << " = icmp sge i32 " << dv << ", 5000\n  br i1 " << dc
+                         << ", label %so" << did << ", label %cd" << did << "\nso" << did << ":\n";
+                    fail(in, "call stack overflow (more than 5000 nested calls; infinite recursion?)");
+                    code << "cd" << did << ":\n  " << dn << " = add i32 " << dv << ", 1\n  store i32 " << dn << ", ptr @rt_depth\n";
                     std::string call = "call ";
                     std::string r;
                     if (callee.sig.ret.kind == Type::Void) call += "void";
@@ -316,7 +358,7 @@ private:
                     code << call << " @\"f." << callee.name << "\"(";
                     for (size_t i = 0; i < args.size(); ++i)
                         code << (i ? ", " : "") << llType(kindOf(callee.sig.params[i], "a parameter")) << " " << args[i];
-                    code << ")\n";
+                    code << ")\n  store i32 " << dv << ", ptr @rt_depth\n";
                     if (callee.sig.ret.kind != Type::Void) push(kindOf(callee.sig.ret, "a return value"), r);
                     break;
                 }
@@ -326,12 +368,24 @@ private:
                         throw Unsupported{"host function '" + h.name + "' is not available in native code (only con.print and con.println are)"};
                     std::string a = pop('s');
                     code << "  call void @" << (h.name == "con.print" ? "rt_print" : "rt_println") << "(ptr " << a << ")\n";
+                    release(a);
                     break;
                 }
-                case Op::Pop: stack.pop_back(); break;
+                case Op::Pop: {
+                    const char k = stack.back();
+                    std::string v = pop(k);
+                    if (k == 's') release(v);
+                    break;
+                }
                 case Op::Ret:
-                    if (retKind) { std::string v = pop(retKind); code << "  ret " << llType(retKind) << " " << v << "\n"; }
-                    else code << "  ret void\n";
+                    {
+                        std::string v;
+                        if (retKind) v = pop(retKind);  // owned: handed to the caller
+                        while (!stack.empty()) { const char k = stack.back(); std::string x = pop(k); if (k == 's') release(x); }
+                        releaseLocals();
+                        if (retKind) code << "  ret " << llType(retKind) << " " << v << "\n";
+                        else code << "  ret void\n";
+                    }
                     terminated = true;
                     break;
                 default:
@@ -348,7 +402,7 @@ private:
         for (size_t i = 0; i < slotKinds.size(); ++i) {
             o << "  %loc." << i << " = alloca " << llType(slotKinds[i]) << "\n";
             if (i < f.sig.params.size()) o << "  store " << llType(slotKinds[i]) << " %arg" << i << ", ptr %loc." << i << "\n";
-            else o << "  store " << llType(slotKinds[i]) << " " << (slotKinds[i] == 's' ? "@.empty" : slotKinds[i] == 'b' ? "false" : "0") << ", ptr %loc." << i << "\n";
+            else o << "  store " << llType(slotKinds[i]) << " " << (slotKinds[i] == 's' ? cstr("@.empty") : slotKinds[i] == 'b' ? "false" : "0") << ", ptr %loc." << i << "\n";
         }
         for (const auto& s : slots) o << "  %stk." << s.first << "." << s.second << " = alloca " << llType(s.second) << "\n";
         o << code.str() << "}\n\n";
@@ -549,6 +603,7 @@ int main(int argc, char** argv) {
     std::string cmd = quote(clang) + " -O2 -Wno-override-module -o " + quote(output) + " " + quote((dir / "program.ll").string()) + " " +
                       quote((dir / "runtime.c").string());
 #ifdef _WIN32
+    cmd += " -Wl,--stack,16777216";  // 5000 nested calls need more than the 1 MiB default stack of a Windows program
     // cmd.exe strips the first and the last quote of a command line that starts with a quote; wrapping the whole
     // command keeps every path (including ones with spaces, like "C:\Users\First Last\...") intact.
     cmd = "\"" + cmd + "\"";

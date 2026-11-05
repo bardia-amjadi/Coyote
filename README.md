@@ -45,15 +45,15 @@ Coyote is an early work in progress. Only what is marked "working" exists.
 | ML generation with `.coy` line mapping | **Working**: the compiler emits ML v5, or v7 when a program uses class hierarchies (v6 = function values: the PVM runs them, the compiler does not emit them yet) ([spec](docs/ml-spec.md)); the PVM accepts ML v1 to v7 |
 | ML loader and verifier | **Working**, including operand-stack typing across branches and loops |
 | PVM interpreter, call frames, host registry with permissions | **Working** (`con.print`, `con.println`); runtime errors for division by zero, `int` overflow, call depth, array bounds/null/size, heap limit |
-| Classes, models, constructors, properties, static fields/methods, `public`/`private`/`protected` | **Working** (ML v5 `class`/`global`/`newobj`/`getfield`...; no overloading) ([docs](docs/language.md)) |
+| Classes, models, constructors, properties, static fields/methods, `public`/`private`/`protected` | **Working** (ML v5 `class`/`global`/`newobj`/`getfield`...; method overloading since 0.6.1) ([docs](docs/language.md)) |
 | Inheritance, interfaces, `override`/`base`, `as`/`is` | **Working** (single base class + interfaces, virtual methods through compiler-generated dispatchers; ML v7 only for programs that use it) ([docs](docs/language.md)) |
-| Generics (classes, interfaces, top-level methods) | **Working** by compile-time expansion; type arguments are explicit (`First<int>(xs)`), no inference, no generic methods inside classes ([docs](docs/language.md)) |
+| Generics (classes, interfaces, top-level methods) | **Working** by compile-time expansion; type arguments of generic methods are inferred from the arguments since 0.6.1 (`First(xs)`; `First<int>(xs)` still works), no generic methods inside classes ([docs](docs/language.md)) |
 | Dead-code removal | **Working** (unreachable methods and classes are dropped from the ML; `--keep-unused` disables) ([docs](docs/compiler.md)) |
 | Variadic parameters, extension methods | **Working** (compile-time rewrites; [docs](docs/language.md)) |
 | Libraries: `use`, `.lib` files, Standard libraries (`Standard.IO`, `.Math`, `.Text` with extension methods, `.Time`, `.Random`, `.Collections`, `.Testing`, HTTP, ...), host functions with return values | **Working**; `.lib` is a **source bundle** (compiled/linked libs are not implemented) ([docs](docs/libraries.md)) |
 | Closures/lambdas, LINQ-like APIs | Not implemented (lambdas need function values in ML, which do not exist yet; LINQ-like APIs depend on them) |
 | Garbage collector | **Working** for arrays, maps, boxed values and class instances: precise, non-moving mark-and-sweep; `--gc-stress`, `--gc-stats`, `--heap-limit` ([design](docs/architecture.md)). Strings are copied by value and are not on the heap. Nothing with finalizers or native resources exists yet |
-| LLVM native backend (`coyote-llvm`) | **Working for a small subset** (int/boolean/string, calls, control flow, console print); outside the subset it falls back to a **bundled executable** (the PVM plus the program) unless `--native-only`; no GC, strings leak ([docs](docs/llvm.md)). The installer ships clang (llvm-mingw); **not yet verified on Windows** |
+| LLVM native backend (`coyote-llvm`) | **Working for a small subset** (int/boolean/string, calls, control flow, console print); outside the subset it falls back to a **bundled executable** (the PVM plus the program) unless `--native-only`; same call-depth limit as the PVM and reference-counted strings since 0.6.0.9 ([docs](docs/llvm.md)). The installer ships clang (llvm-mingw); **not yet verified on Windows** |
 | `cpx` (workflows, `.cyproj` / `packages.json` schema v1) | **Working**: `cpx start`/`build`/`list`/`check`, project output and run settings from the project file ([docs](docs/cpx.md), [projects](docs/projects.md)); dependencies are rejected as not implemented. Windows process code is written but never compiled on Windows |
 | `cpm` (dependencies, lock file) | **Working** for `path` and `git` dependencies: deterministic resolution, integrity-checked lock file, `install`/`update`/`lock`/`verify`/`init`/`layout` ([docs](docs/cpm.md)). `url`/registry providers are interfaces only. Installed packages are consumed through `use "name"` |
 | `cdt` (check/tokens/ast/fmt/doctor) | **Working** ([docs](docs/cdt.md)); the formatter is conservative (re-indents, never changes tokens) |
@@ -68,12 +68,14 @@ Known limits: ML has no instruction or time limit, so a verified program can loo
 
 ### What has been verified
 
+Version 0.6.1 (Linux, GCC, warnings as errors): a program with overloads of top-level, instance, static, inherited, interface and extension methods (variadic, `int?`/`double` ranking, `obj` fallback), the ambiguity and no-match errors, duplicate signatures, generic inference (literals, locals, arrays, `Box<T>`, `T?`, `T...`, nesting, the two error cases), braceless `if`/`else`/`while`/`for`, `for (k in map)`, and `tools/diff-native.sh` on an int/string/boolean program using overloads, inference and braceless bodies (SAME as the PVM) plus the 0.6.0.9 programs t01-t09 (SAME). Not done: Studio was not changed (its JS index ignores overloads), nothing ran on Windows or GitHub, and the old 0.5.x test suite no longer exists.
+
 This repository carries no test suite (see [FORAI.md](FORAI.md)), so each version is checked with small tests for what changed.
-Version 0.6.0 was checked on Linux (GCC, warnings as errors) with: a multi-folder project using namespaces (`use` of two namespaces,
+Version 0.6.0 (and 0.6.0.9 for the native backend) was checked on Linux (GCC, warnings as errors) with: a multi-folder project using namespaces (`use` of two namespaces,
 same-namespace neighbours without `use`, a private method staying private, a missing namespace, an ambiguous name, `import` and a misplaced
 `namespace` rejected with their messages), the parser's error recovery (six errors found in one file, bad interpolated strings),
 `++`/`--`, compound assignment on elements and interpolated strings in one program, the three samples, and a native build of
-`fibonacci`. The 0.5.x suite (314 CTest cases, also run under ASan/UBSan, and fuzzing of 3,000 mutated programs) was run before it was
+`fibonacci`. 0.6.0.9 added a PVM-versus-native comparison of 24 programs (stdout, stderr, exit code; call-depth boundary at 4998/4999 nested calls; a 3M-iteration string loop; sanitizer and valgrind runs). The 0.5.x suite (314 CTest cases, also run under ASan/UBSan, and fuzzing of 3,000 mutated programs) was run before it was
 removed; nothing in 0.6.0 has been re-run against it, and the Studio changes of 0.6.0 were only syntax-checked and
 unit-tested at the language-index level (not run in Electron).
 

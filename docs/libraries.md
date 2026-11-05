@@ -79,7 +79,7 @@ Under the debugger, `readLine` works too: the PVM sends an `inputRequested` even
 
 Hover or complete any member in Coyote Studio to see its documentation (the `#` comment lines above each member in `stdlib/`).
 
-There is no method overloading yet, so names such as `AbsInt` / `MinInt` exist next to `Abs` / `Min`.
+Method overloading exists since 0.6.1, but the Standard libraries have not been cleaned up yet (planned for 0.6.4), so names such as `AbsInt` / `MinInt` exist next to `Abs` / `Min`.
 
 ## Not implemented
 

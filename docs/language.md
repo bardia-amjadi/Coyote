@@ -211,7 +211,7 @@ dynamic operators; its results are `dyn`. Errors name the runtime types involved
 
 `for (var x in array) { }` or `for (T x in array) { }` iterates an array (the array expression
 is evaluated once; the loop reads the live length). `break` and `continue` work. A map must be
-iterated through `.keys()` or `.values()`.
+iterated through `.keys()` or `.values()`; `for (var k in map)` (0.6.1) is shorthand for `for (var k in map.keys())`.
 
 ## Classes and models
 
@@ -240,11 +240,11 @@ c.bump()
   Field initializers run, in declaration order, at the start of the constructor.
 * Inside instance methods bare names resolve to locals first, then fields/methods of the class (`this.x` is always allowed);
   static methods cannot use instance members.
-* A class has at most one constructor (no overloading); without one, a class gets a no-argument constructor and a model gets the all-fields one.
+* A class has at most one constructor (constructors cannot be overloaded); without one, a class gets a no-argument constructor and a model gets the all-fields one.
   `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `private`.
 * `export class` / `export model` make a class visible to the files that `use` its namespace; it can be named as a type there.
 * Compound assignment (`+=` ...) works on variables and on fields (`x.count += 1`, `count += Step`).
-* Inheritance and interfaces: see the next section. Not implemented: overloading, static properties, operators on objects, `==` structural comparison
+* Inheritance and interfaces: see the next section. Not implemented: constructor overloading, static properties, operators on objects, `==` structural comparison
   (`==` on two objects compares identity), object printing (`string(obj)` is an error).
 
 ## Inheritance and interfaces
@@ -314,7 +314,8 @@ method First<T>(array<T> xs): T { return xs[0] }     # a generic top-level metho
 Box<int> b = new Box<int>(41)
 Pair<string, int> p = new Pair<string, int>("a", 1)
 Box<Box<int>> nested = new Box<Box<int>>(new Box<int>(5))
-println("" + First<int>([7, 8]))                     # generic methods need their type arguments: First<int>(...)
+println("" + First<int>([7, 8]))                     # explicit type arguments always work
+println("" + First([7, 8]))                          # since 0.6.1 they are usually inferred from the arguments
 ```
 
 * Generics are expanded at compile time (monomorphization): `Box<int>` and `Box<string>` are two separate classes
@@ -327,6 +328,27 @@ println("" + First<int>([7, 8]))                     # generic methods need thei
   classes (make the class generic instead), generic base classes with type parameters of the derived class used as
   a different shape, and `new T()`.
 * Using a generic class without arguments, the wrong number of arguments, or arguments on a non-generic class is an error.
+
+## Overloading (0.6.1)
+
+Top-level methods, class methods (instance and static), interface methods and extension methods may share a name
+when their parameter lists differ:
+
+```
+method Show(int x) : string { return "int " + x }
+method Show(string s) : string { return "string " + s }
+method Show(int a, int b) : string { ... }
+println(Show(1) + Show("a") + Show(1, 2))
+```
+
+* The best candidate is chosen from the argument types: an exact match beats `null` to a nullable, which beats `int` to `double`,
+  which beats an upcast, which beats boxing to `obj`/`dyn`; a variadic candidate loses to a fixed one. If two candidates are equally good you get
+  `call to 'Show' is ambiguous: ...` (add a conversion such as `double(x)`); if none fits, `no overload of 'Show' accepts (...)` listing the candidates.
+* Two declarations with the same parameter types are a duplicate, whatever the return types.
+* A subclass method overrides the base method with the **same parameter types** (`override`); a different parameter list is a new overload of the subclass.
+* Constructors cannot be overloaded (a class has one constructor). Hand declarations cannot be overloaded.
+* Programs without overloads compile exactly as before; overloaded methods get internal names such as `Show$$int` (visible in ML and stack traces' ML names only).
+* Studio's editor suggestions do not know about overloads yet (it lists a name once).
 
 ## Variadic parameters and extension methods
 
@@ -356,10 +378,21 @@ method total(this array<int> a): int { return sum(a) }
 Source files over 4 MiB (exit code 2), nesting deeper than 256 blocks/parentheses, and expressions
 deeper than 1000 levels are rejected with a diagnostic.
 
+### Type inference for generic methods (0.6.1)
+
+`Id(5)`, `First(names)`, `Unbox(box)`, `Pick("a", "b", true)` need no `<...>`: the compiler matches the parameter types
+(`T`, `array<T>`, `T?`, `map<K,V>`, `Box<T>`, `T...`) against the argument types. Arguments whose type it can work out
+this way are: literals, declared and `var` locals, parameters, `new ...`, array literals, indexing, `.length`, arithmetic and
+comparisons, conversions, fields, calls to methods that are not overloaded, and `keys()`/`values()`. If `T` is bound by two
+different types (`Two(1, "s")`) or by nothing (`Make()` with `T` only in the return type) you get
+`cannot infer type argument T of 'Make' ...; write it explicitly, e.g. Make<T>(...)`: write `Make<int>()`. `int` and `double` together widen to `double`.
+A `null` argument says nothing about `T`. Inference works on top-level generic methods only (generic classes still need `new Box<int>(...)`).
+
 ## Statements
 
 ```
 if (cond) { ... } else if (cond) { ... } else { ... }
+if (cond) a = 1 else a = 2          # a body may be a single statement instead of a block (0.6.1)
 while (cond) { ... }
 for (init; cond; step) { ... }   # each part optional; no cond means true
 break             # leave the innermost loop
@@ -374,7 +407,8 @@ name++            # also name-- ; a statement (and a 'for' step), not an express
 call(args)        # call used as a statement; a returned value is discarded
 ```
 
-Conditions must be `boolean` and need parentheses. Braces are required around bodies.
+Conditions must be `boolean` and need parentheses. Bodies of `if`/`else`/`while`/`for` are a braced block or one statement
+(`while (i < 3) i++`).
 
 In `for (init; cond; step)`, `init` is a declaration (`var i = 0`, `int i = 0`) or an assignment,
 and `step` is an assignment or a call. A variable declared in `init` is visible only in the loop.
@@ -410,8 +444,8 @@ Using any of these gives `'<word>' is not supported yet` (and they cannot be use
 
 `import` was removed in 0.6 (use `namespace` + `use`); `namespace` is a keyword now.
 
-Also not implemented: `else` without braces, negative literals
-in `hand` calls (use an expression), top-level globals (use `static` class fields), method overloading, static properties, closures/lambdas, map literals, iterating strings or maps directly,
+Also not implemented: negative literals
+in `hand` calls (use an expression), top-level globals (use `static` class fields), constructor overloading, static properties, closures/lambdas, map literals, iterating strings directly,
 member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in array/map ones.
 
 ## Design decisions recorded so far

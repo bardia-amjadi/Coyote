@@ -133,6 +133,7 @@ struct Expr {
     Type newType;                // NewArray/NewMap: the type being created; Is/explicit conversions: the target type
     std::vector<Type> typeArgs;  // Call: explicit generic arguments (`Id<int>(5)`); removed by generic expansion
     int depth = 1;               // height of this expression tree (set by the parser; bounded)
+    bool preChecked = false;     // sema already checked this expression (call arguments typed before an overload is chosen)
 
     // Filled in by semantic analysis.
     Type type = Type::Void;
@@ -202,7 +203,8 @@ struct MethodDecl {
     int unit = 0;                // index into Program::modules (the file it was declared in)
     bool exported = false;       // declared with 'export'
     SourceLoc loc;               // the name
-    std::string name;
+    std::string name;            // overloaded methods get a unique name `Name$$<parameter types>` (see Sema::mangleOverloads)
+    std::string srcName;         // the name as written, when `name` was changed because of overloading
     std::vector<Param> params;
     Type ret = Type::Void;
     std::vector<StmtPtr> body;

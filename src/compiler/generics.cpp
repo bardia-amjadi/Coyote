@@ -136,7 +136,9 @@ public:
             if (p_.methods[i].classIndex < 0 && !p_.methods[i].typeParams.empty()) methodTpl_.emplace(p_.methods[i].name, static_cast<int>(i));
 
         unit_ = 0;
+        scopes_.emplace_back();
         for (auto& s : p_.stmts) walkStmt(*s);
+        scopes_.clear();
         size_t nc = 0, nm = 0;
         while (nc < p_.classes.size() || nm < p_.methods.size()) {  // instances created along the way are walked too
             while (nc < p_.classes.size()) walkClass(nc++);
@@ -152,6 +154,10 @@ private:
     std::set<std::string> madeClass_, madeMethod_;
     int unit_ = 0;
     int instances_ = 0;
+    // Type inference for generic calls (0.6.1): a light typer that runs before semantic analysis.
+    std::vector<std::map<std::string, Type>> scopes_;
+    std::map<std::string, Type> instOf_;  // mangled instance name -> the template type as written (name + targs)
+    int curClass_ = -1;
 
     void error(SourceLoc loc, const std::string& msg) {
         const std::string& file = (static_cast<size_t>(unit_) < p_.modules.size()) ? p_.modules[static_cast<size_t>(unit_)].path : std::string();
@@ -183,18 +189,48 @@ private:
         unit_ = p_.methods[i].unit;
         for (size_t k = 0; k < p_.methods[i].params.size(); ++k) walkType(p_.methods[i].params[k].type, p_.methods[i].params[k].loc);
         walkType(p_.methods[i].ret, p_.methods[i].loc);
+        std::vector<std::map<std::string, Type>> saved;
+        saved.swap(scopes_);
+        scopes_.emplace_back();
+        for (const Param& pr : p_.methods[i].params) scopes_.back()[pr.name] = pr.type;
+        curClass_ = p_.methods[i].classIndex;
         for (size_t k = 0; k < p_.methods[i].body.size(); ++k) walkStmt(*p_.methods[i].body[k]);
         for (size_t k = 0; k < p_.methods[i].baseArgs.size(); ++k) walkExpr(*p_.methods[i].baseArgs[k]);
+        curClass_ = -1;
+        scopes_.swap(saved);
+    }
+
+    void declare(const std::string& name, const Type& t) {
+        if (!scopes_.empty()) scopes_.back()[name] = t;
+    }
+
+    void walkBody(std::vector<StmtPtr>& body) {
+        scopes_.emplace_back();
+        for (auto& b : body) walkStmt(*b);
+        scopes_.pop_back();
     }
 
     void walkStmt(Stmt& s) {
         walkType(s.declType, s.loc);
         if (s.expr) walkExpr(*s.expr);
         if (s.target) walkExpr(*s.target);
+        scopes_.emplace_back();  // a loop header's variables live as long as the loop
         if (s.init) walkStmt(*s.init);
         if (s.step) walkStmt(*s.step);
+        if (s.kind == Stmt::Kind::VarDecl) {
+            Type t = s.inferred ? (s.expr ? typeOf(*s.expr) : Type(Type::Invalid)) : s.declType;
+            scopes_.pop_back();
+            declare(s.name, t);
+            return;
+        }
+        if (s.kind == Stmt::Kind::ForEach) {
+            Type c = s.expr ? typeOf(*s.expr) : Type(Type::Invalid);
+            if (c.isMap()) c = Type::arrayOf(*c.key);
+            declare(s.name, s.inferred ? (c.isArray() ? *c.elem : Type(Type::Invalid)) : s.declType);
+        }
         for (auto& b : s.body) walkStmt(*b);
-        for (auto& b : s.elseBody) walkStmt(*b);
+        scopes_.pop_back();
+        walkBody(s.elseBody);
     }
 
     void walkExpr(Expr& e) {
@@ -206,10 +242,181 @@ private:
             error(e.loc, "generic class '" + e.text + "' needs type arguments, e.g. new " + e.text + "<...>(...)");
             e.text = "$invalid";
         }
-        if (e.kind == Expr::Kind::Call && !e.typeArgs.empty()) instantiateMethod(e);
         if (e.lhs) walkExpr(*e.lhs);
         if (e.rhs) walkExpr(*e.rhs);
         for (auto& a : e.args) walkExpr(*a);
+        if (e.kind == Expr::Kind::Call) {
+            if (!e.typeArgs.empty()) instantiateMethod(e);
+            else if (methodTpl_.count(e.text) && !isLocalName(e.text)) inferTypeArgs(e);
+        }
+    }
+
+    bool isLocalName(const std::string&) const { return false; }
+
+    const Type* lookup(const std::string& name) const {
+        for (size_t i = scopes_.size(); i-- > 0;) {
+            auto it = scopes_[i].find(name);
+            if (it != scopes_[i].end()) return &it->second;
+        }
+        return nullptr;
+    }
+
+    const MethodDecl* findMethod(const std::string& name, int cls) const {
+        const MethodDecl* found = nullptr;
+        for (const MethodDecl& m : p_.methods) {
+            if (m.classIndex != cls || m.name != name || !m.typeParams.empty()) continue;
+            if (found) return nullptr;  // overloaded: not known without the full checker
+            found = &m;
+        }
+        return found;
+    }
+
+    // The type of an expression, or Invalid when this light typer cannot tell (inference then asks for explicit arguments).
+    Type typeOf(const Expr& e) const {
+        using K = Expr::Kind;
+        switch (e.kind) {
+            case K::String: return Type::String;
+            case K::Int: return Type::Int;
+            case K::Bool: return Type::Bool;
+            case K::Double: return Type::Double;
+            case K::Char: return Type::Char;
+            case K::Null: return Type::Null;
+            case K::Var: {
+                if (const Type* t = lookup(e.text)) return *t;
+                if (curClass_ >= 0)
+                    for (const FieldDecl& f : p_.classes[static_cast<size_t>(curClass_)].fields)
+                        if (f.name == e.text) return f.type;
+                return Type::Invalid;
+            }
+            case K::NewArray: case K::NewMap: return e.newType;
+            case K::NewObj: return e.newType.kind == Type::Class ? e.newType : Type::classOf(e.text);
+            case K::ArrayLit: {
+                if (e.args.empty()) return Type::Invalid;
+                Type t = typeOf(*e.args[0]);
+                return (t == Type::Invalid || t == Type::Null) ? Type(Type::Invalid) : Type::arrayOf(t);
+            }
+            case K::Index: {
+                Type t = typeOf(*e.lhs);
+                if (t.isArray()) return *t.elem;
+                if (t.isMap()) return *t.elem;
+                if (t == Type::String) return Type::Char;
+                return Type::Invalid;
+            }
+            case K::Convert: case K::Is: case K::IsNull:
+                return e.kind == K::Convert ? e.newType : Type(Type::Bool);
+            case K::Unwrap: {
+                Type t = typeOf(*e.lhs);
+                return t.isNullable() ? *t.elem : Type(Type::Invalid);
+            }
+            case K::Unary: {
+                if (e.text == "!") return Type::Bool;
+                return typeOf(*e.lhs);
+            }
+            case K::Binary: {
+                const std::string& o = e.text;
+                if (o == "==" || o == "!=" || o == "<" || o == ">" || o == "<=" || o == ">=" || o == "&&" || o == "||") return Type::Bool;
+                Type a = typeOf(*e.lhs), b = typeOf(*e.rhs);
+                if (a == Type::Invalid || b == Type::Invalid) return Type::Invalid;
+                if (o == "+" && (a == Type::String || b == Type::String)) return Type::String;
+                if (a == Type::Double || b == Type::Double) return Type::Double;
+                return a;
+            }
+            case K::Member: {
+                if (e.text == "length") return Type::Int;
+                Type r = typeOf(*e.lhs);
+                if (r.kind == Type::Class)
+                    for (const ClassDecl& c : p_.classes)
+                        if (c.name == r.name) {
+                            for (const FieldDecl& f : c.fields) if (f.name == e.text) return f.type;
+                            for (const PropertyDecl& pr : c.properties) if (pr.name == e.text) return pr.type;
+                        }
+                return Type::Invalid;
+            }
+            case K::MethodCall: {
+                Type r = typeOf(*e.lhs);
+                if (r.isMap() && (e.text == "keys" || e.text == "values")) return Type::arrayOf(e.text == "keys" ? *r.key : *r.elem);
+                if (r.kind == Type::Class)
+                    for (size_t i = 0; i < p_.classes.size(); ++i)
+                        if (p_.classes[i].name == r.name) {
+                            const MethodDecl* m = findMethod(e.text, static_cast<int>(i));
+                            return m ? m->ret : Type(Type::Invalid);
+                        }
+                return Type::Invalid;
+            }
+            case K::Call: {
+                if (const MethodDecl* m = findMethod(e.text, -1)) return m->ret;
+                const HandDecl* h = nullptr;
+                for (const HandDecl& d : p_.hands) if (d.name == e.text) { if (h) return Type::Invalid; h = &d; }
+                return h ? h->ret : Type(Type::Invalid);
+            }
+        }
+        return Type::Invalid;
+    }
+
+    // Matches a parameter type (which may mention type parameters) against an argument type.
+    // Returns false on a conflict; "ok" stays true when the argument is simply unknown.
+    bool unify(const Type& param, const Type& arg, const std::vector<std::string>& tps, std::map<std::string, Type>& bound, std::string& conflict) const {
+        if (arg == Type::Invalid || arg == Type::Null) return true;
+        if (param.kind == Type::Class && param.targs.empty()) {
+            for (const std::string& tp : tps) {
+                if (tp != param.name) continue;
+                auto it = bound.find(tp);
+                if (it == bound.end()) { bound.emplace(tp, arg); return true; }
+                if (it->second == arg) return true;
+                if (it->second == Type::Int && arg == Type::Double) { it->second = Type::Double; return true; }
+                if (it->second == Type::Double && arg == Type::Int) return true;
+                conflict = tp + " would be both " + typeName(it->second) + " and " + typeName(arg);
+                return false;
+            }
+            return true;
+        }
+        if (param.kind == Type::Array && arg.kind == Type::Array) return unify(*param.elem, *arg.elem, tps, bound, conflict);
+        if (param.kind == Type::Nullable) return unify(*param.elem, arg.kind == Type::Nullable ? *arg.elem : arg, tps, bound, conflict);
+        if (param.kind == Type::Map && arg.kind == Type::Map)
+            return unify(*param.key, *arg.key, tps, bound, conflict) && unify(*param.elem, *arg.elem, tps, bound, conflict);
+        if (param.kind == Type::Class && !param.targs.empty() && arg.kind == Type::Class) {
+            auto it = instOf_.find(arg.name);
+            if (it == instOf_.end() || it->second.name != param.name || it->second.targs.size() != param.targs.size()) return true;
+            for (size_t i = 0; i < param.targs.size(); ++i)
+                if (!unify(param.targs[i], it->second.targs[i], tps, bound, conflict)) return false;
+        }
+        return true;
+    }
+
+    // Id(5) for `method Id<T>(T x)`: works out the type arguments from the arguments, then instantiates as if written Id<int>(5).
+    void inferTypeArgs(Expr& e) {
+        const MethodDecl& tpl = p_.methods[static_cast<size_t>(methodTpl_[e.text])];
+        const std::vector<std::string> tps = tpl.typeParams;
+        const std::vector<Param> params = tpl.params;
+        std::map<std::string, Type> bound;
+        std::string conflict;
+        bool ok = true;
+        for (size_t i = 0; i < e.args.size() && ok; ++i) {
+            const Type at = typeOf(*e.args[i]);
+            if (i < params.size() && !(params.size() == i + 1 && params[i].variadic)) {
+                ok = unify(params[i].type, at, tps, bound, conflict);
+            } else if (!params.empty() && params.back().variadic) {
+                const Param& v = params.back();
+                if (e.args.size() == params.size() && at.isArray()) ok = unify(v.type, at, tps, bound, conflict);
+                else ok = unify(*v.type.elem, at, tps, bound, conflict);
+            }
+        }
+        if (!ok) {
+            error(e.loc, "cannot infer the type arguments of '" + e.text + "': " + conflict + "; write them explicitly, e.g. " + e.text + "<int>(...)");
+            e.text = "$invalid";
+            return;
+        }
+        std::string list;
+        for (const std::string& tp : tps) {
+            auto it = bound.find(tp);
+            if (it == bound.end()) {
+                error(e.loc, "cannot infer type argument " + tp + " of '" + e.text + "' from the arguments; write it explicitly, e.g. " + e.text + "<" + tp + ">(...)");
+                e.text = "$invalid";
+                return;
+            }
+            e.typeArgs.push_back(it->second);
+        }
+        instantiateMethod(e);
     }
 
     void walkType(Type& t, SourceLoc loc) {
@@ -257,6 +464,7 @@ private:
         for (const Type& a : t.targs)
             if (a == Type::Invalid || a == Type::Void) { t = Type::Invalid; return; }
         const std::string mangled = mangle(t);
+        instOf_.emplace(mangled, t);
         if (!madeClass_.count(mangled)) {
             if (++instances_ > kMaxInstances) {
                 error(loc, "too many generic instantiations (is a generic class instantiating itself with a growing type?)");

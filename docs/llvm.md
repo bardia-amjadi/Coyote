@@ -50,17 +50,26 @@ generates one).
 
 ## Known differences from the PVM
 
-* No garbage collector: concatenation and `string(int)` allocate and never free. Long-running string
-  loops will grow memory.
-* No call-depth limit: runaway recursion crashes the process (stack overflow) instead of printing
-  `call stack overflow`.
-* Host permissions are fixed at build time (console only); there is no `--allow`.
+Since 0.6.0.9 the native subset behaves like the PVM for everything it accepts: same output, same runtime errors (text, line and exit code 1), same limits.
+
+* **Call depth.** Native code counts frames like the PVM (the entry function is frame 1). A call that would make more than 5000 nested
+  calls is the runtime error `call stack overflow (more than 5000 nested calls; infinite recursion?)` at the call's line, instead of a crash.
+  (Before 0.6.0.9 native code had no limit: 5100 nested calls succeeded and runaway recursion crashed with a segmentation fault.)
+  On Windows the program is linked with a 16 MiB stack so that 5000 frames fit; that flag is **unverified on Windows**.
+* **Strings are reference counted** (before 0.6.0.9 they were never freed). Each string on the operand stack or in a local owns one reference;
+  constants are immortal; a string is freed when its last reference goes. A loop that builds 3 million strings peaks at the same memory as
+  the PVM (about 13.5 MB). Checked with AddressSanitizer + LeakSanitizer (GCC) and valgrind: no leaks, no double frees.
+* Host permissions are fixed at build time (console only); there is no `--allow`. Programs that use other host functions are bundled (they run on the PVM).
 * Only verified on Linux with clang 18. Windows quoting of the clang command is untested.
+
+Rule for every version: before delivering, run `tools/diff-native.sh <build-dir> <programs...>` on programs of the native subset that touch what
+changed. It runs each program on the PVM and natively and compares stdout, stderr and the exit code. Programs outside the subset are reported as
+`NOT NATIVE`: they run as bundles, which is the PVM itself, so they prove nothing about native code.
 
 ## How it is tested
 
 In git history (before the tests were removed), `tests/cases/native/*.coy` were compiled to ML and run both by the PVM and natively; stdout, stderr and the
 exit code must be identical, and stdout must equal a hand-written expected file (`native.*` in CTest, only
 registered when `clang` is found). Unsupported programs are checked for their exact error text.
-The tests are small (5 cases); there has been no fuzzing of this backend. `bundle.*` cases build bundled executables
+The tests were small (5 cases); there has been no fuzzing of this backend. `bundle.*` cases build bundled executables
 (inheritance, generics, dead-code removal) and compare their output with the expected files.

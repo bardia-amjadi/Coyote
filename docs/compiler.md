@@ -41,3 +41,8 @@ function is actually called.
 Errors are printed as `file:line:col: error: message`, sorted by file and position, followed by `N error(s)` when
 there are several. One mistake normally produces one error: expressions that already failed are typed `<error>` and
 produce no follow-up diagnostics.
+
+## Overloading and generic inference (0.6.1)
+
+* `Sema::mangleOverloads` runs first: methods that share a name get internal names `Name$$<param types>` (`srcName` keeps the written name for messages). Call sites type their arguments (`preCheckArgs`, `Expr::preChecked`), rank candidates with `convCost` (mirrors `coerce`) and choose with `pickOverload`. Hierarchies keep the same mangled name for an override.
+* `generics.cpp` infers type arguments before sema with a small typer (`typeOf`) over a scope stack; anything it cannot type is "unknown" and simply does not bind `T`. Failures produce one error and the call becomes `$invalid`.

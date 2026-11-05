@@ -54,6 +54,13 @@ Run a program: `build/coyote run hello.coy`. Studio: `cd studio && npm install &
 * **Libraries:** `.lib` = source bundle; **compiled/linked libraries do not exist** (not started; generics must stay source). This was requested ("make libs from source code to real libs") and is still open.
 * **Studio:** renderer scripts in order `core, themes, langindex, terminal, editor-lang, editor, views, projectview, run, settingsview, renderer`; global `App`; `window.__studio` is a test hook; IPC through `handle()` in `studio/src/main.js` and the `studio.*` bridge in `preload.js`. Theme = CSS variables on `<body>` + Monaco theme `coyote-live` (`renderer/themes.js`). The app window is `renderer/appwindow.html` (mirrors the Terminal panel; setting `appWindow`: debug|always|never).
 
+## The motto: do not trust the PVM, worry about LLVM
+
+The user considers native code more important than the VM. **In every version, native code must behave exactly like the PVM**, and if it does not, the next
+version is a hotfix `X.Y.Z.9` (0.6.0.9 was one) that fixes it before any new feature. Run `tools/diff-native.sh <build-dir> <programs>` (see `docs/llvm.md`).
+Remember that programs outside the native subset are bundled (PVM inside), so "works with LLVM" must not be claimed for them: say which programs ran natively.
+`VERSION` may have a 4th part (hotfix); `tools/version.js` writes the first three into the package.json files and the installer uses `MAJOR.MINOR.PATCH.<run>`.
+
 ## Namespaces (0.6.0) - how they work, so you do not rediscover it
 
 * The parser records `Program::ns` (`namespace A.B` must be the first declaration). `Module::ns` carries it into sema.
@@ -66,11 +73,17 @@ Run a program: `build/coyote run hello.coy`. Studio: `cd studio && npm install &
 
 ## Status and what is left
 
+Done in 0.6.0.9 (hotfix, native backend): same 5000-call depth limit as the PVM, reference-counted strings (no more leaks), Windows link stack flag (unverified), `tools/diff-native.sh`.
+
 Done in 0.6.0: namespaces + `use` for local namespaces (replaces `import`), Studio namespace suggestions, parser error recovery, `++`/`--`, compound assignment on array elements, `$"..{x}.."` interpolated strings, docs cleanup (language.md header/model example/method parameter types/reserved words, README ML versions and verification section), clearer `coyote-llvm` fallback note, the CI workflow file replaced by the user's version (Inno Setup located instead of installed with choco).
 
-The user's 0.6 selection was staged like this (agreed): **0.6.0** (done, above, except the items below) -> **0.6.1** overloading + generic inference + remaining polish (top-level globals, `else` without braces, map literals, iterating strings/maps) -> **0.6.2** lambdas/closures + try/catch -> **0.6.3** `Standard.Windows` (new low-level `hand` modules first, only what is needed, then the library on top: MessageBox, file dialogs, clipboard, registry/processes, windows/notifications; written to compile and be unit-checked on Linux, **cannot be run without Windows**) -> **0.7** compiled libraries, native backend coverage, Studio/VS Code features (go-to-definition for inherited members, rename, find references, language server).
+The user's 0.6 selection was staged like this (agreed): **0.6.0** (done, above, except the items below) -> **0.6.0.9** (done) -> **0.6.1** overloading + generic inference + remaining polish (top-level globals, `else` without braces, map literals, iterating strings/maps) -> **0.6.2** lambdas/closures + try/catch -> **0.6.3** `Standard.Windows` (new low-level `hand` modules first, only what is needed, then the library on top: MessageBox, file dialogs, clipboard, registry/processes, windows/notifications; written to compile and be unit-checked on Linux, **cannot be run without Windows**) -> **0.6.4** remove every duplicate class/method in the Standard libraries, `ref`/`copy` value semantics (`var st = (ref)s`, `var st = (copy)s`; plain `var st = s` keeps today's behavior), better testing -> then the user decides whether to go to **0.7** (compiled libraries, native backend coverage, Studio/VS Code features (go-to-definition for inherited members, rename, find references, language server)).
 
-Why overloading/inference are not in 0.6.0: method tables are keyed by name in sema (module tables, `ClassInfo::methods`, dispatchers `(class,name)`, override checks), and generics are expanded *before* sema so call-site argument types are unknown there. Plan: mangle overloaded declarations (`name$sig`), keep an overload set per name, pick by argument types in `checkCall`/method-call resolution, and keep mangling consistent across a class hierarchy (an override must keep the same mangled name). For inference, either infer in sema and expand lazily, or restrict the pre-sema pass to literal/`new`/declared-variable arguments.
+While doing each stage, check that the native backend still matches the PVM (and extend its subset when the new feature is something native should cover).
+
+Done in 0.6.1: overloading (`mangleOverloads` + `pickOverload` in sema.cpp, names `Name$$<sig>`), generic inference (light typer in generics.cpp, `inferTypeArgs`), braceless bodies (`bodyOrStatement`), `for (k in map)` (sema wraps `.keys()`). Deferred (still open): top-level globals, map literals, iterating strings, Studio index awareness of overloads.
+
+Why overloading/inference were not in 0.6.0: method tables are keyed by name in sema (module tables, `ClassInfo::methods`, dispatchers `(class,name)`, override checks), and generics are expanded *before* sema so call-site argument types are unknown there. Plan: mangle overloaded declarations (`name$sig`), keep an overload set per name, pick by argument types in `checkCall`/method-call resolution, and keep mangling consistent across a class hierarchy (an override must keep the same mangled name). For inference, either infer in sema and expand lazily, or restrict the pre-sema pass to literal/`new`/declared-variable arguments.
 
 ## How to work in this repo efficiently
 

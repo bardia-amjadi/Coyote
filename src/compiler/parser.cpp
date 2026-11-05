@@ -243,7 +243,7 @@ private:
 
     void endStatement() {
         if (isPunct(";")) { take(); return; }  // optional terminator
-        if (peek().kind == Tok::Eof || peek().nlBefore || isPunct("}")) return;
+        if (peek().kind == Tok::Eof || peek().nlBefore || isPunct("}") || isWord("else")) return;
         fail(peek(), "expected end of statement (newline or ';'), found " + describe(peek()));
     }
 
@@ -661,6 +661,14 @@ private:
         return s;
     }
 
+    // A body is either a braced block or a single statement (0.6.1): "if (x) y = 1 else y = 2".
+    std::vector<StmtPtr> bodyOrStatement(const std::string& context) {
+        if (isPunct("{")) return block(context);
+        std::vector<StmtPtr> one;
+        one.push_back(statement());
+        return one;
+    }
+
     StmtPtr statement() {
         const Token& t = peek();
         if (isPunct("{")) {
@@ -797,14 +805,14 @@ private:
     StmtPtr ifStatement() {
         Depth guard(*this, peek());
         auto s = condition(make(Stmt::Kind::If, peek().loc), "if");
-        s->body = block("to start the 'if' body");
+        s->body = bodyOrStatement("to start the 'if' body");
         if (isWord("else")) {
             take();
             s->hasElse = true;
             if (isWord("if")) {
                 s->elseBody.push_back(ifStatement());
             } else {
-                s->elseBody = block("to start the 'else' body");
+                s->elseBody = bodyOrStatement("to start the 'else' body");
             }
         }
         return s;
@@ -812,7 +820,7 @@ private:
 
     StmtPtr whileStatement() {
         auto s = condition(make(Stmt::Kind::While, peek().loc), "while");
-        s->body = block("to start the 'while' body");
+        s->body = bodyOrStatement("to start the 'while' body");
         return s;
     }
 
@@ -833,7 +841,7 @@ private:
             take();  // 'in'
             s->expr = expression();
             expectPunct(")", "after the 'for' collection");
-            s->body = block("to start the 'for' body");
+            s->body = bodyOrStatement("to start the 'for' body");
             return s;
         }
         if (!isPunct(";")) {
@@ -847,7 +855,7 @@ private:
         expectPunct(";", "after the 'for' condition");
         if (!isPunct(")")) s->step = exprStatement(false);
         expectPunct(")", "after the 'for' header");
-        s->body = block("to start the 'for' body");
+        s->body = bodyOrStatement("to start the 'for' body");
         return s;
     }
 

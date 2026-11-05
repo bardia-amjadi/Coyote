@@ -59,6 +59,7 @@ public:
         tables_.assign(nmod, {});
         classTables_.assign(nmod, {});
 
+        mangleOverloads();
         registerClasses();
         importClasses();
         resolveSupers();
@@ -113,6 +114,21 @@ public:
             }
         }
 
+        // Overload sets: the methods a file can call by one written name (its own and the exports of what it uses).
+        topOvl_.assign(nmod, {});
+        for (size_t mi = 0; mi < nmod; ++mi) {
+            const Module& mod = prog_.modules[mi];
+            for (size_t i = 0; i < prog_.methods.size(); ++i) {
+                const MethodDecl& m = prog_.methods[i];
+                if (m.srcName.empty() || m.classIndex >= 0) continue;
+                bool visible = m.unit == static_cast<int>(mi);
+                if (!visible && m.exported)
+                    for (size_t k = 0; k < mod.imports.size() && k < mod.importIndex.size(); ++k)
+                        if (mod.importIndex[k] == m.unit) { visible = true; break; }
+                if (visible) topOvl_[mi][m.srcName].push_back(static_cast<int>(i));
+            }
+        }
+
         for (MethodDecl& m : prog_.methods) {
             curModule_ = m.unit;
             if (m.isDispatcher || m.isAbstract) continue;  // no body to check
@@ -146,6 +162,7 @@ private:
     std::vector<Diagnostic>& out_;
     size_t firstDiag_ = 0;
     std::vector<std::map<std::string, Target>> tables_;  // per module: name -> callable
+    std::vector<std::map<std::string, std::vector<int>>> topOvl_;  // per module: written name -> overloaded top-level methods it can call
     std::vector<std::map<std::string, int>> classTables_;  // per module: class name -> index into Program::classes
     std::vector<ClassInfo> cinfo_;
     std::map<std::string, int> uniqueClass_;             // ML class name -> index
@@ -504,7 +521,7 @@ private:
     }
 
     static std::string sigOf(const MethodDecl& m) {
-        std::string s = m.name + "(";
+        std::string s = shown(m.name) + "(";
         for (size_t i = m.isStatic ? 0 : 1; i < m.params.size(); ++i) {
             if (i > (m.isStatic ? 0u : 1u)) s += ", ";
             s += typeName(m.params[i].type);
@@ -516,6 +533,200 @@ private:
         if (a.isStatic != b.isStatic || a.params.size() != b.params.size() || !(a.ret == b.ret)) return false;
         for (size_t i = a.isStatic ? 0 : 1; i < a.params.size(); ++i)
             if (!(a.params[i].type == b.params[i].type)) return false;
+        return true;
+    }
+
+    // ---- overloading ----
+    //
+    // Methods that share a name but differ in their parameters get unique internal names `Name$$<types>` before anything else
+    // looks at them, so every table below keeps working with one name per method. Call sites that use the written name pick
+    // the best candidate from the argument types (pickOverload) and switch to the internal name. Programs without
+    // overloads are not touched.
+    static std::string shown(const std::string& n) {
+        const size_t p = n.find("$$");
+        return p == std::string::npos ? n : n.substr(0, p);
+    }
+    static std::string declSig(const MethodDecl& m) {
+        std::string s;
+        for (size_t i = 0; i < m.params.size(); ++i) s += (i ? "+" : "") + mlTypeName(m.params[i].type) + (m.params[i].variadic ? "..." : "");
+        return s;
+    }
+    static std::string writtenName(const MethodDecl& m) { return m.srcName.empty() ? m.name : m.srcName; }
+
+    void mangleOverloads() {
+        const size_t n = prog_.classes.size();
+        std::vector<int> parent(n);
+        for (size_t i = 0; i < n; ++i) parent[i] = static_cast<int>(i);
+        std::function<int(int)> find = [&](int x) { while (parent[static_cast<size_t>(x)] != x) { parent[static_cast<size_t>(x)] = parent[static_cast<size_t>(parent[static_cast<size_t>(x)])]; x = parent[static_cast<size_t>(x)]; } return x; };
+        std::map<std::string, std::vector<int>> byName;
+        for (size_t i = 0; i < n; ++i) byName[prog_.classes[i].name].push_back(static_cast<int>(i));
+        for (size_t i = 0; i < n; ++i)
+            for (const std::string& sn : prog_.classes[i].superNames) {
+                auto it = byName.find(sn);
+                if (it == byName.end()) continue;
+                for (int j : it->second) parent[static_cast<size_t>(find(static_cast<int>(i)))] = find(j);
+            }
+        // Methods of one name in a connected class hierarchy: if their signatures differ anywhere, all of them are renamed by
+        // signature, so overrides and interface implementations (same signature) keep matching by name.
+        std::map<std::pair<int, std::string>, std::set<std::string>> sigs;
+        std::map<std::pair<int, std::string>, std::vector<size_t>> members;
+        std::map<std::string, std::set<std::string>> topSigs;
+        std::map<std::string, std::vector<size_t>> topMembers;
+        for (size_t mi = 0; mi < prog_.methods.size(); ++mi) {
+            const MethodDecl& m = prog_.methods[mi];
+            if (m.isCtor || m.isInit || m.isDispatcher || m.isStaticInit || !m.typeParams.empty()) continue;
+            if (m.classIndex >= 0) {
+                auto key = std::make_pair(find(m.classIndex), m.name);
+                sigs[key].insert(declSig(m));
+                members[key].push_back(mi);
+            } else {
+                topSigs[m.name].insert(declSig(m));
+                topMembers[m.name].push_back(mi);
+            }
+        }
+        auto rename = [&](size_t mi) {
+            MethodDecl& m = prog_.methods[mi];
+            m.srcName = m.name;
+            m.name = m.name + "$$" + declSig(m);
+        };
+        for (const auto& kv : sigs)
+            if (kv.second.size() > 1) for (size_t mi : members[kv.first]) rename(mi);
+        for (const auto& kv : topSigs)
+            if (kv.second.size() > 1) for (size_t mi : topMembers[kv.first]) rename(mi);
+    }
+
+    // Cost of passing a value of type `from` where `to` is expected, or -1 when that is not an implicit conversion
+    // (mirrors coerce()). Lower is better.
+    int convCost(const Type& from, const Type& to) const {
+        if (from == Type::Invalid || to == Type::Invalid || from == to) return 0;
+        if (from == Type::Void) return -1;
+        if (from == Type::Null) return (to.isNullable() || to.isRefLike()) ? 1 : -1;
+        if (to == Type::Dyn || to == Type::Obj) return from.isRefLike() ? 1 : 4;
+        if (from == Type::Dyn) return 5;
+        if (from == Type::Obj) return -1;
+        if (to == Type::Double && from == Type::Int) return 2;
+        if (from.kind == Type::Class && to.kind == Type::Class) {
+            const int fi = classOfType(from), ti = classOfType(to);
+            return fi >= 0 && ti >= 0 && cinfo_[static_cast<size_t>(fi)].isa.count(ti) ? 3 : -1;
+        }
+        if (to.isNullable() && !from.isNullable()) {
+            const int c = convCost(from, *to.elem);
+            return c < 0 ? -1 : c + 1;
+        }
+        return -1;
+    }
+
+    // The methods of class `ci` (own and inherited) that are overloads of the written name `name`.
+    std::vector<int> classOverloads(int ci, const std::string& name) const {
+        std::vector<int> out;
+        if (ci < 0) return out;
+        for (const auto& kv : cinfo_[static_cast<size_t>(ci)].methods)
+            if (prog_.methods[static_cast<size_t>(kv.second)].srcName == name) out.push_back(kv.second);
+        return out;
+    }
+
+    void preCheckArgs(Expr& e) {
+        for (auto& a : e.args) {
+            checkValue(a, "an argument");
+            a->preChecked = true;
+        }
+    }
+
+    static std::string argTypesText(const std::vector<Type>& ts) {
+        std::string s = "(";
+        for (size_t i = 0; i < ts.size(); ++i) s += (i ? ", " : "") + typeName(ts[i]);
+        return s + ")";
+    }
+
+    std::string candidateText(int mi) const {
+        const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
+        std::string s = writtenName(m) + "(";
+        const size_t skip = (m.classIndex >= 0 && !m.isStatic) ? 1 : 0;
+        for (size_t i = skip; i < m.params.size(); ++i) s += (i > skip ? ", " : "") + typeName(m.params[i].type) + (m.params[i].variadic ? "..." : "");
+        return s + ")";
+    }
+
+    // Chooses the overload that `argTypes` fit best. Returns its method index, or -1: with `quiet` nothing fits (no error);
+    // otherwise an error was reported (nothing fits, or two candidates fit equally well).
+    int pickOverload(Expr& e, const std::vector<int>& cands, const std::vector<Type>& argTypes, bool quiet) {
+        for (const Type& t : argTypes) if (t == Type::Invalid) return -1;  // already reported
+        struct Fit { int mi; std::vector<int> costs; int extra; int sum; };
+        std::vector<Fit> fits;
+        for (int mi : cands) {
+            const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
+            const size_t skip = (m.classIndex >= 0 && !m.isStatic) ? 1 : 0;
+            std::vector<Param> ps(m.params.begin() + static_cast<long>(skip), m.params.end());
+            const bool variadic = !ps.empty() && ps.back().variadic;
+            const size_t fixed = variadic ? ps.size() - 1 : ps.size();
+            Fit f{mi, {}, 0, 0};
+            bool ok = argTypes.size() >= fixed && (variadic || argTypes.size() == ps.size());
+            for (size_t i = 0; ok && i < fixed; ++i) {
+                const int c = convCost(argTypes[i], ps[i].type);
+                if (c < 0) ok = false; else f.costs.push_back(c);
+            }
+            if (ok && variadic) {
+                const Type& arr = ps.back().type;
+                if (argTypes.size() == fixed + 1 && convCost(argTypes[fixed], arr) >= 0) {
+                    f.costs.push_back(convCost(argTypes[fixed], arr));
+                } else if (arr.isArray()) {
+                    f.extra = 10;
+                    for (size_t i = fixed; ok && i < argTypes.size(); ++i) {
+                        const int c = convCost(argTypes[i], *arr.elem);
+                        if (c < 0) ok = false; else f.costs.push_back(c);
+                    }
+                } else {
+                    ok = false;
+                }
+            }
+            if (!ok) continue;
+            for (int c : f.costs) f.sum += c;
+            f.sum += f.extra;
+            fits.push_back(std::move(f));
+        }
+        const std::string name = writtenName(prog_.methods[static_cast<size_t>(cands[0])]);
+        if (fits.empty()) {
+            if (quiet) return -1;
+            std::string msg = "no overload of '" + name + "' accepts " + argTypesText(argTypes) + "; candidates:";
+            for (int mi : cands) msg += " " + candidateText(mi) + ";";
+            error(e.loc, msg);
+            e.type = Type::Invalid;
+            return -1;
+        }
+        auto dominates = [](const Fit& a, const Fit& b) {  // a is at least as good everywhere and better somewhere
+            if (a.costs.size() == b.costs.size()) {
+                bool better = a.extra < b.extra;
+                for (size_t i = 0; i < a.costs.size(); ++i) {
+                    if (a.costs[i] > b.costs[i]) return false;
+                    if (a.costs[i] < b.costs[i]) better = true;
+                }
+                return a.extra <= b.extra && better;
+            }
+            return a.sum < b.sum;
+        };
+        std::vector<const Fit*> best;
+        for (const Fit& f : fits) {
+            bool beaten = false;
+            for (const Fit& g : fits) if (&g != &f && dominates(g, f)) { beaten = true; break; }
+            if (!beaten) best.push_back(&f);
+        }
+        if (best.size() == 1) return best[0]->mi;
+        if (quiet) return -1;
+        std::string msg = "call to '" + name + "' " + argTypesText(argTypes) + " is ambiguous between";
+        for (const Fit* f : best) msg += " " + candidateText(f->mi) + ";";
+        error(e.loc, msg + " add a conversion such as double(x) to choose one");
+        e.type = Type::Invalid;
+        return -1;
+    }
+
+    // Overloads of a method name seen from class `ci` for a call whose arguments are already checked.
+    bool resolveClassOverload(Expr& e, int ci) {
+        const std::vector<int> ov = classOverloads(ci, e.text);
+        if (ov.empty()) return true;
+        std::vector<Type> ts;
+        for (const auto& a : e.args) ts.push_back(a->type);
+        const int mi = pickOverload(e, ov, ts, false);
+        if (mi < 0) { e.type = Type::Invalid; return false; }
+        e.text = prog_.methods[static_cast<size_t>(mi)].name;
         return true;
     }
 
@@ -541,7 +752,7 @@ private:
                         matched.insert(name);
                     } else {
                         if (!sameSig(O, M))
-                            error(c.loc, "'" + c.name + "' inherits method '" + name + "' with different signatures from '" + className(O.classIndex) + "' and '" + className(M.classIndex) + "'");
+                            error(c.loc, "'" + c.name + "' inherits method '" + shown(name) + "' with different signatures from '" + className(O.classIndex) + "' and '" + className(M.classIndex) + "'");
                         else if (O.isAbstract && !M.isAbstract) own->second = mi;
                     }
                 }
@@ -549,7 +760,7 @@ private:
             for (const auto& [name, mi] : info.methods) {
                 const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
                 if (m.classIndex == ci && m.isOverride && !matched.count(name))
-                    error(m.loc, "method '" + name + "' is marked 'override' but '" + c.name + "' inherits no method of that name");
+                    error(m.loc, "method '" + shown(name) + "' is marked 'override' but '" + c.name + "' inherits no method of that name");
                 if (!c.isInterface && m.isAbstract)
                     error(c.loc, "class '" + c.name + "' must implement '" + sigOf(m) + "' required by '" + className(m.classIndex) + "'");
             }
@@ -629,7 +840,7 @@ private:
                 if (m.isDispatcher) continue;
                 if (m.isStaticInit) { info.staticInit = static_cast<int>(mi); continue; }
                 if (!info.methods.emplace(m.name, static_cast<int>(mi)).second)
-                    error(m.loc, "duplicate method '" + m.name + "' in class '" + c.name + "' (overloading is not supported)");
+                    error(m.loc, "duplicate method '" + shown(m.name) + "' in class '" + c.name + "' (same parameter types)");
                 checkDuplicateParams(m.params, m.name);
                 if (info.inst.count(m.name) || info.stat.count(m.name))
                     error(m.loc, "'" + m.name + "' is both a field and a method of class '" + c.name + "'");
@@ -833,7 +1044,16 @@ private:
                     if (coll.isArray()) {
                         elem = *coll.elem;
                     } else if (coll.isMap()) {
-                        error(s.expr->loc, "a map cannot be iterated directly; use '.keys()' or '.values()'");
+                        // 0.6.1: "for (k in map)" walks the keys, exactly like "for (k in map.keys())".
+                        auto call = std::make_unique<Expr>();
+                        call->kind = Expr::Kind::MethodCall;
+                        call->loc = s.expr->loc;
+                        call->text = "keys";
+                        s.expr->preChecked = true;
+                        call->lhs = std::move(s.expr);
+                        s.expr = std::move(call);
+                        coll = checkValue(s.expr, "a collection");
+                        if (coll.isArray()) elem = *coll.elem;
                     } else {
                         error(s.expr->loc, "cannot iterate over a value of type " + typeName(coll) + "; 'for ... in' needs an array");
                     }
@@ -971,6 +1191,7 @@ private:
     }
 
     void check(Expr& e) {
+        if (e.preChecked) return;
         switch (e.kind) {
             case Expr::Kind::String: e.type = Type::String; return;
             case Expr::Kind::Int: e.type = Type::Int; return;
@@ -1245,7 +1466,7 @@ private:
     void finishClassCall(Expr& e, int mi, bool instanceCall, bool nonVirtual = false, int recvClass = -1) {
         const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
         const int ci = m.classIndex;
-        if (!canAccess(m.isPrivate, ci, m.isProtected)) error(e.loc, "method '" + e.text + "' is " + (m.isPrivate ? "private" : "protected") + " to class '" + className(ci) + "'");
+        if (!canAccess(m.isPrivate, ci, m.isProtected)) error(e.loc, "method '" + shown(e.text) + "' is " + (m.isPrivate ? "private" : "protected") + " to class '" + className(ci) + "'");
         if (m.isAbstract && nonVirtual) error(e.loc, "cannot call abstract method '" + e.text + "' of '" + className(ci) + "' with base");
         int target = mi;
         if (instanceCall && !nonVirtual && recvClass >= 0) {
@@ -1261,7 +1482,7 @@ private:
         const size_t want = m.params.size() - skip;
         packVariadic(e, m.params, skip);
         if (e.args.size() != want) {
-            error(e.loc, "method '" + e.text + "' expects " + std::to_string(want) + " argument(s) but got " + std::to_string(e.args.size()));
+            error(e.loc, "method '" + shown(e.text) + "' expects " + std::to_string(want) + " argument(s) but got " + std::to_string(e.args.size()));
             return;
         }
         for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, m.params[i + skip].type);
@@ -1301,7 +1522,7 @@ private:
 
     bool expectArgCount(Expr& e, size_t want) {
         if (e.args.size() == want) return true;
-        error(e.loc, "method '" + e.text + "' expects " + std::to_string(want) + " argument(s) but got " +
+        error(e.loc, "method '" + shown(e.text) + "' expects " + std::to_string(want) + " argument(s) but got " +
                          std::to_string(e.args.size()));
         return false;
     }
@@ -1326,7 +1547,7 @@ private:
             lit->depth = std::max(lit->depth, a->depth + 1);
             if (a->type == Type::Invalid) { bad = true; continue; }
             if (!coerce(a, *arr.elem)) {
-                error(a->loc, "argument " + std::to_string(i + 1) + " of '" + e.text + "' expects " + typeName(*arr.elem) +
+                error(a->loc, "argument " + std::to_string(i + 1) + " of '" + shown(e.text) + "' expects " + typeName(*arr.elem) +
                                   " (or an " + typeName(arr) + ") but got " + typeName(a->type) + conversionHint(a->type, *arr.elem));
                 bad = true;
             }
@@ -1340,6 +1561,17 @@ private:
     // `recv.name(args)` where no built-in or class method matches: use an extension method
     // `method name(this T self, ...)` visible from this file, if one accepts the receiver.
     bool tryExtension(Expr& e) {
+        auto ovl = topOvl_[static_cast<size_t>(curModule_)].find(e.text);
+        if (ovl != topOvl_[static_cast<size_t>(curModule_)].end()) {  // overloaded extension methods: the receiver is the first argument
+            std::vector<int> exts;
+            for (int mi : ovl->second) if (prog_.methods[static_cast<size_t>(mi)].isExtension) exts.push_back(mi);
+            if (exts.empty()) return false;
+            std::vector<Type> ts{e.lhs->type};
+            for (const auto& a : e.args) ts.push_back(a->type);
+            const int mi = pickOverload(e, exts, ts, true);
+            if (mi < 0) return false;
+            e.text = prog_.methods[static_cast<size_t>(mi)].name;
+        }
         auto it = table().find(e.text);
         if (it == table().end() || !it->second.isMethod) return false;
         const MethodDecl& m = prog_.methods[static_cast<size_t>(it->second.index)];
@@ -1357,7 +1589,7 @@ private:
         e.type = m.ret;
         packVariadic(e, m.params, 0);
         if (e.args.size() != m.params.size()) {
-            error(e.loc, "function '" + e.text + "' expects " + std::to_string(m.params.size()) + " argument(s) but got " + std::to_string(e.args.size()));
+            error(e.loc, "function '" + shown(e.text) + "' expects " + std::to_string(m.params.size()) + " argument(s) but got " + std::to_string(e.args.size()));
             return;
         }
         for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, m.params[i].type);
@@ -1366,7 +1598,7 @@ private:
     void checkArg(Expr& e, size_t i, const Type& want) {
         ExprPtr& a = e.args[i];
         if (a->type != Type::Invalid && !coerce(a, want))
-            error(a->loc, "argument " + std::to_string(i + 1) + " of '" + e.text + "' expects " + typeName(want) +
+            error(a->loc, "argument " + std::to_string(i + 1) + " of '" + shown(e.text) + "' expects " + typeName(want) +
                               " but got " + typeName(a->type) + conversionHint(a->type, want));
     }
 
@@ -1382,6 +1614,7 @@ private:
                 return;
             }
             const int bi = cd->supers[0];
+            if (!resolveClassOverload(e, bi)) return;
             const ClassInfo& binfo = cinfo_[static_cast<size_t>(bi)];
             int mi = -1;
             if (e.text == "$init") {
@@ -1400,6 +1633,7 @@ private:
         }
         if (isClassRef(*e.lhs, ci)) {  // static call: Class.method(...)
             for (auto& a : e.args) checkValue(a, "an argument");
+            if (!resolveClassOverload(e, ci)) return;
             const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
             auto it = info.methods.find(e.text);
             if (it == info.methods.end()) {
@@ -1417,6 +1651,7 @@ private:
         for (auto& a : e.args) checkValue(a, "an argument");
         if (recv.kind == Type::Class) {
             ci = classOfType(recv);
+            if (!resolveClassOverload(e, ci)) return;
             const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
             auto it = info.methods.find(e.text);
             if (it == info.methods.end()) {
@@ -1540,11 +1775,34 @@ private:
         const Module& mod = prog_.modules[static_cast<size_t>(curModule_)];
         for (int t : mod.importIndex)
             for (const MethodDecl& m : prog_.methods)
-                if (t >= 0 && m.unit == t && !m.exported && m.name == name) return prog_.modules[static_cast<size_t>(t)].path;
+                if (t >= 0 && m.unit == t && !m.exported && writtenName(m) == name) return prog_.modules[static_cast<size_t>(t)].path;
         return "";
     }
 
     void checkCall(Expr& e) {
+        if (e.text == "$invalid") { e.type = Type::Invalid; return; }  // generic inference already reported it
+        if (ctx_->cls >= 0) {  // inside a class, a bare call may name an overloaded method of it
+            const std::vector<int> ov = classOverloads(ctx_->cls, e.text);
+            if (!ov.empty()) {
+                preCheckArgs(e);
+                std::vector<Type> ts;
+                for (const auto& a : e.args) ts.push_back(a->type);
+                const int mi = pickOverload(e, ov, ts, false);
+                if (mi < 0) { e.type = Type::Invalid; return; }
+                e.text = prog_.methods[static_cast<size_t>(mi)].name;
+            }
+        }
+        {   // an overloaded top-level method (a class's own method of that name, resolved above, wins)
+            auto top = topOvl_[static_cast<size_t>(curModule_)].find(e.text);
+            if (top != topOvl_[static_cast<size_t>(curModule_)].end() && !(ctx_->cls >= 0 && cinfo_[static_cast<size_t>(ctx_->cls)].methods.count(e.text))) {
+                preCheckArgs(e);
+                std::vector<Type> ts;
+                for (const auto& a : e.args) ts.push_back(a->type);
+                const int mi = pickOverload(e, top->second, ts, false);
+                if (mi < 0) { e.type = Type::Invalid; return; }
+                e.text = prog_.methods[static_cast<size_t>(mi)].name;
+            }
+        }
         if (ctx_->cls >= 0) {  // inside a class, a bare call may name one of its methods
             const ClassInfo& info = cinfo_[static_cast<size_t>(ctx_->cls)];
             auto m = info.methods.find(e.text);
