@@ -20,6 +20,13 @@ void substType(Type& t, const Subst* s) {
             t.elem = std::make_shared<const Type>(inner);
             return;
         }
+        case Type::Fn: {
+            for (Type& a : t.targs) substType(a, s);
+            Type r = *t.elem;
+            substType(r, s);
+            t.elem = std::make_shared<const Type>(r);
+            return;
+        }
         case Type::Map: {
             Type k = *t.key, v = *t.elem;
             substType(k, s);
@@ -46,6 +53,8 @@ Type substituted(Type t, const Subst* s) {
     return t;
 }
 
+StmtPtr cloneStmt(const Stmt& st, const Subst* s);
+
 ExprPtr cloneExpr(const Expr& e, const Subst* s) {
     auto n = std::make_unique<Expr>();
     n->kind = e.kind;
@@ -60,6 +69,15 @@ ExprPtr cloneExpr(const Expr& e, const Subst* s) {
     n->newType = substituted(e.newType, s);
     for (const Type& t : e.typeArgs) n->typeArgs.push_back(substituted(t, s));
     n->depth = e.depth;
+    for (const Param& p : e.lparams) {
+        Param c = p;
+        if (c.type != Type::Invalid) substType(c.type, s);
+        n->lparams.push_back(std::move(c));
+    }
+    for (const auto& b : e.lbody) n->lbody.push_back(cloneStmt(*b, s));
+    n->exprBody = e.exprBody;
+    n->hasLret = e.hasLret;
+    n->lret = substituted(e.lret, s);
     return n;
 }
 
@@ -111,6 +129,11 @@ MethodDecl cloneMethod(const MethodDecl& m, const Subst* s) {
 std::string mangle(const Type& t) {
     switch (t.kind) {
         case Type::Array: return "array_" + mangle(*t.elem) + "_";
+        case Type::Fn: {
+            std::string s = "fn_";
+            for (const Type& a : t.targs) s += mangle(a) + "_";
+            return s + "to_" + mangle(*t.elem) + "_";
+        }
         case Type::Nullable: return mangle(*t.elem) + "_opt";
         case Type::Map: return "map_" + mangle(*t.key) + "_" + mangle(*t.elem) + "_";
         case Type::Class: {
@@ -245,6 +268,14 @@ private:
         if (e.lhs) walkExpr(*e.lhs);
         if (e.rhs) walkExpr(*e.rhs);
         for (auto& a : e.args) walkExpr(*a);
+        if (e.kind == Expr::Kind::Lambda) {
+            for (Param& p : e.lparams) if (p.type != Type::Invalid) walkType(p.type, p.loc);
+            if (e.hasLret) walkType(e.lret, e.loc);
+            scopes_.emplace_back();
+            for (const Param& p : e.lparams) declare(p.name, p.type);
+            for (auto& b : e.lbody) walkStmt(*b);
+            scopes_.pop_back();
+        }
         if (e.kind == Expr::Kind::Call) {
             if (!e.typeArgs.empty()) instantiateMethod(e);
             else if (methodTpl_.count(e.text) && !isLocalName(e.text)) inferTypeArgs(e);
@@ -343,6 +374,7 @@ private:
                         }
                 return Type::Invalid;
             }
+            case K::Lambda: case K::CallFn: return Type::Invalid;
             case K::Call: {
                 if (const MethodDecl* m = findMethod(e.text, -1)) return m->ret;
                 const HandDecl* h = nullptr;
@@ -369,6 +401,11 @@ private:
                 return false;
             }
             return true;
+        }
+        if (param.kind == Type::Fn && arg.kind == Type::Fn && param.targs.size() == arg.targs.size()) {
+            for (size_t i = 0; i < param.targs.size(); ++i)
+                if (!unify(param.targs[i], arg.targs[i], tps, bound, conflict)) return false;
+            return unify(*param.elem, *arg.elem, tps, bound, conflict);
         }
         if (param.kind == Type::Array && arg.kind == Type::Array) return unify(*param.elem, *arg.elem, tps, bound, conflict);
         if (param.kind == Type::Nullable) return unify(*param.elem, arg.kind == Type::Nullable ? *arg.elem : arg, tps, bound, conflict);
@@ -425,6 +462,13 @@ private:
                 Type inner = *t.elem;
                 walkType(inner, loc);
                 t.elem = std::make_shared<const Type>(inner);
+                return;
+            }
+            case Type::Fn: {
+                for (Type& a : t.targs) walkType(a, loc);
+                Type r = *t.elem;
+                walkType(r, loc);
+                t.elem = std::make_shared<const Type>(r);
                 return;
             }
             case Type::Map: {

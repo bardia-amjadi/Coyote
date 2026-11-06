@@ -4,9 +4,9 @@
 // (completion with automatic `use`, hover, signature help, go to definition, outline, quick fixes, formatting).
 (function () {
   const L = CoyoteLang;
-  const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return'];
-  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'namespace', 'export', 'use', 'var', 'new', 'in', 'is', 'as', 'this', 'base', 'get', 'set'];
-  const MOD = ['public', 'private', 'protected', 'static', 'override'];
+  const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return', 'try', 'catch', 'throw'];
+  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'namespace', 'field', 'use', 'var', 'new', 'in', 'of', 'is', 'as', 'here', 'base', 'get', 'set'];
+  const MOD = ['public', 'hidden', 'protected', 'shared', 'override', 'locked', 'readonly'];
   const KW_SET = new Set(L.KEYWORDS.filter((k) => k !== 'get' && k !== 'set'));
   const TYPE_SET = new Set(L.TYPES);
 
@@ -187,7 +187,7 @@
 
         const enc = L.localsAt(ctx, pos.lineNumber);
         // class Name<T> : <base class, interfaces>
-        if ((m = /^\s*(?:(?:public|private|export)\s+)*(class|interface)\s+\w+\s*(?:<[^>]*>)?\s*:\s*(?:[^{]*,\s*)?(\w*)$/.exec(prefix))) {
+        if ((m = /^\s*(?:(?:public|shared)\s+)*(class|interface)\s+\w+\s*(?:<[^>]*>)?\s*:\s*(?:[^{]*,\s*)?(\w*)$/.exec(prefix))) {
           const r = new monaco.Range(pos.lineNumber, pos.column - m[2].length, pos.lineNumber, pos.column);
           const self = (/class|interface\s+(\w+)/.exec(prefix) || [])[1];
           const used = new Set((prefix.split(':')[1] || '').split(',').map((x) => x.trim().replace(/<.*$/, '')));
@@ -264,7 +264,7 @@
             items.push({
               label: mem.name, kind: kindOf(mem), insertText: isM ? methodSnippet(mem.name, mem.params) : mem.name,
               insertTextRules: isM ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
-              range, detail: L.signatureOf(mem).replace(/^static /, ''), documentation: md(mem, from ? `Needs \`use "${from}"\` (added automatically).` : ''),
+              range, detail: L.signatureOf(mem).replace(/^shared /, ''), documentation: md(mem, from ? `Needs \`use "${from}"\` (added automatically).` : ''),
               additionalTextEdits: extraEdits || undefined, sortText: (mem.kind === 'method' ? '1' : '0') + mem.name,
             });
           }

@@ -6,27 +6,31 @@
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.CoyoteLang = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
-  const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'var', 'new', 'method', 'hand', 'class', 'model',
-    'property', 'constructor', 'public', 'private', 'protected', 'static', 'override', 'interface', 'base', 'as', 'this', 'namespace', 'export', 'use', 'get', 'set'];
+  const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'try', 'catch', 'throw', 'var', 'new', 'method', 'hand', 'class', 'model',
+    'property', 'constructor', 'field', 'locked', 'readonly', 'public', 'hidden', 'protected', 'shared', 'override', 'interface', 'base', 'as', 'here', 'of', 'namespace', 'use', 'get', 'set'];
   const TYPES = ['int', 'double', 'boolean', 'string', 'char', 'Guid', 'obj', 'dyn', 'array', 'map', 'void'];
   const LITERALS = ['true', 'false', 'null'];
-  const MODIFIERS = new Set(['public', 'private', 'protected', 'static', 'override', 'export']);
+  const MODIFIERS = new Set(['public', 'hidden', 'protected', 'shared', 'override', 'locked', 'readonly']);
 
   const KEYWORD_DOCS = {
     method: 'Declares a method: `method name(int a, string b): int { ... }`. The return type is optional (no value).',
     hand: 'Declares a host function: `hand:module name(type param): returnType`. Usually you get these from the Standard libraries.',
     use: 'Brings in a namespace of this project, an installed package or a library: `use "MyApp.Models"`, `use "Standard.IO"`, or a library file `use "./My.lib"`.',
     namespace: 'Puts every declaration of the file into a namespace; it must be the first line: `namespace MyApp.Models`. Other files see its exports with `use "MyApp.Models"` (files of the same namespace see each other without it).',
-    export: 'Makes a class, model or method visible to files that `use` its namespace (or library).',
+    public: 'Makes a class, model, interface or method visible to files that `use` its namespace (or library). On a member it means visible everywhere (the default).',
+    hidden: 'Member visible only inside its own class.',
+    field: 'A field: `field int Count = 0` or typeless `field Name = "hi"`. Combine with `shared`, `locked`, `readonly`.',
+    locked: 'A constant field (`public shared locked field int Max = 10`): set by its initializer only.',
+    readonly: 'A field that can be assigned only by its initializer or in the constructor of its class.',
     class: 'Declares a class with fields, properties, a constructor and methods.',
     model: 'Declares a class whose constructor takes every field in order.',
     var: 'Declares a variable whose type is taken from its initializer.',
     new: 'Creates an object (`new Counter(1)`), an array (`new array<int>(3)`) or a map (`new map<string,int>()`).',
-    static: 'Member that belongs to the class itself, not to an instance.',
+    shared: 'Member that belongs to the class itself, not to an instance. `shared class` makes every member shared.',
     property: 'A property: `property int Count` (auto) or `property int Doubled { get { return 2 * count } }`.',
     constructor: 'The initializer of a class: `constructor(int a) { ... }`.',
-    this: 'The current object inside an instance method.',
-    in: 'Used by `for (var x in items)`.',
+    here: 'The current object inside an instance method.',
+    in: 'Loops over items: `in (var x of items) { ... }`.',
     is: 'Type test: `if (v is string)` on an `obj`/`dyn` value, or `a is Dog` on a class value (true for Dog and its subclasses).',
     interface: 'Declares an interface: signatures only. `interface Shape { method Area(): double }`. A class implements it with `class Circle : Shape`.',
     protected: 'Member visible in its own class and in subclasses (not outside).',
@@ -125,7 +129,7 @@
 
   function parseParams(src) {
     return splitTop(src, ',').map((p) => {
-      let s = p.replace(/^this\s+/, '');
+      let s = p.replace(/^here\s+/, '');
       const i = s.search(/\s+[A-Za-z_]\w*$/);
       if (i < 0) return { type: s, name: '' };
       return { type: s.slice(0, i).trim(), name: s.slice(i).trim() };
@@ -139,12 +143,12 @@
   function paramsText(params) { return params.map((p) => (p.name ? p.type + ' ' + p.name : p.type)).join(', '); }
   function signatureOf(sym) {
     switch (sym.kind) {
-      case 'method': return `${sym.static ? 'static ' : ''}method ${sym.name}(${paramsText(sym.params)})${sym.ret ? ': ' + sym.ret : ''}`;
+      case 'method': return `${sym.static ? 'shared ' : ''}method ${sym.name}(${paramsText(sym.params)})${sym.ret ? ': ' + sym.ret : ''}`;
       case 'ctor': return `constructor(${paramsText(sym.params)})`;
       case 'property': return `property ${sym.type} ${sym.name}`;
-      case 'field': return `${sym.private ? 'private ' : ''}${sym.static ? 'static ' : ''}${sym.type} ${sym.name}`;
-      case 'class': return `${sym.exported ? 'export ' : ''}class ${sym.name}`;
-      case 'model': return `${sym.exported ? 'export ' : ''}model ${sym.name}`;
+      case 'field': return `${sym.private ? 'hidden ' : ''}${sym.static ? 'shared ' : ''}${sym.locked ? 'locked ' : sym.readonly ? 'readonly ' : ''}field ${sym.type} ${sym.name}`;
+      case 'class': return `${sym.exported ? 'public ' : ''}class ${sym.name}`;
+      case 'model': return `${sym.exported ? 'public ' : ''}model ${sym.name}`;
       case 'hand': return `hand:${sym.module} ${sym.name}(${paramsText(sym.params)})${sym.ret ? ': ' + sym.ret : ''}`;
       case 'var': return `${sym.type} ${sym.name}`;
       default: return sym.name;
@@ -171,7 +175,7 @@
       let line = trimmed;
       let consumed = 0;
       // join lines of a declaration whose parameter list is not closed yet
-      if (/^(?:(?:public|private|protected|static|override|export)\s+)*(?:method|constructor)\b/.test(line)) {
+      if (/^(?:(?:public|hidden|protected|shared|override|locked|readonly)\s+)*(?:method|constructor)\b/.test(line)) {
         while ((line.match(/\(/g) || []).length > (line.match(/\)/g) || []).length && i + consumed + 1 < raw.length) {
           consumed++;
           line += ' ' + scanned[i + consumed].code.trim();
@@ -195,7 +199,7 @@
             if (w && MODIFIERS.has(w[1])) { mods.add(w[1]); rest = rest.slice(w[0].length); } else break;
           }
           if ((mm = /^(class|model|interface)\s+([A-Za-z_]\w*)\s*(?:<([^>]*)>)?\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
-            cls = { kind: mm[1], name: mm[2], exported: mods.has('export'), line: i + 1, endLine: raw.length, doc: docText(doc), members: [],
+            cls = { kind: mm[1], name: mm[2], shared: mods.has('shared'), exported: mods.has('public'), line: i + 1, endLine: raw.length, doc: docText(doc), members: [],
               typeParams: mm[3] ? splitTop(mm[3], ',').map((x) => x.trim()).filter(Boolean) : [], supers: mm[4] ? splitTop(mm[4], ',').map((x) => x.trim()).filter(Boolean) : [] };
             res.classes.push(cls);
             if (mm[1] === 'model') {
@@ -203,7 +207,7 @@
               if (body) addModelFields(cls, body[1].replace(/\}.*$/, ''), i + 1);
             }
           } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
-            const sym = { kind: 'method', name: mm[1], params: parseParams(mm[2]), ret: (mm[3] || '').trim(), exported: mods.has('export'), line: i + 1, endLine: raw.length, doc: docText(doc), extension: /\(\s*this\s/.test(rest) };
+            const sym = { kind: 'method', name: mm[1], params: parseParams(mm[2]), ret: (mm[3] || '').trim(), exported: mods.has('public'), line: i + 1, endLine: raw.length, doc: docText(doc), extension: /\(\s*here\s/.test(rest) };
             res.methods.push(sym);
             method = sym;
           }
@@ -215,7 +219,7 @@
           const w = /^(\w+)\s+/.exec(rest);
           if (w && MODIFIERS.has(w[1])) { mods.add(w[1]); rest = rest.slice(w[0].length); } else break;
         }
-        const base = { line: i + 1, doc: docText(doc), static: mods.has('static'), private: mods.has('private'), protected: mods.has('protected'), override: mods.has('override'), container: cls.name };
+        const base = { line: i + 1, doc: docText(doc), static: mods.has('shared') || !!cls.shared, private: mods.has('hidden'), locked: mods.has('locked'), readonly: mods.has('readonly'), protected: mods.has('protected'), override: mods.has('override'), container: cls.name };
         if (cls.kind === 'model' && !/^(method|constructor|property)\b/.test(rest)) {
           addModelFields(cls, rest, i + 1);
         } else if ((mm = /^method\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?::\s*([^{]+?))?\s*(?:\{.*)?$/.exec(rest))) {
@@ -228,8 +232,12 @@
           method = sym;
         } else if ((mm = new RegExp(`^property\\s+(${TYPE_RE})\\s+([A-Za-z_]\\w*)`).exec(rest))) {
           cls.members.push({ ...base, kind: 'property', name: mm[2], type: mm[1] });
-        } else if ((mm = new RegExp(`^(${TYPE_RE})\\s+([A-Za-z_]\\w*)\\s*(?:=|$|;)`).exec(rest))) {
+        } else if ((mm = new RegExp(`^field\\s+(${TYPE_RE})\\s+([A-Za-z_]\\w*)\\s*(?:=|$|;)`).exec(rest))) {
           cls.members.push({ ...base, kind: 'field', name: mm[2], type: mm[1] });
+        } else if ((mm = /^field\s+([A-Za-z_]\w*)\s*=\s*(.*)$/.exec(rest))) {
+          const v = mm[2].trim();
+          const t = /^-?\d+$/.test(v) ? 'int' : /^-?\d*\.\d+/.test(v) ? 'double' : /^"/.test(v) ? 'string' : /^'/.test(v) ? 'char' : /^(true|false)\b/.test(v) ? 'boolean' : 'obj';
+          cls.members.push({ ...base, kind: 'field', name: mm[1], type: t });
         }
       }
       // local variables and parameters (anywhere in the file; scoped later by line ranges)
@@ -254,10 +262,10 @@
   }
 
   function addModelFields(cls, text, line) {
-    const re = new RegExp(`(?:^|[\\s;])(${TYPE_RE})\\s+([A-Za-z_]\\w*)(?=\\s|;|$)`, 'g');
+    const re = new RegExp(`(?:^|[\\s;])(?:field\\s+)?(${TYPE_RE})\\s+([A-Za-z_]\\w*)(?=\\s|;|$)`, 'g');
     let m;
     while ((m = re.exec(text))) {
-      if (/^(public|private|static|method|property|constructor)$/.test(m[1])) continue;
+      if (/^(public|hidden|shared|locked|readonly|field|method|property|constructor)$/.test(m[1])) continue;
       cls.members.push({ kind: 'field', name: m[2], type: m[1], line, doc: '', static: false, private: false, container: cls.name });
     }
   }
@@ -265,16 +273,16 @@
   function collectLocals(line, lineNo, method, out, depth) {
     let m;
     // parameters of the method/constructor on this line
-    if ((m = /^(?:(?:public|private|protected|static|override|export)\s+)*(?:method\s+\w+(?:\s*<[^>]*>)?|constructor)\s*\(([^)]*)\)/.exec(line))) {
+    if ((m = /^(?:(?:public|hidden|protected|shared|override|locked|readonly)\s+)*(?:method\s+\w+(?:\s*<[^>]*>)?|constructor)\s*\(([^)]*)\)/.exec(line))) {
       for (const p of parseParams(m[1])) if (p.name) out.push({ kind: 'var', name: p.name, type: p.type.replace(/\.\.\.$/, '[]'), line: lineNo, param: true, scope: method });
     }
-    // for (T x in ...)
-    const forRe = new RegExp(`\\bfor\\s*\\(\\s*(var|${TYPE_RE})\\s+([A-Za-z_]\\w*)\\s+in\\b`);
+    // in (T x of ...)
+    const forRe = new RegExp(`\\bin\\s*\\(\\s*(var|${TYPE_RE})\\s+([A-Za-z_]\\w*)\\s+of\\b`);
     if ((m = forRe.exec(line))) out.push({ kind: 'var', name: m[2], type: m[1], line: lineNo, scope: method });
     // T x = ...  /  var x = ...  (also inside for(...) initializers)
     const declRe = new RegExp(`(?:^|[;{(]\\s*|\\)\\s*\\{\\s*)(var|${TYPE_RE})\\s+([A-Za-z_]\\w*)\\s*=(?!=)`, 'g');
     while ((m = declRe.exec(line))) {
-      if (/^(return|else|new|in|is)$/.test(m[1])) continue;
+      if (/^(return|else|new|in|is|of)$/.test(m[1])) continue;
       out.push({ kind: 'var', name: m[2], type: m[1], line: lineNo, scope: method, init: line.slice(m.index + m[0].length) });
     }
   }
@@ -426,7 +434,7 @@
       const name = m[1];
       let cur2 = null;
       if (i === 0) {
-        if (name === 'this') cur2 = scope.cls ? { type: scope.cls.name } : null;
+        if (name === 'here') cur2 = scope.cls ? { type: scope.cls.name } : null;
         else if (name === 'base' && !m[2]) { const bs = scope.cls && supersOf(ctx, scope.cls).find((x) => x.cls.kind !== 'interface'); cur2 = bs ? { type: bs.type } : null; }
         else if (m[2] && ctx.methods.has(name)) { const r = ctx.methods.get(name).ret; cur2 = r ? { type: r } : null; } else if (scope.vars.has(name)) cur2 = { type: normalizeVarType(ctx, scope.vars.get(name), line) };
         else if (scope.cls && allMembers(ctx, scope.cls).find((x) => x.name === name && x.kind !== 'ctor')) { const mem = allMembers(ctx, scope.cls).find((x) => x.name === name && x.kind !== 'ctor'); cur2 = memberValue(mem); } else if (ctx.classes.has(name)) cur2 = { staticClass: name };

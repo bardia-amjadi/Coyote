@@ -177,7 +177,7 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
             if (!closed) fail(start, "unterminated string literal");
             t.kind = Tok::String;
         } else if (i + 1 < s.size() &&
-                   ((c == '=' && s[i + 1] == '=') || (c == '!' && s[i + 1] == '=') ||
+                   ((c == '=' && (s[i + 1] == '=' || s[i + 1] == '>')) || (c == '!' && s[i + 1] == '=') ||
                     (c == '<' && s[i + 1] == '=') || (c == '>' && s[i + 1] == '=') ||
                     (c == '&' && s[i + 1] == '&') || (c == '+' && s[i + 1] == '+') || (c == '-' && s[i + 1] == '-') || (c == '?' && s[i + 1] == '?') || (c == '|' && s[i + 1] == '|') ||
                     ((c == '+' || c == '-' || c == '*' || c == '/' || c == '%') && s[i + 1] == '='))) {

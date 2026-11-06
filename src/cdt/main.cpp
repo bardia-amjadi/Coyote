@@ -121,6 +121,8 @@ std::string expr(const Expr& e) {
         case Expr::Kind::Index: return "(index " + expr(*e.lhs) + " " + expr(*e.rhs) + ")";
         case Expr::Kind::Member: return "(member " + expr(*e.lhs) + " " + e.text + ")";
         case Expr::Kind::NewObj: return "(new-object " + e.text + exprs(e.args) + ")";
+        case Expr::Kind::Lambda: return std::string("(lambda ") + std::to_string(e.lparams.size()) + " param(s))";
+        case Expr::Kind::CallFn: return "(call-fn " + e.text + exprs(e.args) + ")";
         case Expr::Kind::MethodCall: return "(method-call " + expr(*e.lhs) + " " + e.text + exprs(e.args) + ")";
     }
     return "?";
@@ -161,6 +163,13 @@ void stmt(std::ostream& os, const Stmt& s, int ind) {
         case Stmt::Kind::Break: os << "break\n"; return;
         case Stmt::Kind::Continue: os << "continue\n"; return;
         case Stmt::Kind::Return: os << "return" << (s.expr ? " " + expr(*s.expr) : "") << "\n"; return;
+        case Stmt::Kind::Try:
+            os << "try\n";
+            stmts(os, s.body, ind + 1);
+            os << pad << "catch " << s.name << "\n";
+            stmts(os, s.elseBody, ind + 1);
+            return;
+        case Stmt::Kind::Throw: os << "throw " << expr(*s.expr) << "\n"; return;
         case Stmt::Kind::Block: os << "block\n"; stmts(os, s.body, ind + 1); return;
     }
 }

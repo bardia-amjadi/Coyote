@@ -151,7 +151,8 @@ void resolve(Ctx& c, Function& f, size_t nslots) {
                 break;
             }
             case Op::Jump:
-            case Op::JumpFalse: {
+            case Op::JumpFalse:
+            case Op::Try: {
                 auto it = f.labels.find(in.str);
                 if (it == f.labels.end())
                     fail(c.file, in.mlLine, "jump to undefined label '" + in.str + "' in function '" + f.name + "'");
@@ -502,6 +503,14 @@ void verifyFunction(Ctx& c, Function& f) {
                 popExpect({Type::Bool}, "operand", nm);
                 flow(k, static_cast<size_t>(in.target), st);
                 break;  // falls through to k + 1 as well
+            case Op::Try:
+                if (sz(st) != 0) fail(file, in.mlLine, "'try' needs an empty operand stack but the stack holds " + stackStr(st));
+                flow(k, static_cast<size_t>(in.target), push(st, Type::String));  // the handler starts with the error message
+                break;
+            case Op::EndTry: break;
+            case Op::Throw:
+                popExpect({Type::String}, "operand", nm);
+                continue;  // no fall-through
             case Op::HostCall: {
                 const HostDecl& h = c.m.hosts[static_cast<size_t>(in.host)];
                 popExpect(h.sig.params, "argument", in.str);

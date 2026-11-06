@@ -78,5 +78,7 @@ void grantDefaultPermissions(HostRegistry& registry);
 void grantAllPermissions(HostRegistry& registry);
 // Registers the file/dir/env/sys/http modules (host_sys.cpp).
 void registerSystemHosts(HostRegistry& registry);
+// Registers the win.* module (host_win.cpp): permission "windows"; real on Windows, a runtime error elsewhere.
+void registerWindowsHosts(HostRegistry& registry);
 
 } // namespace pvm

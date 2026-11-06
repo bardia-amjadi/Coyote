@@ -11,7 +11,7 @@ namespace {
 // than being silently misparsed.
 const std::set<std::string>& unsupportedWords() {
     static const std::set<std::string> w = {
-        "hidden", "created", "here", "operator", "module"};
+        "created", "operator", "module"};
     return w;
 }
 
@@ -19,7 +19,8 @@ const std::set<std::string>& keywords() {
     static const std::set<std::string> w = {"hand", "method", "var", "int", "string", "boolean",
                                             "if", "else", "while", "for", "break", "continue", "return", "true", "false", "array", "new",
                                             "double", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use", "namespace",
-                                            "class", "model", "interface", "property", "constructor", "public", "private", "protected", "override", "static", "this"};
+                                            "class", "model", "interface", "property", "field", "constructor", "public", "private", "protected", "override", "static", "this", "try", "catch", "throw",
+                                            "hidden", "shared", "here", "locked", "readonly"};
     return w;
 }
 
@@ -132,18 +133,33 @@ private:
                 endStatement();
                 p.imports.push_back(std::move(imp));
             } else if (isWord("export")) {
-                take();
-                if (isWord("class") || isWord("model") || isWord("interface")) {
-                    p.classes.push_back(classDecl());
-                    p.classes.back().exported = true;
-                } else if (isWord("method")) {
-                    p.methods.push_back(methodDecl());
-                    p.methods.back().exported = true;
-                } else {
-                    fail(peek(), "'export' must be followed by 'method', 'class', 'interface' or 'model', found " + describe(peek()));
+                failIfRenamed(peek());
+            } else if (isWord("public") || isWord("shared") || isWord("hidden") || isWord("class") || isWord("model") || isWord("interface") || isWord("method")) {
+                bool isPublic = false, isShared = false, sawVis = false;
+                const Token first = peek();
+                while (isWord("public") || isWord("shared") || isWord("hidden")) {
+                    if (isWord("shared")) {
+                        if (isShared) fail(peek(), "duplicate 'shared'");
+                        isShared = true;
+                    } else {
+                        if (sawVis) fail(peek(), "a declaration can have only one of 'public' and 'hidden'");
+                        sawVis = true;
+                        isPublic = peek().text == "public";
+                    }
+                    take();
                 }
-            } else if (isWord("class") || isWord("model") || isWord("interface")) {
-                p.classes.push_back(classDecl());
+                failIfRenamed(peek());
+                if (isWord("class") || isWord("model") || isWord("interface")) {
+                    if (isShared && !isWord("class")) fail(peek(), "only a class can be 'shared'");
+                    p.classes.push_back(classDecl(isShared));
+                    p.classes.back().exported = isPublic;
+                } else if (isWord("method")) {
+                    if (isShared) fail(first, "'shared' applies to classes and members; a top-level method is already shared");
+                    p.methods.push_back(methodDecl());
+                    p.methods.back().exported = isPublic;
+                } else {
+                    fail(peek(), "'" + first.text + "' must be followed by 'method', 'class', 'model' or 'interface', found " + describe(peek()));
+                }
             } else if (isWord("hand")) {
                 p.hands.push_back(handDecl());
                 endStatement();
@@ -172,6 +188,7 @@ private:
     };
 
     const Token& peek() const { return toks_[pos_]; }
+    const Token& peekAt(size_t k) const { return toks_[std::min(pos_ + k, toks_.size() - 1)]; }
     const Token& peekNext() const { return toks_[std::min(pos_ + 1, toks_.size() - 1)]; }
     const Token& take() {
         const Token& t = toks_[pos_];
@@ -181,6 +198,20 @@ private:
     static bool tokIsPunct(const Token& t, const char* c) { return t.kind == Tok::Punct && t.text == c; }
     bool isPunct(const char* c) const { return tokIsPunct(peek(), c); }
     bool isWord(const char* w) const { return peek().kind == Tok::Ident && peek().text == w; }
+
+    // Words renamed in 0.6.3: the old spelling is still reserved, but only produces this message.
+    static const char* renamedTo(const std::string& w) {
+        if (w == "private") return "hidden";
+        if (w == "static") return "shared";
+        if (w == "this") return "here";
+        if (w == "export") return "public";
+        return nullptr;
+    }
+    void failIfRenamed(const Token& t) const {
+        if (t.kind != Tok::Ident) return;
+        if (const char* to = renamedTo(t.text))
+            fail(t, "'" + t.text + "' was renamed to '" + to + "' in Coyote 0.6.3");
+    }
 
     [[noreturn]] void fail(const Token& at, const std::string& msg) const {
         throw CompileError{Diagnostic{file_, at.loc, msg}};
@@ -232,6 +263,93 @@ private:
                w == "char" || w == "Guid" || w == "obj" || w == "dyn" || w == "map";
     }
 
+    // True at `fn(...) : T name =`, a declaration of a function-typed variable (a call of a method named fn is not).
+    bool fnDeclarationAhead() {
+        if (!(peek().kind == Tok::Ident && peek().text == "fn" && tokIsPunct(peekNext(), "("))) return false;
+        const size_t save = pos_;
+        const int saveDepth = depth_;
+        bool r = false;
+        try {
+            typeName();
+            r = peek().kind == Tok::Ident && !keywords().count(peek().text);
+        } catch (const CompileError&) {
+            r = false;
+        }
+        pos_ = save;
+        depth_ = saveDepth;
+        return r;
+    }
+
+    // At '(': is this `(params) => ...` or `(params) : type => ...`?
+    bool lambdaAhead() {
+        const size_t save = pos_;
+        const int saveDepth = depth_;
+        bool r = false;
+        try {
+            take();
+            int d = 1;
+            while (d > 0 && peek().kind != Tok::Eof) {
+                if (isPunct("(")) ++d;
+                else if (isPunct(")")) --d;
+                take();
+            }
+            if (isPunct("=>")) {
+                r = true;
+            } else if (isPunct(":")) {
+                take();
+                typeName();
+                r = isPunct("=>");
+            }
+        } catch (const CompileError&) {
+            r = false;
+        }
+        pos_ = save;
+        depth_ = saveDepth;
+        return r;
+    }
+
+    ExprPtr lambdaExpr() {
+        Depth guard(*this, peek());
+        auto e = std::make_unique<Expr>();
+        e->kind = Expr::Kind::Lambda;
+        e->loc = peek().loc;
+        take();  // '('
+        if (!isPunct(")")) {
+            for (;;) {
+                Param prm;
+                prm.loc = peek().loc;
+                if (peek().kind == Tok::Ident && !keywords().count(peek().text) && (tokIsPunct(peekNext(), ",") || tokIsPunct(peekNext(), ")"))) {
+                    prm.type = Type::Invalid;  // the type comes from where the lambda is used
+                    prm.name = take().text;
+                } else {
+                    prm.type = typeName();
+                    prm.loc = peek().loc;
+                    prm.name = expectName("a parameter name");
+                }
+                e->lparams.push_back(std::move(prm));
+                if (isPunct(",")) { take(); continue; }
+                break;
+            }
+        }
+        expectPunct(")", "to close the lambda parameters");
+        if (isPunct(":")) {
+            take();
+            e->hasLret = true;
+            e->lret = typeName();
+        }
+        expectPunct("=>", "after the lambda parameters");
+        if (isPunct("{")) {
+            e->lbody = block("to start the lambda body");
+        } else {
+            auto r = make(Stmt::Kind::Return, peek().loc);
+            r->expr = expression();
+            e->lbody.push_back(std::move(r));
+            e->exprBody = true;
+        }
+        measure(*e);
+        return e;
+    }
+
     // A user-chosen name: an identifier that is neither a keyword nor a reserved word.
     std::string expectName(const std::string& what) {
         const Token& t = peek();
@@ -275,6 +393,22 @@ private:
         if (t.text == "Guid") { take(); return Type::Guid; }
         if (t.text == "obj") { take(); return Type::Obj; }
         if (t.text == "dyn") { take(); return Type::Dyn; }
+        if (t.text == "fn" && tokIsPunct(peekNext(), "(")) {  // fn(int, string) : boolean   (no ': type' means void)
+            take();
+            take();
+            std::vector<Type> params;
+            if (!isPunct(")")) {
+                for (;;) {
+                    params.push_back(typeName());
+                    if (isPunct(",")) { take(); continue; }
+                    break;
+                }
+            }
+            expectPunct(")", "to close the function type's parameter list");
+            Type ret = Type::Void;
+            if (isPunct(":")) { take(); ret = typeName(); }
+            return Type::fnOf(params, ret);
+        }
         if (t.text == "array") {
             take();
             expectPunct("<", "after 'array' (e.g. array<int>)");
@@ -340,9 +474,10 @@ private:
             for (;;) {
                 Param prm;
                 prm.loc = peek().loc;
-                if (isWord("this")) {
+                failIfRenamed(peek());
+                if (isWord("here")) {
                     if (!allowThis || !params.empty())
-                        fail(peek(), "'this' can only mark the first parameter of a top-level method (an extension method)");
+                        fail(peek(), "'here' can only mark the first parameter of a top-level method (an extension method)");
                     take();
                     if (isExtension) *isExtension = true;
                 }
@@ -367,7 +502,7 @@ private:
         }
         expectPunct(")", "to close the parameter list");
         if (isExtension && *isExtension && params.size() == 1 && params[0].variadic)
-            fail(toks_[pos_ - 1], "the 'this' parameter of an extension method cannot be variadic");
+            fail(toks_[pos_ - 1], "the 'here' parameter of an extension method cannot be variadic");
         return params;
     }
 
@@ -416,8 +551,9 @@ private:
     //          [public|private] constructor(params) { ... }
     //          [public|private] [static] method name(params) [: type] { ... }
     //          [public|private] property <type> Name [{ get { ... } set { ... } }]
-    ClassDecl classDecl() {
+    ClassDecl classDecl(bool shared = false) {
         ClassDecl c;
+        c.isShared = shared;
         c.isModel = isWord("model");
         c.isInterface = isWord("interface");
         take();  // 'class' / 'model' / 'interface'
@@ -469,28 +605,43 @@ private:
 
     void classMember(ClassDecl& c) {
         bool isPrivate = false, isProtected = false, isStatic = false, isOverride = false, sawAccess = false;
+        bool isReadonly = false, isLocked = false;
         for (;;) {
-            if (isWord("public") || isWord("private") || isWord("protected")) {
-                if (sawAccess) fail(peek(), "a member can have only one of 'public', 'private' and 'protected'");
+            failIfRenamed(peek());
+            if (isWord("public") || isWord("hidden") || isWord("protected")) {
+                if (sawAccess) fail(peek(), "a member can have only one of 'public', 'hidden' and 'protected'");
                 sawAccess = true;
-                isPrivate = peek().text == "private";
+                isPrivate = peek().text == "hidden";
                 isProtected = peek().text == "protected";
                 take();
             } else if (isWord("override")) {
                 if (isOverride) fail(peek(), "duplicate 'override'");
                 isOverride = true;
                 take();
-            } else if (isWord("static")) {
-                if (isStatic) fail(peek(), "duplicate 'static'");
+            } else if (isWord("shared")) {
+                if (isStatic) fail(peek(), "duplicate 'shared'");
                 isStatic = true;
+                take();
+            } else if (isWord("readonly")) {
+                if (isReadonly) fail(peek(), "duplicate 'readonly'");
+                isReadonly = true;
+                take();
+            } else if (isWord("locked")) {
+                if (isLocked) fail(peek(), "duplicate 'locked'");
+                isLocked = true;
                 take();
             } else {
                 break;
             }
         }
+        if (c.isShared) isStatic = true;  // `shared class`: every member is shared
         const Token& t = peek();
+        if ((isReadonly || isLocked) && !isWord("field"))
+            fail(t, std::string("'") + (isLocked ? "locked" : "readonly") + "' applies to fields only (write: " + (isLocked ? "locked" : "readonly") + " field ...)");
+        if (isReadonly && isLocked) fail(t, "'locked' already means the field can never change; use either 'locked' or 'readonly'");
         if (isWord("constructor")) {
-            if (isStatic) fail(t, "a constructor cannot be static");
+            if (c.isShared) fail(t, "a shared class has no constructor: it cannot be instantiated");
+            if (isStatic) fail(t, "a constructor cannot be shared");
             for (const MethodDecl& m : c.methods)
                 if (m.isCtor) fail(t, "class '" + c.name + "' already has a constructor (overloading is not supported)");
             MethodDecl m;
@@ -525,44 +676,115 @@ private:
             m.isProtected = isProtected;
             m.isOverride = isOverride;
             if (c.isInterface && (isStatic || isPrivate || isProtected || isOverride))
-                fail(t, "interface methods cannot be static, private, protected or override");
+                fail(t, "interface methods cannot be shared, hidden, protected or override");
             c.methods.push_back(std::move(m));
             return;
         }
         if (c.isInterface) fail(t, "an interface can only contain method signatures (method name(params): type)");
         if (isOverride) fail(t, "'override' applies to methods only");
         if (isWord("property")) {
-            if (isStatic) fail(t, "static properties are not supported; use a static field");
+            if (isStatic) fail(t, "shared properties are not supported; use a shared field");
             propertyDecl(c, isPrivate, isProtected);
             return;
         }
         if (t.kind != Tok::Ident) fail(t, "expected a member of class '" + c.name + "', found " + describe(t));
-        if (unsupportedWords().count(t.text)) fail(t, "'" + t.text + "' is not supported yet");
-        if (isWord("var")) fail(t, "fields need an explicit type (e.g. int count); 'var' is not allowed in a class body");
+        if (!isWord("field")) {
+            if (unsupportedWords().count(t.text)) fail(t, "'" + t.text + "' is not supported yet");
+            if (isWord("var")) fail(t, "fields are declared with 'field' and a type: field int count");
+            fail(t, "a class member starts with 'field', 'property', 'method' or 'constructor' (since 0.6.3 fields are written: field " + (isTypeWord(t.text) || !keywords().count(t.text) ? t.text : std::string("int")) + " name)");
+        }
+        take();  // 'field'
         FieldDecl f;
         f.loc = t.loc;
-        f.type = typeName();
+        // `field Name = "x"`: the type comes from the initializer (literals and `new` only)
+        const bool typeless = peek().kind == Tok::Ident && !keywords().count(peek().text) && tokIsPunct(peekNext(), "=");
+        if (!typeless) f.type = typeName();
         f.loc = peek().loc;
         f.name = expectName("a field name");
         f.isPrivate = isPrivate;
         f.isProtected = isProtected;
         f.isStatic = isStatic;
+        f.isReadonly = isReadonly;
+        f.isLocked = isLocked;
         if (isPunct("=")) {
             take();
             f.init = expression();
         }
+        if (typeless) {
+            Type inferred = Type::Invalid;
+            if (f.init) inferred = literalType(*f.init);
+            if (inferred == Type::Invalid) fail(toks_[pos_ - 1], "cannot infer the type of field '" + f.name + "'; write it: field <type> " + f.name + " = ...");
+            f.type = inferred;
+        }
+        if (isLocked && !f.init) fail(toks_[pos_ - 1], "a locked field needs its value: locked field <type> " + f.name + " = <constant>");
         endStatement();
         for (const FieldDecl& other : c.fields)
             if (other.name == f.name) fail(toks_[pos_ - 1], "duplicate field '" + f.name + "' in class '" + c.name + "'");
         c.fields.push_back(std::move(f));
     }
 
+    // The type of a literal (or `new X(...)`) initializer, for `field Name = "x"`; Invalid when it is anything else.
+    static Type literalType(const Expr& e) {
+        switch (e.kind) {
+            case Expr::Kind::Int: return Type::Int;
+            case Expr::Kind::String: return Type::String;
+            case Expr::Kind::Bool: return Type::Bool;
+            case Expr::Kind::Double: return Type::Double;
+            case Expr::Kind::Char: return Type::Char;
+            case Expr::Kind::Unary: return (e.text == "-" && e.lhs) ? (literalType(*e.lhs) == Type::Int || literalType(*e.lhs) == Type::Double ? literalType(*e.lhs) : Type(Type::Invalid)) : Type(Type::Invalid);
+            case Expr::Kind::NewObj: return e.newType.kind == Type::Class ? e.newType : Type::classOf(e.text);
+            case Expr::Kind::Binary: {  // constant arithmetic / concatenation of literals
+                if (!e.lhs || !e.rhs) return Type::Invalid;
+                const Type l = literalType(*e.lhs), r = literalType(*e.rhs);
+                if (l == Type::Invalid || r == Type::Invalid) return Type::Invalid;
+                const std::string& o = e.text;
+                if (o == "==" || o == "!=" || o == "<" || o == ">" || o == "<=" || o == ">=" || o == "&&" || o == "||") return Type::Bool;
+                if (o == "+" && (l == Type::String || r == Type::String)) return Type::String;
+                if (l == Type::Double || r == Type::Double) return Type::Double;
+                return l;
+            }
+            default: return Type::Invalid;
+        }
+    }
+
     void propertyDecl(ClassDecl& c, bool isPrivate, bool isProtected) {
         take();  // 'property'
         PropertyDecl p;
-        p.type = typeName();
+        // `property Name = "x"` / `property Name { get; set; } = "x"`: the type comes from the initializer (literals and `new` only)
+        const bool typeless = peek().kind == Tok::Ident && !keywords().count(peek().text) && (tokIsPunct(peekNext(), "=") || tokIsPunct(peekNext(), "{"));
+        if (!typeless) p.type = typeName();
         p.loc = peek().loc;
         p.name = expectName("a property name");
+        // `{ get; set; }` (or `{ get; }`) is the auto-property form; an optional `= value` initializes its backing field
+        bool autoForm = !isPunct("{");
+        bool wantSet = true;
+        if (isPunct("{") && peekAt(1).kind == Tok::Ident && (peekAt(1).text == "get" || peekAt(1).text == "set") && tokIsPunct(peekAt(2), ";")) {
+            take();  // '{'
+            bool sawGet = false, sawSet = false;
+            while (!isPunct("}")) {
+                if (!(isWord("get") || isWord("set"))) fail(peek(), "expected 'get;' or 'set;' in the auto-property body, found " + describe(peek()));
+                const bool g = peek().text == "get";
+                if ((g && sawGet) || (!g && sawSet)) fail(peek(), std::string("duplicate '") + peek().text + "' accessor");
+                (g ? sawGet : sawSet) = true;
+                take();
+                if (!isPunct(";")) fail(peek(), "expected ';' after the accessor, found " + describe(peek()));
+                take();
+            }
+            take();  // '}'
+            if (!sawGet) fail(toks_[pos_ - 1], "property '" + p.name + "' needs 'get;'");
+            wantSet = sawSet;
+            autoForm = true;
+        }
+        ExprPtr propInit;
+        if (autoForm && isPunct("=")) {
+            take();
+            propInit = expression();
+        }
+        if (typeless) {
+            Type inferred = propInit ? literalType(*propInit) : Type(Type::Invalid);
+            if (inferred == Type::Invalid) fail(toks_[pos_ - 1], "cannot infer the type of property '" + p.name + "'; write it: property <type> " + p.name + " = ...");
+            p.type = inferred;
+        }
         p.isPrivate = isPrivate;
         p.isProtected = isProtected;
         for (const PropertyDecl& other : c.properties)
@@ -589,13 +811,14 @@ private:
             c.methods.push_back(std::move(m));
         };
 
-        if (!isPunct("{")) {  // auto-property: a hidden backing field plus trivial accessors
+        if (autoForm) {  // auto-property: a hidden backing field plus trivial accessors
             endStatement();
             FieldDecl backing;
             backing.loc = p.loc;
             backing.name = "$" + p.name;
             backing.type = p.type;
             backing.isPrivate = true;
+            backing.init = std::move(propInit);
             c.fields.push_back(std::move(backing));
             std::vector<StmtPtr> g;
             auto r = make(Stmt::Kind::Return, p.loc);
@@ -607,8 +830,9 @@ private:
             a->expr = varExpr("value", p.loc);
             st.push_back(std::move(a));
             accessor(true, std::move(g));
-            accessor(false, std::move(st));
-            p.hasGet = p.hasSet = true;
+            if (wantSet) accessor(false, std::move(st));
+            p.hasGet = true;
+            p.hasSet = wantSet;
             c.properties.push_back(std::move(p));
             return;
         }
@@ -679,13 +903,23 @@ private:
         if (t.kind != Tok::Ident) fail(t, "expected a statement, found " + describe(t));
         const std::string& w = t.text;
 
-        if (w == "import" || w == "export" || w == "use") fail(t, "'" + w + "' is only allowed at the top level of a file");
+        failIfRenamed(t);
+        if (w == "import" || w == "use") fail(t, "'" + w + "' is only allowed at the top level of a file");
         if (w == "hand") fail(t, "hand declarations are only allowed at the top level of a file");
         if (w == "method") fail(t, "methods can only be declared at the top level of a file");
         if (w == "else") fail(t, "'else' without a matching 'if'");
         if (w == "if") return ifStatement();
+        if (w == "try") return tryStatement();
+        if (w == "throw") {
+            auto s = make(Stmt::Kind::Throw, take().loc);
+            s->expr = expression();
+            endStatement();
+            return s;
+        }
+        if (w == "catch") fail(t, "'catch' without a matching 'try'");
         if (w == "while") return whileStatement();
         if (w == "for") return forStatement();
+        if (w == "in" && tokIsPunct(peekNext(), "(")) return foreachStatement();
         if (w == "break" || w == "continue") {
             auto s = make(w == "break" ? Stmt::Kind::Break : Stmt::Kind::Continue, t.loc);
             take();
@@ -693,7 +927,7 @@ private:
             return s;
         }
         if (w == "return") return returnStatement();
-        if ((isTypeWord(w) && !tokIsPunct(peekNext(), "(")) || startsClassDeclaration()) return varDecl();
+        if ((isTypeWord(w) && !tokIsPunct(peekNext(), "(")) || startsClassDeclaration() || fnDeclarationAhead()) return varDecl();
         if (unsupportedWords().count(w)) fail(t, "'" + w + "' is not supported yet");
         if (w == "true" || w == "false") fail(t, "expected a statement, found '" + w + "'");
 
@@ -818,6 +1052,24 @@ private:
         return s;
     }
 
+    // try { ... } catch (e) { ... }   -- 'e' (optionally written "string e") holds the error message
+    StmtPtr tryStatement() {
+        Depth guard(*this, peek());
+        auto s = make(Stmt::Kind::Try, take().loc);
+        s->body = block("to start the 'try' body");
+        if (!isWord("catch")) fail(peek(), "'try' needs a 'catch' block (expected 'catch', found " + describe(peek()) + ")");
+        take();
+        if (isPunct("(")) {
+            take();
+            if (isWord("string") || isWord("var")) take();
+            s->name = expectName("a name for the error message");
+            expectPunct(")", "after the catch variable");
+        }
+        s->hasElse = true;
+        s->elseBody = block("to start the 'catch' body");
+        return s;
+    }
+
     StmtPtr whileStatement() {
         auto s = condition(make(Stmt::Kind::While, peek().loc), "while");
         s->body = bodyOrStatement("to start the 'while' body");
@@ -825,27 +1077,34 @@ private:
     }
 
     // for (init; condition; step) { ... } -- each part is optional; a missing condition means true.
+    // in (var x of items) { ... }   (since 0.6.3; the old spelling for (var x in items) is an error)
+    StmtPtr foreachStatement() {
+        Depth guard(*this, peek());
+        auto s = make(Stmt::Kind::ForEach, take().loc);
+        expectPunct("(", "after 'in'");
+        if (isWord("var")) {
+            take();
+            s->inferred = true;
+        } else {
+            s->declType = typeName();
+        }
+        s->name = expectName("a loop variable name");
+        if (!isWord("of")) fail(peek(), "expected 'of' after the loop variable (in (var x of items) { ... }), found " + describe(peek()));
+        take();  // 'of'
+        s->expr = expression();
+        expectPunct(")", "after the collection of the 'in' loop");
+        s->body = bodyOrStatement("to start the 'in' body");
+        return s;
+    }
+
     StmtPtr forStatement() {
         Depth guard(*this, peek());
         auto s = make(Stmt::Kind::For, take().loc);
         expectPunct("(", "after 'for'");
-        if (peek().kind == Tok::Ident && (isTypeWord(peek().text) || startsClassDeclaration()) && forEachAhead()) {
-            s->kind = Stmt::Kind::ForEach;
-            if (isWord("var")) {
-                take();
-                s->inferred = true;
-            } else {
-                s->declType = typeName();
-            }
-            s->name = expectName("a loop variable name");
-            take();  // 'in'
-            s->expr = expression();
-            expectPunct(")", "after the 'for' collection");
-            s->body = bodyOrStatement("to start the 'for' body");
-            return s;
-        }
+        if (peek().kind == Tok::Ident && (isTypeWord(peek().text) || startsClassDeclaration()) && forEachAhead())
+            fail(peek(), "'for (x in items)' was replaced in Coyote 0.6.3: write in (var x of items) { ... }; 'for' is only for for (init; condition; step)");
         if (!isPunct(";")) {
-            if ((peek().kind == Tok::Ident && isTypeWord(peek().text) && !tokIsPunct(peekNext(), "(")) || startsClassDeclaration())
+            if ((peek().kind == Tok::Ident && isTypeWord(peek().text) && !tokIsPunct(peekNext(), "(")) || startsClassDeclaration() || fnDeclarationAhead())
                 s->init = varDecl(false);
             else
                 s->init = exprStatement(false);
@@ -956,6 +1215,14 @@ private:
                 } else {
                     n->kind = Expr::Kind::Member;
                 }
+                measure(*n);
+                e = std::move(n);
+            } else if (tokIsPunct(t, "(") && e->kind != Expr::Kind::Lambda) {  // calling a function value: f(1)(2), obj.Hook()()
+                auto n = std::make_unique<Expr>();
+                n->kind = Expr::Kind::CallFn;
+                n->loc = t.loc;
+                n->lhs = std::move(e);
+                n->args = argList();
                 measure(*n);
                 e = std::move(n);
             } else {
@@ -1157,6 +1424,26 @@ private:
                 take();
                 return e;
             case Tok::Ident:
+                if (!keywords().count(t.text) && tokIsPunct(peekNext(), "=>")) {  // x => body: one untyped parameter
+                    Depth guard(*this, peek());
+                    e->kind = Expr::Kind::Lambda;
+                    Param prm;
+                    prm.loc = peek().loc;
+                    prm.type = Type::Invalid;
+                    prm.name = take().text;
+                    e->lparams.push_back(std::move(prm));
+                    take();  // '=>'
+                    if (isPunct("{")) {
+                        e->lbody = block("to start the lambda body");
+                    } else {
+                        auto r = make(Stmt::Kind::Return, peek().loc);
+                        r->expr = expression();
+                        e->lbody.push_back(std::move(r));
+                        e->exprBody = true;
+                    }
+                    measure(*e);
+                    return e;
+                }
                 if (t.text == "null") {
                     e->kind = Expr::Kind::Null;
                     take();
@@ -1172,9 +1459,11 @@ private:
                     measure(*e);
                     return e;
                 }
-                if (t.text == "this") {
+                failIfRenamed(t);
+                if (t.text == "here") {  // the current object; sema calls its slot "this" internally
                     e->kind = Expr::Kind::Var;
-                    e->text = take().text;
+                    take();
+                    e->text = "this";
                     return e;
                 }
                 if (t.text == "new") {
@@ -1256,6 +1545,7 @@ private:
                     measure(*e);
                     return e;
                 }
+                if (t.text == "(" && lambdaAhead()) return lambdaExpr();
                 if (t.text == "(") {
                     take();
                     ExprPtr inner = expression();

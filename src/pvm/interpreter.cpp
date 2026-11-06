@@ -18,6 +18,7 @@ struct Frame {
     size_t pc = 0;
     size_t base = 0;            // operand-stack height when the frame was entered
     std::vector<Value> locals;  // parameters first, then declared locals
+    std::vector<size_t> handlers;  // version 8: handler targets of the active 'try' blocks, innermost last
 };
 
 } // namespace
@@ -155,6 +156,8 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
     size_t lastDepth = 0;
 
     try {
+    for (;;) {  // restarts after a caught exception
+    try {
     while (!frames.empty()) {
         Frame& fr = frames.back();
         const Instr& in = fr.fn->code[fr.pc++];
@@ -236,6 +239,13 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             }
             case Op::Not: { long long a = popInt(); stack.push_back(Value::ofBool(a == 0)); break; }
 
+            case Op::Try: fr.handlers.push_back(static_cast<size_t>(in.target)); break;
+            case Op::EndTry: fr.handlers.pop_back(); break;
+            case Op::Throw: {
+                std::string msg = stack.back().s;
+                stack.pop_back();
+                throw rtError(msg);
+            }
             case Op::Jump: fr.pc = static_cast<size_t>(in.target); break;
             case Op::JumpFalse:
                 if (popInt() == 0) fr.pc = static_cast<size_t>(in.target);
@@ -796,6 +806,27 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 break;
             }
         }
+    }
+    break;  // the program finished
+    } catch (const RuntimeError& err) {
+        // An error (a runtime failure or `throw`): resume at the innermost active 'try', or give up when there is none.
+        bool handled = false;
+        while (!frames.empty()) {
+            Frame& f = frames.back();
+            if (!f.handlers.empty()) {
+                const size_t target = f.handlers.back();
+                f.handlers.pop_back();
+                stack.resize(f.base);
+                stack.push_back(Value::ofString(err.message));
+                f.pc = target;
+                handled = true;
+                break;
+            }
+            stack.resize(f.base);
+            frames.pop_back();
+        }
+        if (!handled) throw;
+    }
     }
     } catch (const HeapError& e) {
         throw RuntimeError{m.fileName(current ? current->srcFile : 0), current ? current->srcLine : 0, e.message};

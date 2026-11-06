@@ -10,7 +10,7 @@ namespace pvm {
 namespace {
 
 constexpr int kMinVersion = 1;
-constexpr int kMaxVersion = 7;
+constexpr int kMaxVersion = 8;
 constexpr int kMaxTypeDepth = 32;  // nesting limit for array<array<...>>, so hostile input cannot recurse deeply
 
 struct Word {
@@ -572,6 +572,7 @@ private:
             }
             case Op::Jump:
             case Op::JumpFalse:
+            case Op::Try:
                 needArgs(w, 2);
                 if (w[1].quoted) fail(std::string("'") + head + "' needs a label name");
                 in.str = w[1].text;

@@ -1,7 +1,7 @@
 {
   "name": "coyote-studio",
   "productName": "Coyote Studio",
-  "version": "0.6.1",
+  "version": "0.6.3",
   "description": "Coyote Studio: editor, build, run and debug environment for the Coyote language",
   "main": "src/main.js",
   "private": true,

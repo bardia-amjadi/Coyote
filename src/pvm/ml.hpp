@@ -137,7 +137,9 @@ enum class Op {
     // version 6: function values
     MkClosure, CallFn,
     // version 7: class hierarchies
-    Upcast, Downcast, IsInst
+    Upcast, Downcast, IsInst,
+    // version 8: exceptions
+    Try, EndTry, Throw
 };
 
 // Instruction names and the ML version that introduced each.
@@ -192,6 +194,7 @@ inline const std::vector<OpInfo>& opTable() {
         {Op::GetGlobal, "getglobal", 5}, {Op::SetGlobal, "setglobal", 5},
         {Op::MkClosure, "mkclosure", 6}, {Op::CallFn, "callfn", 6},
         {Op::Upcast, "upcast", 7}, {Op::Downcast, "downcast", 7}, {Op::IsInst, "isinst", 7},
+        {Op::Try, "try", 8}, {Op::EndTry, "endtry", 8}, {Op::Throw, "throw", 8},
     };
     return t;
 }

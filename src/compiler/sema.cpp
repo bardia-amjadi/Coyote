@@ -27,6 +27,7 @@ struct FnCtx {
     int cls = -1;                         // the class whose method is being checked
     bool isStatic = false;                // static method / static initializer (no `this`)
     bool isCtor = false;
+    bool inCtorBody = false;              // constructor or the synthesized $init that holds a hierarchy member's constructor body
 };
 
 // What semantic analysis knows about one class (the declaration itself is Program::classes[i]).
@@ -129,10 +130,12 @@ public:
             }
         }
 
-        for (MethodDecl& m : prog_.methods) {
+        for (size_t mi = 0; mi < prog_.methods.size(); ++mi) {  // lambdas append methods while this runs
+            MethodDecl& m = prog_.methods[mi];
             curModule_ = m.unit;
-            if (m.isDispatcher || m.isAbstract) continue;  // no body to check
+            if (m.isDispatcher || m.isAbstract || m.lifted) continue;  // no body to check (a lifted lambda was checked where it was written)
             checkMethod(m);
+            flushLambdas();
         }
 
         curModule_ = 0;
@@ -144,6 +147,7 @@ public:
         scopes_.emplace_back();
         checkStmts(prog_.stmts);
         scopes_.clear();
+        flushLambdas();
 
         std::map<std::string, size_t> order;
         for (size_t i = 0; i < nmod; ++i) order.emplace(prog_.modules[i].path, i);
@@ -172,6 +176,10 @@ private:
     FnCtx* ctx_ = nullptr;
     std::vector<std::map<std::string, VarInfo>> scopes_;
     int loopDepth_ = 0;
+    std::vector<MethodDecl> pendingLambdas_;   // lifted lambda bodies, appended to Program::methods between methods
+    std::vector<Expr*> unresolvedLambdas_;     // lambdas waiting for a function type from their context
+    std::set<std::string> capturedNames_;      // variables the lambda being checked captured (they are read-only inside it)
+    int lambdaCount_ = 0;
 
     const std::string& file() const { return prog_.modules[static_cast<size_t>(curModule_)].path; }
     std::map<std::string, Target>& table() { return tables_[static_cast<size_t>(curModule_)]; }
@@ -226,6 +234,7 @@ private:
         a->loc = loc;
         a->target = std::move(target);
         a->expr = std::move(value);
+        a->fieldInit = true;  // sema-synthesized: field initializers and model constructors may set readonly/locked fields
         return a;
     }
 
@@ -355,6 +364,8 @@ private:
             std::vector<StmtPtr> inits;
             MethodDecl staticInit;
             for (FieldDecl& f : c.fields) {
+                if (f.isLocked && f.init && !isConstantExpr(*f.init, c))
+                    error(f.init->loc, "a locked field needs a constant value (literals, operators and other locked fields of the class); use 'readonly field' for a value that is computed once");
                 if (!f.init) continue;
                 if (f.isStatic)
                     staticInit.body.push_back(makeAssign(makeMember(makeVar(c.name, f.loc), f.name, f.loc), std::move(f.init), f.loc));
@@ -408,6 +419,29 @@ private:
         }
     }
 
+    // `locked` fields are constants: literals, operators, conversions and other locked fields of the same class.
+    static bool isConstantExpr(const Expr& e, const ClassDecl& c) {
+        switch (e.kind) {
+            case Expr::Kind::Int: case Expr::Kind::String: case Expr::Kind::Bool: case Expr::Kind::Double: case Expr::Kind::Char: return true;
+            case Expr::Kind::Unary: case Expr::Kind::Convert: return e.lhs && isConstantExpr(*e.lhs, c);
+            case Expr::Kind::Binary: return e.lhs && e.rhs && isConstantExpr(*e.lhs, c) && isConstantExpr(*e.rhs, c);
+            case Expr::Kind::Var:
+                for (const FieldDecl& f : c.fields) if (f.name == e.text && f.isLocked) return true;
+                return false;
+            default: return false;
+        }
+    }
+
+    // The field `name` of class `ci` or of its base classes, and the class that declares it.
+    const FieldDecl* findField(int ci, const std::string& name, int* owner) const {
+        const ClassDecl& c = prog_.classes[static_cast<size_t>(ci)];
+        for (const FieldDecl& f : c.fields)
+            if (f.name == name) { if (owner) *owner = ci; return &f; }
+        for (int sup : c.supers)
+            if (const FieldDecl* f = findField(sup, name, owner)) return f;
+        return nullptr;
+    }
+
     // Replaces class names written in a type with the unique ML class name; reports unknown names.
     void resolveType(Type& t, SourceLoc loc) {
         switch (t.kind) {
@@ -415,6 +449,13 @@ private:
                 Type inner = *t.elem;
                 resolveType(inner, loc);
                 t.elem = std::make_shared<const Type>(inner);
+                return;
+            }
+            case Type::Fn: {
+                for (Type& p : t.targs) resolveType(p, loc);
+                Type r = *t.elem;
+                resolveType(r, loc);
+                t.elem = std::make_shared<const Type>(r);
                 return;
             }
             case Type::Map: {
@@ -890,8 +931,10 @@ private:
                     if (alwaysReturns(s->body)) return true;
                     break;
                 case Stmt::Kind::If:
+                case Stmt::Kind::Try:
                     if (s->hasElse && alwaysReturns(s->body) && alwaysReturns(s->elseBody)) return true;
                     break;
+                case Stmt::Kind::Throw: return true;
                 default: break;
             }
         }
@@ -909,6 +952,7 @@ private:
         ctx.cls = m.classIndex;
         ctx.isStatic = m.isStatic || m.isStaticInit;
         ctx.isCtor = m.isCtor;
+        ctx.inCtorBody = m.isCtor || m.isInit;
         ctx_ = &ctx;
 
         scopes_.clear();
@@ -974,6 +1018,23 @@ private:
                 writeTarget_ = true;
                 check(target);  // reports unknown variables and bad indexing
                 writeTarget_ = false;
+                if (target.kind == Expr::Kind::Var && capturedNames_.count(target.text)) {
+                    error(target.loc, "cannot assign to '" + target.text + "' inside a lambda: lambdas capture the value it had when they were created (keep changing state in an array or an object)");
+                    checkValue(s.expr, "a value to assign");
+                    return;
+                }
+                if (target.kind == Expr::Kind::Member && target.classIndex >= 0 && target.methodIndex < 0 && !s.fieldInit) {
+                    int owner = -1;
+                    if (const FieldDecl* fd = findField(target.classIndex, target.text, &owner)) {
+                        if (fd->isLocked) {
+                            error(target.loc, "cannot assign to the locked field '" + target.text + "': a locked field is a constant");
+                        } else if (fd->isReadonly && !(!fd->isStatic && ctx_->inCtorBody && ctx_->cls == owner)) {
+                            error(target.loc, "cannot assign to the readonly field '" + target.text + "'" +
+                                                  (fd->isStatic ? ": a shared readonly field is set by its initializer only"
+                                                                : ": it can only be set by its initializer or in the constructor of class '" + className(owner) + "'"));
+                        }
+                    }
+                }
                 if (target.kind == Expr::Kind::Member && target.classIndex < 0) {
                     if (target.type != Type::Invalid)
                         error(target.loc, "invalid assignment target: only variables, elements and fields can be assigned ('" + target.text + "' is read-only)");
@@ -1018,6 +1079,19 @@ private:
                 checkCondition(s.expr, "if");
                 checkScoped(s.body);
                 if (s.hasElse) checkScoped(s.elseBody);
+                return;
+            case Stmt::Kind::Throw: {
+                Type t = checkValue(s.expr, "an error message");
+                if (t != Type::Invalid && !coerce(s.expr, Type::String))
+                    error(s.expr->loc, "'throw' needs a string message but got " + typeName(t) + conversionHint(t, Type::String));
+                return;
+            }
+            case Stmt::Kind::Try:
+                checkScoped(s.body);
+                scopes_.emplace_back();
+                s.slot = declare(s.name.empty() ? "$err" + std::to_string(hidden_++) : s.name, Type::String, s.loc);
+                for (auto& c : s.elseBody) checkStmt(*c);
+                scopes_.pop_back();
                 return;
             case Stmt::Kind::While:
                 checkCondition(s.expr, "while");
@@ -1179,6 +1253,16 @@ private:
     // Checks an expression that must produce a value. `expected` (optional) gives array literals
     // their element type.
     Type checkValue(ExprPtr& e, const char* context, const Type* expected = nullptr) {
+        if (e->kind == Expr::Kind::Lambda && !e->preChecked) {
+            if (expected) checkLambda(*e, expected);
+            else if (lambdaTyped(*e)) checkLambda(*e, nullptr);
+            else {  // typed later, by the parameter it is passed to (checkArg)
+                e->pending = true;
+                e->type = Type::Invalid;
+                unresolvedLambdas_.push_back(e.get());
+            }
+            return e->type;
+        }
         if (expected && e->kind == Expr::Kind::ArrayLit && expected->isArray())
             checkArrayLit(*e, expected->elem.get());
         else
@@ -1203,8 +1287,10 @@ private:
                 const VarInfo* v = lookup(e.text);
                 if (!v) {
                     if (e.text == "this") {
-                        error(e.loc, "'this' is only available inside instance methods and constructors");
+                        error(e.loc, "'here' is only available inside instance methods and constructors");
                         e.type = Type::Invalid;
+                    } else if (tryFunctionRef(e)) {
+                        return;
                     } else if (rewriteImplicitMember(e)) {
                         check(e);
                     } else if (reportedImplicit_) {
@@ -1221,6 +1307,14 @@ private:
                 return;
             }
             case Expr::Kind::Call: checkCall(e); return;
+            case Expr::Kind::CallFn: checkCallFn(e); return;
+            case Expr::Kind::Lambda:
+                if (lambdaTyped(e)) checkLambda(e, nullptr);
+                else {
+                    error(e.loc, "cannot infer the parameter types of this lambda here; write them, e.g. (int x) => ...");
+                    e.type = Type::Invalid;
+                }
+                return;
             case Expr::Kind::Unary: checkUnary(e); return;
             case Expr::Kind::Binary: checkBinary(e); return;
             case Expr::Kind::ArrayLit: checkArrayLit(e, nullptr); return;
@@ -1406,7 +1500,7 @@ private:
                 const FieldDecl& fd = decl.fields[static_cast<size_t>(info.instDecl[static_cast<size_t>(f->second)])];
                 const int owner = fd.owner >= 0 ? fd.owner : ci;
                 if (!canAccess(fd.isPrivate, owner, fd.isProtected))
-                    error(e.loc, "'" + e.text + "' is " + (fd.isPrivate ? "private" : "protected") + " to class '" + className(owner) + "'");
+                    error(e.loc, "'" + e.text + "' is " + (fd.isPrivate ? "hidden" : "protected") + " to class '" + className(owner) + "'");
                 e.classIndex = ci;
                 e.type = fd.type;
                 return;
@@ -1416,7 +1510,7 @@ private:
                 const PropertyDecl& pd = decl.properties[static_cast<size_t>(p->second)];
                 const int powner = pd.owner >= 0 ? pd.owner : ci;
                 if (!canAccess(pd.isPrivate, powner, pd.isProtected))
-                    error(e.loc, "property '" + e.text + "' is " + (pd.isPrivate ? "private" : "protected") + " to class '" + className(powner) + "'");
+                    error(e.loc, "property '" + e.text + "' is " + (pd.isPrivate ? "hidden" : "protected") + " to class '" + className(powner) + "'");
                 const bool wantSet = writeTarget_;
                 if (wantSet && !pd.hasSet) { error(e.loc, "property '" + e.text + "' has no setter"); e.type = Type::Invalid; return; }
                 if (!wantSet && !pd.hasGet) { error(e.loc, "property '" + e.text + "' has no getter"); e.type = Type::Invalid; return; }
@@ -1466,7 +1560,7 @@ private:
     void finishClassCall(Expr& e, int mi, bool instanceCall, bool nonVirtual = false, int recvClass = -1) {
         const MethodDecl& m = prog_.methods[static_cast<size_t>(mi)];
         const int ci = m.classIndex;
-        if (!canAccess(m.isPrivate, ci, m.isProtected)) error(e.loc, "method '" + shown(e.text) + "' is " + (m.isPrivate ? "private" : "protected") + " to class '" + className(ci) + "'");
+        if (!canAccess(m.isPrivate, ci, m.isProtected)) error(e.loc, "method '" + shown(e.text) + "' is " + (m.isPrivate ? "hidden" : "protected") + " to class '" + className(ci) + "'");
         if (m.isAbstract && nonVirtual) error(e.loc, "cannot call abstract method '" + e.text + "' of '" + className(ci) + "' with base");
         int target = mi;
         if (instanceCall && !nonVirtual && recvClass >= 0) {
@@ -1498,13 +1592,18 @@ private:
             return;
         }
         const int ci = it->second;
+        if (prog_.classes[static_cast<size_t>(ci)].isShared) {
+            error(e.loc, "cannot create an instance of the shared class '" + className(ci) + "': all its members are shared, use " + className(ci) + ".Member");
+            e.type = Type::Invalid;
+            return;
+        }
         if (prog_.classes[static_cast<size_t>(ci)].isInterface) {
             error(e.loc, "cannot create an instance of interface '" + className(ci) + "'");
             e.type = Type::Invalid;
             return;
         }
         const MethodDecl& ctor = prog_.methods[static_cast<size_t>(cinfo_[static_cast<size_t>(ci)].ctor)];
-        if (!canAccess(ctor.isPrivate, ci, ctor.isProtected)) error(e.loc, "the constructor of '" + className(ci) + "' is " + (ctor.isPrivate ? "private" : "protected"));
+        if (!canAccess(ctor.isPrivate, ci, ctor.isProtected)) error(e.loc, "the constructor of '" + className(ci) + "' is " + (ctor.isPrivate ? "hidden" : "protected"));
         e.classIndex = ci;
         e.methodIndex = cinfo_[static_cast<size_t>(ci)].ctor;
         e.type = cinfo_[static_cast<size_t>(ci)].type;
@@ -1595,8 +1694,230 @@ private:
         for (size_t i = 0; i < e.args.size(); ++i) checkArg(e, i, m.params[i].type);
     }
 
+    // ---- lambdas ----
+
+    // f(args) / make()(args): `e.lhs` is the function value. `e.text` names it in messages when it is a variable.
+    void checkCallFn(Expr& e, bool argsChecked = false) {
+        const std::string who = e.text.empty() ? "the function value" : "'" + e.text + "'";
+        Type ft = checkValue(e.lhs, "a function value");
+        e.type = Type::Invalid;
+        auto checkAll = [&] { if (!argsChecked) for (auto& a : e.args) checkValue(a, "an argument"); };
+        if (ft == Type::Invalid) { checkAll(); return; }
+        if (!ft.isFn()) {
+            error(e.loc, who + " is " + typeName(ft) + ", not a function, and cannot be called");
+            checkAll();
+            return;
+        }
+        e.type = *ft.elem;
+        if (e.args.size() != ft.targs.size()) {
+            error(e.loc, who + " is a " + typeName(ft) + " and takes " + std::to_string(ft.targs.size()) + " argument(s) but got " + std::to_string(e.args.size()));
+            return;
+        }
+        for (size_t i = 0; i < e.args.size(); ++i) {
+            Type at;
+            if (!argsChecked) {
+                at = checkValue(e.args[i], "an argument", &ft.targs[i]);
+            } else {
+                if (e.args[i]->kind == Expr::Kind::Lambda && e.args[i]->pending) { e.args[i]->pending = false; checkLambda(*e.args[i], &ft.targs[i]); }
+                at = e.args[i]->type;
+            }
+            if (at != Type::Invalid && !coerce(e.args[i], ft.targs[i]))
+                error(e.args[i]->loc, "argument " + std::to_string(i + 1) + " of " + who + " expects " + typeName(ft.targs[i]) + " but got " + typeName(at) + conversionHint(at, ft.targs[i]));
+        }
+    }
+
+    static bool lambdaTyped(const Expr& e) {
+        for (const Param& p : e.lparams) if (p.type == Type::Invalid) return false;
+        return true;
+    }
+
+    static void collectUses(const Expr& e, std::set<std::string>& out) {
+        if (e.kind == Expr::Kind::Var || e.kind == Expr::Kind::Call) out.insert(e.text);
+        if (e.lhs) collectUses(*e.lhs, out);
+        if (e.rhs) collectUses(*e.rhs, out);
+        for (const auto& a : e.args) collectUses(*a, out);
+        if (e.kind == Expr::Kind::Lambda) {
+            std::set<std::string> inner;
+            for (const auto& s : e.lbody) collectUses(*s, inner);
+            for (const Param& p : e.lparams) inner.erase(p.name);
+            out.insert(inner.begin(), inner.end());
+        }
+    }
+    static void collectUses(const Stmt& s, std::set<std::string>& out) {
+        if (s.expr) collectUses(*s.expr, out);
+        if (s.target) collectUses(*s.target, out);
+        if (s.init) collectUses(*s.init, out);
+        if (s.step) collectUses(*s.step, out);
+        for (const auto& b : s.body) collectUses(*b, out);
+        for (const auto& b : s.elseBody) collectUses(*b, out);
+    }
+
+    // A name that is a top-level method, used as a value: `var f = Double`.
+    bool tryFunctionRef(Expr& e) {
+        if (curModule_ < 0 || static_cast<size_t>(curModule_) >= tables_.size()) return false;
+        auto it = tables_[static_cast<size_t>(curModule_)].find(e.text);
+        if (it == tables_[static_cast<size_t>(curModule_)].end() || !it->second.isMethod) return false;
+        const MethodDecl& m = prog_.methods[static_cast<size_t>(it->second.index)];
+        if (m.classIndex >= 0 || m.isDispatcher) return false;
+        std::vector<Type> ps;
+        for (const Param& p : m.params) ps.push_back(p.type);
+        e.kind = Expr::Kind::Lambda;
+        e.methodIndex = it->second.index;
+        e.type = Type::fnOf(ps, m.ret);
+        e.preChecked = true;
+        return true;
+    }
+
+    // Turns `(params) => body` into a lifted method plus a closure creation. The captured variables (the enclosing
+    // method's locals the body mentions, and `this`) become the first parameters; they are copied in when the closure is made.
+    void checkLambda(Expr& e, const Type* expected) {
+        if (e.preChecked) return;
+        e.preChecked = true;
+        e.type = Type::Invalid;
+        const Type* ef = nullptr;
+        if (expected && expected->isFn()) ef = expected;
+        else if (expected && *expected != Type::Invalid) {
+            error(e.loc, "a lambda is a function value, but " + typeName(*expected) + " is expected here");
+            return;
+        }
+        if (ef && ef->targs.size() != e.lparams.size()) {
+            error(e.loc, "this lambda takes " + std::to_string(e.lparams.size()) + " parameter(s) but " + typeName(*ef) + " takes " + std::to_string(ef->targs.size()));
+            return;
+        }
+        std::vector<Param> ps = e.lparams;
+        bool bad = false;
+        std::set<std::string> own;
+        for (size_t i = 0; i < ps.size(); ++i) {
+            Param& p = ps[i];
+            if (!own.insert(p.name).second) { error(p.loc, "duplicate parameter name '" + p.name + "' in the lambda"); bad = true; }
+            if (p.type == Type::Invalid) {
+                if (ef) p.type = ef->targs[i];
+                else { error(p.loc, "cannot infer the type of lambda parameter '" + p.name + "'; write it, e.g. (int " + p.name + ") => ..."); bad = true; }
+            } else {
+                resolveType(p.type, p.loc);
+                if (ef && p.type != ef->targs[i] && p.type != Type::Invalid) {
+                    error(p.loc, "lambda parameter '" + p.name + "' is " + typeName(p.type) + " but " + typeName(*ef) + " passes " + typeName(ef->targs[i]));
+                    bad = true;
+                }
+            }
+            if (p.type == Type::Invalid) bad = true;
+        }
+        if (bad) return;
+
+        Type ret = Type::Void;
+        bool retKnown = false;
+        if (e.hasLret) { ret = e.lret; resolveType(ret, e.loc); retKnown = true; }
+        else if (ef) { ret = *ef->elem; retKnown = true; }
+        if (ret == Type::Invalid) return;
+
+        // captures
+        std::set<std::string> uses;
+        for (const auto& s : e.lbody) collectUses(*s, uses);
+        std::vector<std::pair<std::string, VarInfo>> caps;
+        if (const VarInfo* tv = lookup("this")) caps.push_back({"this", *tv});
+        for (const std::string& n : uses) {
+            if (n == "this" || own.count(n)) continue;
+            if (const VarInfo* v = lookup(n)) caps.push_back({n, *v});
+        }
+
+        MethodDecl lm;
+        lm.name = "$lambda" + std::to_string(lambdaCount_++);
+        lm.loc = e.loc;
+        lm.unit = curModule_;
+        lm.lifted = true;
+        for (const auto& c : caps) {
+            Param p;
+            p.name = c.first;
+            p.type = c.second.type;
+            p.loc = e.loc;
+            lm.params.push_back(std::move(p));
+        }
+        for (const Param& p : ps) lm.params.push_back(p);
+        lm.body = std::move(e.lbody);
+
+        // check the body in its own function context
+        auto savedScopes = std::move(scopes_);
+        FnCtx* savedCtx = ctx_;
+        const int savedLoop = loopDepth_;
+        auto savedCaptured = std::move(capturedNames_);
+        FnCtx ctx;
+        ctx.inMethod = true;
+        ctx.name = "lambda";
+        ctx.ret = ret;
+        ctx.paramCount = static_cast<int>(lm.params.size());
+        ctx.locals = &lm.localTypes;
+        ctx.localNames = &lm.localNames;
+        ctx.cls = savedCtx->cls;
+        ctx.isStatic = savedCtx->isStatic;
+        ctx_ = &ctx;
+        scopes_.clear();
+        scopes_.emplace_back();
+        capturedNames_.clear();
+        for (size_t i = 0; i < lm.params.size(); ++i) {
+            scopes_.back().emplace(lm.params[i].name, VarInfo{lm.params[i].type, static_cast<int>(i)});
+            if (i < caps.size() && lm.params[i].name != "this") capturedNames_.insert(lm.params[i].name);
+        }
+        scopes_.emplace_back();
+        loopDepth_ = 0;
+        if (e.exprBody) {
+            Stmt& rs = *lm.body[0];
+            if (retKnown && ret == Type::Void) {
+                check(*rs.expr);
+                rs.kind = Stmt::Kind::ExprStmt;
+            } else if (retKnown) {
+                Type t = checkValue(rs.expr, "a lambda result", &ret);
+                if (t != Type::Invalid && !coerce(rs.expr, ret))
+                    error(rs.expr->loc, "the lambda must return " + typeName(ret) + " but its body is " + typeName(t) + conversionHint(t, ret));
+            } else {
+                check(*rs.expr);
+                Type t = rs.expr->type;
+                if (t == Type::Void) { ret = Type::Void; rs.kind = Stmt::Kind::ExprStmt; }
+                else if (t == Type::Null) { error(rs.expr->loc, "cannot infer the result type of the lambda from null"); ret = Type::Invalid; }
+                else ret = t;
+            }
+            ctx.ret = ret;
+        } else {
+            checkStmts(lm.body);
+            if (ret != Type::Void && ret != Type::Invalid && !alwaysReturns(lm.body))
+                error(e.loc, "the lambda does not return a value on all code paths");
+        }
+        lm.ret = ret;
+        scopes_ = std::move(savedScopes);
+        ctx_ = savedCtx;
+        loopDepth_ = savedLoop;
+        capturedNames_ = std::move(savedCaptured);
+        if (ret == Type::Invalid) return;
+
+        std::vector<Type> ptypes;
+        for (const Param& p : ps) ptypes.push_back(p.type);
+        e.args.clear();
+        for (const auto& c : caps) {
+            auto v = makeVar(c.first, e.loc);
+            check(*v);
+            e.args.push_back(std::move(v));
+        }
+        e.methodIndex = static_cast<int>(prog_.methods.size() + pendingLambdas_.size());
+        pendingLambdas_.push_back(std::move(lm));
+        e.type = Type::fnOf(ptypes, ret);
+    }
+
+    void flushLambdas() {
+        for (Expr* p : unresolvedLambdas_)
+            if (p->pending) {
+                error(p->loc, "cannot infer the parameter types of this lambda here; write them, e.g. (int x) => ...");
+                p->pending = false;
+            }
+        unresolvedLambdas_.clear();
+        for (MethodDecl& m : pendingLambdas_) prog_.methods.push_back(std::move(m));
+        pendingLambdas_.clear();
+    }
+
     void checkArg(Expr& e, size_t i, const Type& want) {
         ExprPtr& a = e.args[i];
+        if (a->kind == Expr::Kind::Lambda && a->pending) {
+            a->pending = false;
+            checkLambda(*a, &want);
+        }
         if (a->type != Type::Invalid && !coerce(a, want))
             error(a->loc, "argument " + std::to_string(i + 1) + " of '" + shown(e.text) + "' expects " + typeName(want) +
                               " but got " + typeName(a->type) + conversionHint(a->type, want));
@@ -1655,6 +1976,16 @@ private:
             const ClassInfo& info = cinfo_[static_cast<size_t>(ci)];
             auto it = info.methods.find(e.text);
             if (it == info.methods.end()) {
+                auto fld = info.inst.find(e.text);
+                if (fld != info.inst.end() && prog_.classes[static_cast<size_t>(ci)].fields[static_cast<size_t>(info.instDecl[static_cast<size_t>(fld->second)])].type.isFn()) {
+                    // obj.callback(args): the field holds a function value
+                    e.lhs->preChecked = true;
+                    e.lhs = makeMember(std::move(e.lhs), e.text, e.loc);
+                    e.text.clear();
+                    e.kind = Expr::Kind::CallFn;
+                    checkCallFn(e, true);
+                    return;
+                }
                 if (tryExtension(e)) return;
                 error(e.loc, "class '" + className(ci) + "' has no method '" + e.text + "'");
                 e.type = Type::Invalid;
@@ -1781,6 +2112,16 @@ private:
 
     void checkCall(Expr& e) {
         if (e.text == "$invalid") { e.type = Type::Invalid; return; }  // generic inference already reported it
+        if (const VarInfo* fv = lookup(e.text)) {
+            if (fv->type.isFn()) {  // calling a function value held in a variable
+                const Type ft = fv->type;
+                (void)ft;
+                e.kind = Expr::Kind::CallFn;
+                e.lhs = makeVar(e.text, e.loc);
+                checkCallFn(e);
+                return;
+            }
+        }
         if (ctx_->cls >= 0) {  // inside a class, a bare call may name an overloaded method of it
             const std::vector<int> ov = classOverloads(ctx_->cls, e.text);
             if (!ov.empty()) {

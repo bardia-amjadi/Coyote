@@ -15,7 +15,7 @@ namespace coyote {
 // errors so one mistake yields one diagnostic. `Null` is the type of the literal `null` before it
 // is coerced to a nullable/obj/dyn type. `Dyn` is `obj` plus runtime-validated operations.
 struct Type {
-    enum Kind { Void, Int, String, Bool, Invalid, Array, Double, Char, Guid, Map, Nullable, Obj, Dyn, Null, Class };
+    enum Kind { Void, Int, String, Bool, Invalid, Array, Double, Char, Guid, Map, Nullable, Obj, Dyn, Null, Class, Fn };
 
     Kind kind = Invalid;
     std::shared_ptr<const Type> elem;  // Array/Nullable element, Map value
@@ -43,6 +43,15 @@ struct Type {
         return t;
     }
 
+    // Function type: `fn(int, string) : boolean`. The parameter types are kept in `targs`, the result type in `elem`.
+    static Type fnOf(const std::vector<Type>& params, const Type& ret) {
+        Type t(Fn);
+        t.targs = params;
+        t.elem = std::make_shared<const Type>(ret);
+        return t;
+    }
+    bool isFn() const { return kind == Fn; }
+
     static Type classOf(const std::string& n) {
         Type t(Class);
         t.name = n;
@@ -57,6 +66,7 @@ struct Type {
         if (a.kind != b.kind) return false;
         if (a.kind == Map) return *a.key == *b.key && *a.elem == *b.elem;
         if (a.kind == Class) return a.name == b.name && a.targs == b.targs;
+        if (a.kind == Fn) return a.targs == b.targs && *a.elem == *b.elem;
         return (a.kind != Array && a.kind != Nullable) || *a.elem == *b.elem;
     }
     friend bool operator!=(const Type& a, const Type& b) { return !(a == b); }
@@ -85,6 +95,13 @@ inline std::string typeName(const Type& t) {
         case Type::Obj: return "obj";
         case Type::Dyn: return "dyn";
         case Type::Null: return "null";
+        case Type::Fn: {
+            std::string s = "fn(";
+            for (size_t i = 0; i < t.targs.size(); ++i) s += (i ? ", " : "") + typeName(t.targs[i]);
+            s += ")";
+            if (*t.elem != Type::Void) s += " : " + typeName(*t.elem);
+            return s;
+        }
         case Type::Class: {
             if (!t.targs.empty()) {
                 std::string s = t.name + "<";
@@ -105,10 +122,22 @@ inline std::string mlTypeName(const Type& t) {
         case Type::Map: return "map<" + mlTypeName(*t.key) + "," + mlTypeName(*t.elem) + ">";
         case Type::Nullable: return mlTypeName(*t.elem) + "?";
         case Type::Dyn: return "obj";
+        case Type::Fn: {
+            std::string s = "fn(";
+            for (size_t i = 0; i < t.targs.size(); ++i) s += (i ? "," : "") + mlTypeName(t.targs[i]);
+            return s + ")->" + mlTypeName(*t.elem);
+        }
         case Type::Class: return t.name;  // the mangled name, never the display name
         default: return typeName(t);
     }
 }
+
+struct Param {
+    Type type = Type::String;   // a variadic parameter has type array<T>
+    std::string name;
+    SourceLoc loc;
+    bool variadic = false;      // declared as `T... name`; callers may pass any number of T (or one array<T>)
+};
 
 struct Expr;
 struct Stmt;
@@ -117,7 +146,7 @@ using StmtPtr = std::unique_ptr<Stmt>;
 
 struct Expr {
     enum class Kind { String, Int, Bool, Double, Char, Null, Var, Call, Unary, Binary, ArrayLit, NewArray, NewMap, NewObj, Index,
-                      Member, MethodCall, Convert, Unwrap, IsNull, Is };
+                      Member, MethodCall, Convert, Unwrap, IsNull, Is, Lambda, CallFn };
     // Convert: how `lhs` is turned into `type` (inserted by sema, or written as int(x), double(x), ...).
     enum class Conv { IntToDouble, DoubleToInt, CharToInt, IntToChar, StringToInt, StringToDouble, StringToGuid,
                       ToString, Wrap, Box, Unbox, Retype, Upcast, Downcast };
@@ -133,6 +162,13 @@ struct Expr {
     Type newType;                // NewArray/NewMap: the type being created; Is/explicit conversions: the target type
     std::vector<Type> typeArgs;  // Call: explicit generic arguments (`Id<int>(5)`); removed by generic expansion
     int depth = 1;               // height of this expression tree (set by the parser; bounded)
+    // Lambda: `(int a, b) : int => expr` or `=> { ... }`. Sema lifts the body into a method and turns the node into captures + mkclosure.
+    std::vector<Param> lparams;
+    std::vector<StmtPtr> lbody;  // an expression body is a single `return` statement (exprBody)
+    bool exprBody = false;
+    bool hasLret = false;        // a result type was written: `(int x) : int => ...`
+    Type lret = Type::Void;
+    bool pending = false;        // sema: a lambda whose parameter types come from the context it is passed to
     bool preChecked = false;     // sema already checked this expression (call arguments typed before an overload is chosen)
 
     // Filled in by semantic analysis.
@@ -145,8 +181,9 @@ struct Expr {
 };
 
 struct Stmt {
-    enum class Kind { ExprStmt, VarDecl, Assign, If, While, For, ForEach, Break, Continue, Return, Block };
+    enum class Kind { ExprStmt, VarDecl, Assign, If, While, For, ForEach, Break, Continue, Return, Block, Try, Throw };
     Kind kind = Kind::ExprStmt;
+    bool fieldInit = false;      // Assign: synthesized from a field initializer (may assign readonly/locked fields)
     SourceLoc loc;
     ExprPtr expr;                // ExprStmt call, initializer, assigned value, condition (For: may be null), return value
     ExprPtr target;              // Assign: a Var or Index expression
@@ -156,18 +193,12 @@ struct Stmt {
     StmtPtr init, step;          // For: optional initializer (declaration or assignment) and step (assignment or call)
     std::vector<StmtPtr> body;   // If-then, While, For, Block
     std::vector<StmtPtr> elseBody;
-    bool hasElse = false;
+    bool hasElse = false;       // Try: the catch variable is named in `name` (empty: none); body = try block, elseBody = catch block
 
     int slot = -1;               // VarDecl/ForEach: local slot of the variable (filled by sema)
     int slotArr = -1, slotIdx = -1;  // ForEach: hidden locals holding the array and the index
 };
 
-struct Param {
-    Type type = Type::String;   // a variadic parameter has type array<T>
-    std::string name;
-    SourceLoc loc;
-    bool variadic = false;      // declared as `T... name`; callers may pass any number of T (or one array<T>)
-};
 
 // hand:<module> <name>(<params>) [: <type>]  -- declares a host intrinsic.
 struct HandDecl {
@@ -191,6 +222,7 @@ struct MethodDecl {
     bool isOverride = false;     // declared with 'override' (must replace an inherited method)
     bool isAbstract = false;     // an interface method: a signature without a body
     bool isInit = false;         // synthesized `$init`: the constructor body of a class that is part of a hierarchy
+    bool lifted = false;         // synthesized from a lambda; already checked by sema
     bool isDispatcher = false;   // synthesized: chooses an implementation with isinst tests (emitted by mlgen)
     int initMethod = -1;         // constructors of hierarchy classes: the `$init` method the constructor calls
     std::vector<std::pair<int, int>> cases;  // dispatcher: (class, implementing method), most derived classes first
@@ -220,6 +252,8 @@ struct FieldDecl {
     bool isPrivate = false;
     bool isProtected = false;
     bool isStatic = false;
+    bool isReadonly = false;     // `readonly field`: assigned only by its initializer or, for instance fields, in the class's constructor
+    bool isLocked = false;       // `locked field`: a constant, assigned only by its (constant) initializer
     int owner = -1;              // class that declared the field when it was inherited (-1: the class itself)
 };
 
@@ -238,6 +272,7 @@ struct ClassDecl {
     int unit = 0;                // index into Program::modules
     bool exported = false;
     bool isModel = false;        // a constructor taking every field in order is generated when none is declared
+    bool isShared = false;       // `shared class`: every member is shared (static); it cannot be instantiated
     bool isInterface = false;    // `interface I { method m(...): T }`: signatures only
     std::vector<std::string> typeParams;  // `class Box<T>`: a template; instantiated per set of arguments (generics.cpp)
     std::vector<Type> superTypes;         // `class D : Base<int>, I`: the supertypes as written (names are in superNames)

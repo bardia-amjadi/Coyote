@@ -47,8 +47,21 @@ public:
     std::string run(const std::string& sourcePath) {
         markLive();
         int version = kMlVersion;
+        {
+            std::function<bool(const Stmt&)> hasTry = [&](const Stmt& s) {
+                if (s.kind == Stmt::Kind::Try || s.kind == Stmt::Kind::Throw) return true;
+                if (s.init && hasTry(*s.init)) return true;
+                for (const auto& b : s.body) if (hasTry(*b)) return true;
+                for (const auto& b : s.elseBody) if (hasTry(*b)) return true;
+                return false;
+            };
+            bool any = false;
+            for (const auto& s : prog_.stmts) any = any || hasTry(*s);
+            for (const MethodDecl& m : prog_.methods) for (const auto& s : m.body) any = any || hasTry(*s);
+            if (any) version = 8;  // try/throw need ML 8
+        }
         for (const ClassDecl& c : prog_.classes)
-            if (!c.supers.empty()) version = 7;  // class hierarchies need ML 7
+            if (!c.supers.empty()) version = std::max(version, 7);  // class hierarchies need ML 7
         os_ << "ml " << version << "\n";
         os_ << "source " << quote(sourcePath) << "\n";
         std::set<std::string> hosts;  // several files may declare the same host function
@@ -76,7 +89,18 @@ public:
         }
         function("$main", "() -> void", Type::Void, prog_.mainLocals, prog_.stmts, 0, nullptr);
         os_ << "entry $main\n";
-        return os_.str();
+        std::string out = os_.str();
+        if (version < 6) {  // function values need ML 6
+            bool fn = false;
+            std::istringstream in(out);
+            for (std::string line; std::getline(in, line) && !fn;) {
+                const size_t b = line.find_first_not_of(' ');
+                if (b == std::string::npos || line.compare(b, 8, "push.str") == 0) continue;
+                fn = line.compare(b, 10, "mkclosure ") == 0 || line.compare(b, 7, "callfn ") == 0 || line.find("fn(") != std::string::npos;
+            }
+            if (fn) out.replace(0, out.find('\n'), "ml 6");
+        }
+        return out;
     }
 
 private:
@@ -98,7 +122,7 @@ private:
             work.push_back(static_cast<size_t>(mi));
         };
         std::function<void(const Expr&)> ex = [&](const Expr& e) {
-            if (e.kind == Expr::Kind::Call || e.kind == Expr::Kind::MethodCall || e.kind == Expr::Kind::NewObj || e.kind == Expr::Kind::Member)
+            if (e.kind == Expr::Kind::Call || e.kind == Expr::Kind::MethodCall || e.kind == Expr::Kind::NewObj || e.kind == Expr::Kind::Member || e.kind == Expr::Kind::Lambda)
                 mark(e.methodIndex);
             if (e.lhs) ex(*e.lhs);
             if (e.rhs) ex(*e.rhs);
@@ -214,6 +238,9 @@ private:
         os_ << "  ret\n";
     }
 
+    std::vector<int> loopTry_;  // try depth when each enclosing loop was entered
+    int tryDepth_ = 0;          // active 'try' blocks of the function being generated
+    void leaveTries(size_t downTo) { for (int i = tryDepth_; i > static_cast<int>(downTo); --i) os_ << "  endtry\n"; }
     std::vector<std::pair<std::string, std::string>> loops_;  // (continue label, break label) of enclosing loops
 
     std::string newLabel() { return "L" + std::to_string(labels_++); }
@@ -284,9 +311,9 @@ private:
                 os_ << "label " << top << "\n";
                 expr(*s.expr);
                 os_ << "  jump.false " << end << "\n";
-                loops_.push_back({top, end});
+                loops_.push_back({top, end}); loopTry_.push_back(tryDepth_);
                 for (const auto& c : s.body) stmt(*c);
-                loops_.pop_back();
+                loops_.pop_back(); loopTry_.pop_back();
                 os_ << "  jump " << top << "\n";
                 os_ << "label " << end << "\n";
                 return;
@@ -299,9 +326,9 @@ private:
                     expr(*s.expr);
                     os_ << "  jump.false " << end << "\n";
                 }
-                loops_.push_back({cont, end});
+                loops_.push_back({cont, end}); loopTry_.push_back(tryDepth_);
                 for (const auto& c : s.body) stmt(*c);
-                loops_.pop_back();
+                loops_.pop_back(); loopTry_.pop_back();
                 os_ << "label " << cont << "\n";  // 'continue' lands here, then the step runs
                 if (s.step) stmt(*s.step);
                 os_ << "  jump " << top << "\n";
@@ -318,19 +345,38 @@ private:
                 setLine(s.loc.line);
                 os_ << "  alen\n  lt.int\n  jump.false " << end << "\n";
                 os_ << "  load " << s.slotArr << "\n  load " << s.slotIdx << "\n  aload\n  store " << s.slot << "\n";
-                loops_.push_back({cont, end});
+                loops_.push_back({cont, end}); loopTry_.push_back(tryDepth_);
                 for (const auto& c : s.body) stmt(*c);
-                loops_.pop_back();
+                loops_.pop_back(); loopTry_.pop_back();
                 os_ << "label " << cont << "\n";
                 os_ << "  load " << s.slotIdx << "\n  push.int 1\n  add.int\n  store " << s.slotIdx << "\n";
                 os_ << "  jump " << top << "\n";
                 os_ << "label " << end << "\n";
                 return;
             }
+            case Stmt::Kind::Try: {
+                std::string handler = newLabel(), end = newLabel();
+                os_ << "  try " << handler << "\n";
+                ++tryDepth_;
+                for (const auto& c : s.body) stmt(*c);
+                --tryDepth_;
+                os_ << "  endtry\n  jump " << end << "\n";
+                os_ << "label " << handler << "\n";
+                os_ << "  store " << s.slot << "\n";
+                for (const auto& c : s.elseBody) stmt(*c);
+                os_ << "label " << end << "\n";
+                return;
+            }
+            case Stmt::Kind::Throw:
+                expr(*s.expr);
+                os_ << "  throw\n";
+                return;
             case Stmt::Kind::Break:
+                leaveTries(static_cast<size_t>(loopTry_.back()));
                 os_ << "  jump " << loops_.back().second << "\n";
                 return;
             case Stmt::Kind::Continue:
+                leaveTries(static_cast<size_t>(loopTry_.back()));
                 os_ << "  jump " << loops_.back().first << "\n";
                 return;
             case Stmt::Kind::Block:
@@ -383,6 +429,16 @@ private:
                 return;
             case Expr::Kind::Convert: convert(e); return;
             case Expr::Kind::Var: os_ << "  load " << e.slot << "\n"; return;
+            case Expr::Kind::Lambda:  // closure over the captured values (none for a plain method reference)
+                for (const auto& a : e.args) expr(*a);
+                os_ << "  mkclosure " << fnName(prog_.methods[static_cast<size_t>(e.methodIndex)]) << " " << e.args.size() << "\n";
+                return;
+            case Expr::Kind::CallFn:
+                expr(*e.lhs);
+                for (const auto& a : e.args) expr(*a);
+                setLine(e.loc.line);
+                os_ << "  callfn " << e.args.size() << "\n";
+                return;
             case Expr::Kind::Call: {
                 for (const auto& a : e.args) expr(*a);
                 setLine(e.loc.line);

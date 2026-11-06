@@ -89,6 +89,7 @@ double checkedDouble(double v, const char* fn) {
 void registerAllHosts(HostRegistry& r) {
     registerConsoleHosts(r);
     registerSystemHosts(r);
+    registerWindowsHosts(r);
 
     // con: input
     r.add(HostFunction{"con.readLine", sig({}, Type::String), "console", [](const std::vector<Value>&, HostContext& c) {
@@ -213,6 +214,7 @@ void grantAllPermissions(HostRegistry& r) {
     r.grant("file");
     r.grant("system");
     r.grant("net");
+    r.grant("windows");
 }
 
 void grantDefaultPermissions(HostRegistry& r) {

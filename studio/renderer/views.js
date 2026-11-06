@@ -175,7 +175,7 @@ function renderLibsView() {
       kids.append(ch, ck);
       for (const m of c.members) {
         if (m.private || m.kind === 'ctor') continue;
-        ck.append(row(2, m.kind, m.name, L.signatureOf(m).replace(/^static /, ''), () => App.openLibSource(lib.name, c.file, m.line), m.doc));
+        ck.append(row(2, m.kind, m.name, L.signatureOf(m).replace(/^shared /, ''), () => App.openLibSource(lib.name, c.file, m.line), m.doc));
       }
     }
     for (const m of lib.methods) kids.append(row(1, 'method', m.name, L.signatureOf(m), () => App.openLibSource(lib.name, m.file, m.line), m.doc));
