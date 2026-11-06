@@ -5,22 +5,22 @@ hand:con readLine(): string
 hand:con hasInput(): boolean
 
 # The console: text in and out.
-export class Shell {
+public class Shell {
     # Writes text without a line break.
-    public static method Print(string text) { print(text) }
+    public shared method Print(string text) { print(text) }
     # Writes text followed by a line break.
-    public static method PrintLine(string text) { println(text) }
+    public shared method PrintLine(string text) { println(text) }
     # Writes a prompt (no line break) and reads one line from the keyboard.
-    public static method Prompt(string text): string {
+    public shared method Prompt(string text): string {
         print(text)
         return readLine()
     }
     # Reads one line (without the line break); "" at the end of the input.
-    public static method ReadLine(): string { return readLine() }
+    public shared method ReadLine(): string { return readLine() }
     # Reads a line and converts it to an int; a runtime error when it is not a whole number.
-    public static method ReadInt(): int { return int(readLine()) }
+    public shared method ReadInt(): int { return int(readLine()) }
     # Reads a line and converts it to a double; a runtime error when it is not a number.
-    public static method ReadDouble(): double { return double(readLine()) }
+    public shared method ReadDouble(): double { return double(readLine()) }
     # true while more input can be read.
-    public static method HasInput(): boolean { return hasInput() }
+    public shared method HasInput(): boolean { return hasInput() }
 }

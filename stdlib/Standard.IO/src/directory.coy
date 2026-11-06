@@ -30,13 +30,13 @@ method splitLines(string text): array<string> {
 }
 
 # Folders.
-export class Directory {
+public class Directory {
     # true when the path is an existing folder.
-    public static method Exists(string path): boolean { return exists(path) }
+    public shared method Exists(string path): boolean { return exists(path) }
     # Creates the folder and any missing parents.
-    public static method Create(string path) { create(path) }
+    public shared method Create(string path) { create(path) }
     # Deletes a folder; with recursive = true also everything inside it. false when it did not exist.
-    public static method Delete(string path, boolean recursive): boolean { return delete(path, recursive) }
+    public shared method Delete(string path, boolean recursive): boolean { return delete(path, recursive) }
     # The names inside a folder, sorted; folder names end with "/".
-    public static method List(string path): array<string> { return splitLines(list(path)) }
+    public shared method List(string path): array<string> { return splitLines(list(path)) }
 }

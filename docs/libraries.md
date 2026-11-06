@@ -75,11 +75,32 @@ Under the debugger, `readLine` works too: the PVM sends an `inputRequested` even
 | `Standard.System` | `Environment` (environment variables, arguments, `Exit`, current directory, OS) |
 | `Standard.Http` | `Http` (`Get Post PostJson Send`), `HttpResponse` |
 | `Standard.Collections` | generic `List<T>`, `Stack<T>`, `Queue<T>`, `Set<T>`, `Pair<A, B>`; `Arrays` (`SumInt SortInt MaxInt AverageInt` ...); generic `Reversed<T>`, `IndexOfValue<T>`, `ContainsValue<T>` |
+| `Standard.Windows` | (0.6.3, Windows only; needs the `windows` permission) `MessageBox` (`Show ShowInfo ShowWarning ShowError Ask Confirm`, returns `DialogResult`), `DialogButtons`, `DialogIcon`, `FileDialogs` (`OpenFile SaveFile Folder`), `Clipboard` (`GetText SetText HasText Clear`), `Registry` (`Read ReadInt ReadOr Exists KeyExists Write WriteInt DeleteValue DeleteKey SubKeys Values`), `Processes` (`Start Run IsRunning Kill Open List Find CurrentId`), `Windows` (`List Find Title SetTitle Hide Show Minimize Maximize Restore Close Focus Bounds Move`), `Notifications` (`Show`) |
 | `Standard.Testing` | `Assert` (`True False EqualInt EqualString EqualDouble Fail Finish`) |
 
 Hover or complete any member in Coyote Studio to see its documentation (the `#` comment lines above each member in `stdlib/`).
 
 Method overloading exists since 0.6.1, but the Standard libraries have not been cleaned up yet (planned for 0.6.4), so names such as `AbsInt` / `MinInt` exist next to `Abs` / `Min`.
+
+## Standard.Windows (0.6.3)
+
+The `win` host module backs a library of ordinary Coyote classes, so a dialog result is a real type rather than an int:
+
+```
+use "Standard"
+var r = MessageBox.Show("Save changes?", "Coyote", DialogButtons.YesNoCancel, DialogIcon.Question)
+if (r == DialogResult.Yes) { Shell.PrintLine("saving") }       # DialogResult values are shared objects, so == compares identity correctly
+if (MessageBox.Ask("Continue?", "Coyote")) { }                 # Yes/No as a boolean
+string path = FileDialogs.OpenFile("Open", "Text|*.txt|All|*.*")
+Clipboard.SetText("hello")
+Registry.Write("HKCU\\Software\\Demo", "Name", "Coyote")
+```
+
+* Declared with `hand:win name(...)` (primitive parameter types only; the library wraps them). The functions need the **`windows`** permission
+  (`coyote run` and Studio grant everything; `pvm --allow windows`). Without it a call is a runtime error before anything happens.
+* On a system that is not Windows every function fails with `host function 'win.<name>' failed: the win.* functions work only on Windows` (a catchable error).
+* Not native: a program using it runs as a bundled executable (PVM inside) under `coyote-llvm`.
+* Registry keys are written `HKCU\\Software\\X` (also `HKLM`, `HKCR`, `HKU`, `HKCC`); strings are UTF-8 on the Coyote side.
 
 ## Not implemented
 
@@ -95,7 +116,7 @@ List<int> xs = new List<int>()          # generic: the element type goes in angl
 xs.Add(3)
 xs.Add(1)
 Shell.PrintLine("count " + xs.Count)     # Count is a property
-for (var x in xs.ToArray()) { Shell.PrintLine("" + x) }
+in (var x of xs.ToArray()) { Shell.PrintLine("" + x) }
 
 Stack<string> st = new Stack<string>()
 st.Push("a")

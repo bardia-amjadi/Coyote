@@ -63,10 +63,11 @@ add_library(pvm_core STATIC
   src/pvm/ops.cpp
   src/pvm/host.cpp
   src/pvm/host_sys.cpp
+  src/pvm/host_win.cpp
   src/pvm/debugger.cpp)
 target_include_directories(pvm_core PUBLIC src/pvm)
 if(WIN32)
-  target_link_libraries(pvm_core PUBLIC winhttp)
+  target_link_libraries(pvm_core PUBLIC winhttp user32 comdlg32 shell32 advapi32 ole32)
 endif()
 coyote_target_defaults(pvm_core)
 
@@ -108,7 +109,7 @@ coyote_target_defaults(cdt)
 
 # The standard library: every project under stdlib/ is packed with the compiler we just built into <tools>/libs
 # (standard.io.lib, standard.text.lib, ..., and the umbrella standard.lib that requires them all).
-set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard.Collections Standard.Testing Standard)
+set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard.Collections Standard.Testing Standard.Windows Standard)
 file(GLOB_RECURSE COYOTE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/*.coy ${CMAKE_SOURCE_DIR}/stdlib/*/packages.json)
 if(CMAKE_CROSSCOMPILING)
   message(STATUS "cross-compiling: the standard libraries are not packed (the compiler cannot run on this machine); copy them into <tools>/libs")

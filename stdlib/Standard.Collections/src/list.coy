@@ -3,8 +3,8 @@
 # Elements are compared with == (value comparison for int, string, boolean, double, char; identity for objects).
 
 # A growable list.
-export class List<T> {
-    array<T> items = new array<T>(0)
+public class List<T> {
+    field array<T> items = new array<T>(0)
 
     constructor() { }
     # Number of elements.
@@ -15,7 +15,7 @@ export class List<T> {
     method Add(T value) { items.push(value) }
     # Adds every element of an array at the end.
     method AddAll(array<T> values) {
-        for (var v in values) { items.push(v) }
+        in (var v of values) { items.push(v) }
     }
     # The element at an index (a runtime error when the index is outside the list).
     method Get(int index): T { return items[index] }
@@ -84,9 +84,9 @@ export class List<T> {
 }
 
 # A last-in, first-out stack.
-export class Stack<T> {
-    array<T> items = new array<T>(0)
-    int size = 0
+public class Stack<T> {
+    field array<T> items = new array<T>(0)
+    field int size = 0
 
     constructor() { }
     property int Count { get { return size } }
@@ -108,9 +108,9 @@ export class Stack<T> {
 }
 
 # A first-in, first-out queue.
-export class Queue<T> {
-    array<T> items = new array<T>(0)
-    int head = 0
+public class Queue<T> {
+    field array<T> items = new array<T>(0)
+    field int head = 0
 
     constructor() { }
     property int Count { get { return items.length - head } }
@@ -142,8 +142,8 @@ export class Queue<T> {
 }
 
 # A set of distinct values (linear search: meant for small sets).
-export class Set<T> {
-    List<T> list = new List<T>()
+public class Set<T> {
+    field List<T> list = new List<T>()
 
     constructor() { }
     property int Count { get { return list.Count } }
@@ -161,12 +161,12 @@ export class Set<T> {
 }
 
 # Two values together.
-export class Pair<A, B> {
-    A first
-    B second
+public class Pair<A, B> {
+    field A first
+    field B second
 
     constructor(A first, B second) {
-        this.first = first
-        this.second = second
+        here.first = first
+        here.second = second
     }
 }

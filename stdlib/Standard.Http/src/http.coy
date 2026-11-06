@@ -7,27 +7,27 @@ hand:http header(string name): string
 hand:http error(): string
 
 # The answer to a request. When the request could not be made at all, Status is 0 and Error says why.
-export class HttpResponse {
-    public int Status = 0
-    public string Body = ""
-    public string Error = ""
-    private string rawHeaders = ""
+public class HttpResponse {
+    public field int Status = 0
+    public field string Body = ""
+    public field string Error = ""
+    hidden field string rawHeaders = ""
 
     constructor(int status, string body, string rawHeaders, string error) {
-        this.Status = status
-        this.Body = body
-        this.rawHeaders = rawHeaders
-        this.Error = error
+        here.Status = status
+        here.Body = body
+        here.rawHeaders = rawHeaders
+        here.Error = error
     }
     # true for status 200 to 299.
-    property boolean Ok { get { return this.Status >= 200 && this.Status < 300 } }
+    property boolean Ok { get { return here.Status >= 200 && here.Status < 300 } }
     # The value of a response header ("" when absent); the name is not case sensitive.
     method Header(string name): string {
         string wanted = name
-        return headerFrom(this.rawHeaders, wanted)
+        return headerFrom(here.rawHeaders, wanted)
     }
     # All headers, one "Name: value" per line.
-    property string Headers { get { return this.rawHeaders } }
+    property string Headers { get { return here.rawHeaders } }
 }
 
 hand:text lower(string s): string
@@ -57,15 +57,15 @@ method headerFrom(string raw, string name): string {
     return ""
 }
 
-export class Http {
+public class Http {
     # GET a URL (15 second timeout).
-    public static method Get(string url): HttpResponse { return Send("GET", url, "", "", 15000) }
+    public shared method Get(string url): HttpResponse { return Send("GET", url, "", "", 15000) }
     # POST text; headers is "" or lines like "Content-Type: text/plain" separated by "\n".
-    public static method Post(string url, string payload, string extraHeaders): HttpResponse { return Send("POST", url, extraHeaders, payload, 15000) }
+    public shared method Post(string url, string payload, string extraHeaders): HttpResponse { return Send("POST", url, extraHeaders, payload, 15000) }
     # POST a JSON text with the right Content-Type.
-    public static method PostJson(string url, string json): HttpResponse { return Send("POST", url, "Content-Type: application/json", json, 15000) }
+    public shared method PostJson(string url, string json): HttpResponse { return Send("POST", url, "Content-Type: application/json", json, 15000) }
     # Any method (GET, POST, PUT, DELETE, ...), with headers, a body and a timeout in milliseconds.
-    public static method Send(string verb, string url, string extraHeaders, string payload, int timeoutMs): HttpResponse {
+    public shared method Send(string verb, string url, string extraHeaders, string payload, int timeoutMs): HttpResponse {
         int status = request(verb, url, extraHeaders, payload, timeoutMs)
         if (status == 0) { return new HttpResponse(0, "", "", error()) }
         return new HttpResponse(status, body(), headers(), "")

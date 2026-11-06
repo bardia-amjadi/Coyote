@@ -1,8 +1,8 @@
 # Standard.Math: integer helpers and simple statistics.
 
-export class Numbers {
+public class Numbers {
     # Greatest common divisor (always >= 0).
-    public static method Gcd(int a, int b): int {
+    public shared method Gcd(int a, int b): int {
         int x = a
         int y = b
         if (x < 0) { x = 0 - x }
@@ -15,14 +15,14 @@ export class Numbers {
         return x
     }
     # Least common multiple.
-    public static method Lcm(int a, int b): int {
+    public shared method Lcm(int a, int b): int {
         if (a == 0 || b == 0) { return 0 }
         int g = Gcd(a, b)
         int r = (a / g) * b
         if (r < 0) { r = 0 - r }
         return r
     }
-    public static method IsPrime(int n): boolean {
+    public shared method IsPrime(int n): boolean {
         if (n < 2) { return false }
         int i = 2
         while (i * i <= n) {
@@ -32,7 +32,7 @@ export class Numbers {
         return true
     }
     # n! (a runtime error on overflow, from 13 up).
-    public static method Factorial(int n): int {
+    public shared method Factorial(int n): int {
         int r = 1
         int i = 2
         while (i <= n) {
@@ -42,7 +42,7 @@ export class Numbers {
         return r
     }
     # The n-th Fibonacci number (0, 1, 1, 2, ...).
-    public static method Fibonacci(int n): int {
+    public shared method Fibonacci(int n): int {
         int a = 0
         int b = 1
         int i = 0
@@ -55,19 +55,19 @@ export class Numbers {
         return a
     }
     # x clamped between low and high.
-    public static method ClampInt(int x, int low, int high): int {
+    public shared method ClampInt(int x, int low, int high): int {
         if (x < low) { return low }
         if (x > high) { return high }
         return x
     }
     # -1, 0 or 1.
-    public static method Sign(int x): int {
+    public shared method Sign(int x): int {
         if (x < 0) { return -1 }
         if (x > 0) { return 1 }
         return 0
     }
     # Converts degrees to radians.
-    public static method ToRadians(double degrees): double { return degrees * 3.141592653589793 / 180.0 }
+    public shared method ToRadians(double degrees): double { return degrees * 3.141592653589793 / 180.0 }
     # Converts radians to degrees.
-    public static method ToDegrees(double radians): double { return radians * 180.0 / 3.141592653589793 }
+    public shared method ToDegrees(double radians): double { return radians * 180.0 / 3.141592653589793 }
 }

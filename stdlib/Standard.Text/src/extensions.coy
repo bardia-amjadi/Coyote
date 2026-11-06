@@ -2,40 +2,40 @@
 # Extension names are plain global names; if one clashes with your own method, call the Text class form (Text.Upper(s)) and rename yours.
 
 # Number of characters.
-export method Length(this string s): int { return Text.Length(s) }
+public method Length(here string s): int { return Text.Length(s) }
 # true for "".
-export method IsEmpty(this string s): boolean { return Text.IsEmpty(s) }
+public method IsEmpty(here string s): boolean { return Text.IsEmpty(s) }
 # true for "" or only spaces, tabs and line breaks.
-export method IsBlank(this string s): boolean { return Text.IsBlank(s) }
+public method IsBlank(here string s): boolean { return Text.IsBlank(s) }
 # count characters from start; a runtime error when start is outside the text.
-export method Substring(this string s, int start, int count): string { return Text.Substring(s, start, count) }
+public method Substring(here string s, int start, int count): string { return Text.Substring(s, start, count) }
 # The character at an index.
-export method CharAt(this string s, int index): char { return Text.CharAt(s, index) }
+public method CharAt(here string s, int index): char { return Text.CharAt(s, index) }
 # Index of the first occurrence of part, or -1.
-export method IndexOf(this string s, string part): int { return Text.IndexOf(s, part) }
+public method IndexOf(here string s, string part): int { return Text.IndexOf(s, part) }
 # true when part occurs in s.
-export method Contains(this string s, string part): boolean { return Text.Contains(s, part) }
-export method StartsWith(this string s, string prefix): boolean { return Text.StartsWith(s, prefix) }
-export method EndsWith(this string s, string suffix): boolean { return Text.EndsWith(s, suffix) }
+public method Contains(here string s, string part): boolean { return Text.Contains(s, part) }
+public method StartsWith(here string s, string prefix): boolean { return Text.StartsWith(s, prefix) }
+public method EndsWith(here string s, string suffix): boolean { return Text.EndsWith(s, suffix) }
 # ASCII letters only.
-export method Upper(this string s): string { return Text.Upper(s) }
-export method Lower(this string s): string { return Text.Lower(s) }
+public method Upper(here string s): string { return Text.Upper(s) }
+public method Lower(here string s): string { return Text.Lower(s) }
 # Removes spaces, tabs and line breaks at both ends.
-export method Trim(this string s): string { return Text.Trim(s) }
+public method Trim(here string s): string { return Text.Trim(s) }
 # Replaces every occurrence of find (not empty) with with.
-export method Replace(this string s, string find, string with): string { return Text.Replace(s, find, with) }
+public method Replace(here string s, string find, string with): string { return Text.Replace(s, find, with) }
 # s repeated times times.
-export method Repeat(this string s, int times): string { return Text.Repeat(s, times) }
+public method Repeat(here string s, int times): string { return Text.Repeat(s, times) }
 # Pads on the left with pad (one or more characters) until the text is at least width characters.
-export method PadLeft(this string s, int width, string pad): string { return Text.PadLeft(s, width, pad) }
-export method PadRight(this string s, int width, string pad): string { return Text.PadRight(s, width, pad) }
+public method PadLeft(here string s, int width, string pad): string { return Text.PadLeft(s, width, pad) }
+public method PadRight(here string s, int width, string pad): string { return Text.PadRight(s, width, pad) }
 # The characters in reverse order.
-export method Reverse(this string s): string { return Text.Reverse(s) }
+public method Reverse(here string s): string { return Text.Reverse(s) }
 # Cuts s at every occurrence of sep (not empty). "a,b,,c" split at "," -> ["a", "b", "", "c"].
-export method Split(this string s, string sep): array<string> { return Text.Split(s, sep) }
+public method Split(here string s, string sep): array<string> { return Text.Split(s, sep) }
 # The parts joined with sep between them.
-export method Join(this array<string> parts, string sep): string { return Text.Join(parts, sep) }
+public method Join(here array<string> parts, string sep): string { return Text.Join(parts, sep) }
 # The text parsed as an int (a runtime error when it is not a number).
-export method ToInt(this string s): int { return int(s) }
+public method ToInt(here string s): int { return int(s) }
 # The text parsed as a double.
-export method ToDouble(this string s): double { return double(s) }
+public method ToDouble(here string s): double { return double(s) }

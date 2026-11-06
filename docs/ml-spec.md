@@ -4,7 +4,7 @@ ML is the textual, versioned interface between the Coyote compiler and execution
 compiler (`coyote`) emits it; the PVM (`pvm`) loads, verifies and executes it. The two programs
 share **no code**, only this document.
 
-Versions: the compiler emits **version 5**, or **version 6** when the program uses function values. The PVM accepts versions **1 to 7**. Each version is a
+Versions: the compiler emits **version 5**, **6** when the program uses function values (lambdas, `fn` types), **7** for class hierarchies and **8** when it uses `try`/`throw` (the highest needed). The PVM accepts versions **1 to 8**. Each version is a
 strict superset of the previous one; a file that uses a construct newer than its declared version
 is rejected with a message naming the construct. Any future change that breaks existing ML bumps the version.
 
@@ -215,7 +215,7 @@ stack. Recursion is allowed. Nesting deeper than **5000 frames** is a runtime er
    the call**: a program may declare host functions it never reaches (a library bundles many)
    without being granted all of them, and a call without the permission is a runtime error that
    happens before the function does anything. The `pvm` CLI grants `console`, `time` and `random`
-   by default; more with `--allow <permission>` (`file`, `system`, `net`) or `--allow-all`.
+   by default; more with `--allow <permission>` (`file`, `system`, `net`, `windows`) or `--allow-all`.
    Functions with no permission (`math.*`, `text.*`) are always allowed.
 
 Built-in host functions (the full list with signatures is in [libraries.md](libraries.md)):
@@ -229,6 +229,7 @@ Built-in host functions (the full list with signatures is in [libraries.md](libr
 | `file`, `dir` | `file` | read/write/copy/move/delete files, list/create/delete folders |
 | `env`, `sys` | `system` | environment variables, program arguments, `exit`, working directory |
 | `http` | `net` | `request`, `body`, `headers`, `header`, `error` |
+| `win` | `windows` | (0.6.3) `messageBox`, `openFileDialog`, `saveFileDialog`, `folderDialog`, `clipboard*`, `reg*`, `process*`, `shellOpen`, `window*`, `notify`; real on Windows, a catchable runtime error elsewhere. Signatures: `stdlib/Standard.Windows/src/*.coy`. |
 
 ## Verification
 
@@ -280,11 +281,21 @@ are not on the heap. Native resources (files, sockets) will need explicit lifeti
 Call depth 5000. ML files over 32 MiB are rejected by the `pvm` CLI (exit 2) because the loader
 keeps every instruction in memory. The verifier's memory is linear in program size.
 
-## Exceptions
+## Exceptions (version 8)
 
-No exception mechanism exists yet. A failing instruction or host function aborts execution with
-`<file.coy>:<line>: runtime error: ...` and exit code 1. Exception semantics are specified when
-`throw`/`try` are added.
+Without a handler, a failing instruction, a host function or `throw` aborts execution with
+`<file.coy>:<line>: runtime error: ...` and exit code 1. Version 8 adds handlers:
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `try <label>` | `->` | the operand stack must be empty; registers `<label>` as the handler of the current function until the matching `endtry` |
+| `endtry` | `->` | removes the innermost handler of the current function (every normal exit from a `try` region executes one) |
+| `throw` | `string ->` | raises a runtime error whose message is the string |
+
+When an error is raised, the PVM looks for the innermost active handler, starting in the current function and then in its callers (functions
+above are abandoned; a function's handlers die with it). The handler's function resumes at the label with its operand stack cleared
+and the error message (`string`) pushed. A handler is removed when it is used. The verifier checks that the label exists, that the stack is empty at `try`, and
+treats the label as reachable with a one-element stack `[string]`. Locals keep their values. Out-of-memory (heap) errors cannot be handled.
 
 ## Example
 
@@ -307,7 +318,7 @@ method fib(int n) : int {          ml 2
 
 ## Planned (not implemented)
 
-Exceptions, type metadata, and an optional
+Type metadata and an optional
 instruction budget.
 
 ## Version 7: class hierarchies

@@ -44,8 +44,8 @@ line is passed to the program (`Environment.Arg`). It is not faster than the PVM
 
 ## What the native (clang) path does not support (such programs are bundled instead)
 
-`double`, `char`, `Guid`, arrays, maps, nullable types, `obj`/`dyn`, classes and globals, any other
-host function, and a backward jump to a label not reached by fall-through (the compiler never
+`double`, `char`, `Guid`, arrays, maps, nullable types, `obj`/`dyn`, classes and globals, function values (lambdas), `try`/`throw`, any other
+host function (including every `win.*` function of `Standard.Windows`), and a backward jump to a label not reached by fall-through (the compiler never
 generates one).
 
 ## Known differences from the PVM

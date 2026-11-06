@@ -1,4 +1,4 @@
-# Coyote language — what is implemented today (0.6)
+# Coyote language — what is implemented today (0.6.3)
 
 This page describes only what the current compiler accepts. Everything else in the language
 design is **rejected with an error**, never silently ignored. Syntax marked *provisional* is a
@@ -138,14 +138,14 @@ var alias = nums                   # same array: alias[0] = 9 changes nums too
 * `[`, `.` after an expression must be on the same line as the expression.
 * Arrays are garbage collected (see `architecture.md`).
 
-## Namespaces, `use` and `export`
+## Namespaces, `use` and `public`
 
 ```
 # src/models/point.coy
 namespace MyApp.Models                 # must be the first line of the file (comments may come before it)
-export model Point {
-    int x
-    int y
+public model Point {
+    field int x
+    field int y
 }
 
 # src/main.coy  (the entry file)
@@ -169,8 +169,11 @@ var p = new Point(3, 4)
 * **The files of one namespace see each other's exports without `use`**: a file declaring `namespace MyApp.Models` sees the exports of
   every other file of `MyApp.Models`. Only the entry file may contain top-level statements; another program's statements in a file
   that is merely a same-namespace neighbour are ignored (a file named by `use` that has top-level statements is an error).
-* **`export`** controls what other namespaces see: `export method`, `export class`, `export model`, `export interface`. A method that is not
-  exported is private to its file. Private methods of different files may share a name.
+* **`public`** controls what other namespaces see: `public method`, `public class`, `public model`, `public interface` (`export` was
+  replaced by `public` in 0.6.3; the old word gives an error that says so). A top-level declaration without `public` is private to its
+  file. Private methods of different files may share a name.
+* **The entry file may declare classes, models, interfaces and methods itself** and use other namespaces at once (`use "MyApp.Models"`), see
+  *Classes in the entry file* below.
 * `use` and `namespace` appear only at the top level. `use` is not transitive: a file sees the exports of what *it* uses (and of its own
   namespace), not of what those files use. Two uses that export the same name, or a use that clashes with a local declaration, is an error.
 * **`import` was removed in 0.6.** Replace `import "lib/math.coy"` by `namespace Lib` at the top of that file and `use "Lib"`;
@@ -188,7 +191,7 @@ ages.containsKey("bob")           # boolean
 ages.remove("ann")                # boolean: did it exist
 int? maybe = ages.tryGet("zed")   # null when missing
 ages.length                       # number of entries
-for (var k in ages.keys()) { }    # keys()/values() return arrays in insertion order
+in (var k of ages.keys()) { }    # keys()/values() return arrays in insertion order
 ```
 
 ## Obj and dyn
@@ -209,42 +212,81 @@ dynamic operators; its results are `dyn`. Errors name the runtime types involved
 
 ## For-each
 
-`for (var x in array) { }` or `for (T x in array) { }` iterates an array (the array expression
+`in (var x of array) { }` or `in (T x of array) { }` (0.6.3; the old `for (var x in array)` is an error that shows the new form) iterates an array (the array expression
 is evaluated once; the loop reads the live length). `break` and `continue` work. A map must be
-iterated through `.keys()` or `.values()`; `for (var k in map)` (0.6.1) is shorthand for `for (var k in map.keys())`.
+iterated through `.keys()` or `.values()`; `in (var k of map)` is shorthand for `in (var k of map.keys())`.
 
 ## Classes and models
 
 ```
 class Counter {
-    static int made = 0           # static field, one per class (initialized before the program runs)
-    int count = 10                # instance field with an initializer
-    private string label          # private: only code of this class may use it
-    property int Doubled { get { return this.count * 2 } }   # computed, read-only property
+    shared field int made = 0           # shared field, one per class (initialized before the program runs)
+    field int count = 10                # instance field with an initializer
+    hidden field string label          # hidden: only code of this class may use it
+    property int Doubled { get { return here.count * 2 } }   # computed, read-only property
     property int Step             # auto-property (hidden backing field, public get and set)
 
-    constructor(string label, int step) { this.label = label; this.Step = step; made = made + 1 }
+    constructor(string label, int step) { here.label = label; here.Step = step; made = made + 1 }
     method bump() { count += Step }
-    static method total(): int { return made }
+    shared method total(): int { return made }
 }
 model Point {                      # 'model': a constructor taking every field in order is generated
-    int x
-    int y
+    field int x
+    field int y
 }
 Counter c = new Counter("a", 3)
 c.bump()
 ```
 
+Since 0.6.3 every member says what it is: `field` or `property` comes before the type (`model` bodies too), and modifiers come first.
+`private`, `static` and `this` became `hidden`, `shared` and `here`; the old words are reserved and the compiler answers with the new name.
+
+```
+public class Tools {
+    public shared locked field int Max = 10          # constant: only its initializer may set it
+    public readonly field string Name = "tools"      # set by the initializer or in this class's constructor only
+    hidden field int calls = 0                       # hidden = only this class (was private)
+    public field Title = "hello"                     # typeless: the type comes from the literal (int, double, string, char, boolean)
+    public property string Label { get; set; } = "x" # auto property with an initial value
+    public property int Id { get; } = 7              # get-only auto property: only its initializer sets it
+    public method GiveSpecialNumber(): int { calls += 1; return Max * 4 + 2 }
+}
+Shell.PrintLine(new Tools().GiveSpecialNumber())     # 'new' can be used inside a larger expression
+```
+
+* **Modifiers** (any order before `field`/`property`/`method`/`constructor`): `public` (default for members), `hidden`, `protected`, `shared`,
+  `override`, `locked`, `readonly`. `locked` and `readonly` apply to fields only.
+* **`locked`** is a constant. Its initializer must be a constant expression (literals, operators, conversions, other `locked` fields) and
+  it can never be assigned. **`readonly`** can be set by its initializer, or (instance fields) in a constructor of the class that declares it.
+* **`shared`** members belong to the class. **`shared class X { ... }`** makes every member shared; such a class cannot be instantiated with `new`.
+* **`public class`**, `public model`, `public interface` and `public method` at the top level are visible to other namespaces (replaces `export`).
+* `here` is the current object (replaces `this`); `here T name` marks an extension method's receiver.
+* Mixing in the old words gives, e.g. `'private' was renamed to 'hidden'`.
+* **Migrating old code:** `python3 tools/migrate-0.6.3.py file.coy ...` rewrites the keywords, adds `field`, and converts `for (x in xs)` loops in place (class bodies written on one line must be edited by hand).
+
+### Classes in the entry file
+
+The entry file (the one with top-level statements) may declare classes, models, interfaces and methods and `use` other namespaces:
+
+```
+namespace MyApp
+use "Standard"
+use "MyApp.Models"
+
+class Local { public method Hi(): string { return "hi" } }
+Shell.PrintLine(new Local().Hi())
+```
+
 * A class instance is a reference: `Counter b = a` makes both names refer to one object (copy fields explicitly).
 * Fields default to `0`, `""`, `false`, `null`; a field of class type must therefore be nullable (`Node? next`) to start empty.
   Field initializers run, in declaration order, at the start of the constructor.
-* Inside instance methods bare names resolve to locals first, then fields/methods of the class (`this.x` is always allowed);
-  static methods cannot use instance members.
+* Inside instance methods bare names resolve to locals first, then fields/methods of the class (`here.x` is always allowed);
+  shared methods cannot use instance members.
 * A class has at most one constructor (constructors cannot be overloaded); without one, a class gets a no-argument constructor and a model gets the all-fields one.
-  `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `private`.
-* `export class` / `export model` make a class visible to the files that `use` its namespace; it can be named as a type there.
+  `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `hidden`.
+* `public class` / `public model` make a class visible to the files that `use` its namespace; it can be named as a type there.
 * Compound assignment (`+=` ...) works on variables and on fields (`x.count += 1`, `count += Step`).
-* Inheritance and interfaces: see the next section. Not implemented: constructor overloading, static properties, operators on objects, `==` structural comparison
+* Inheritance and interfaces: see the next section. Not implemented: constructor overloading, shared properties, operators on objects, `==` structural comparison
   (`==` on two objects compares identity), object printing (`string(obj)` is an error).
 
 ## Inheritance and interfaces
@@ -257,8 +299,8 @@ interface Shape {                       # signatures only: no fields, no bodies
 interface Solid : Shape { method Volume(): double }    # an interface can extend interfaces
 
 class Animal {
-    string name
-    protected int legs = 4              # visible in Animal and its subclasses
+    field string name
+    protected field int legs = 4              # visible in Animal and its subclasses
     constructor(string n) { name = n }
     method Speak(): string { return "..." }
     method Describe(): string { return name + " says " + Speak() }   # Speak() is virtual
@@ -284,7 +326,7 @@ if (a is Dog) { Dog d = a as Dog }      # 'is' tests the real class; 'as' is a c
   `class 'C' must implement 'M(): int' required by 'I'`. Interfaces cannot be instantiated.
 * `constructor(...) : base(args)` calls the base constructor first; if omitted, `base()` is called implicitly (so the base
   needs a constructor that takes no arguments). Field initializers of each class run before its own constructor body.
-* `private` members are visible only inside their own class; `protected` also in subclasses.
+* `hidden` members are visible only inside their own class; `protected` also in subclasses.
 * `x as T` converts a class value to `T`: an upcast is always fine, a downcast fails at run time with `invalid cast` when
   the object is not a `T`. `x is T` is true for `T` or any subclass. Unrelated classes are a compile-time error.
 * `a == b` between objects still compares identity; arrays and `T?` are not covariant (`array<Dog>` is not an `array<Animal>`).
@@ -297,13 +339,13 @@ if (a is Dog) { Dog d = a as Dog }      # 'is' tests the real class; 'as' is a c
 
 ```
 class Box<T> {                              # a generic class: T is replaced by the type you give
-    T value
+    field T value
     constructor(T v) { value = v }
     method Get(): T { return value }
 }
 class Pair<K, V> {
-    K key
-    V val
+    field K key
+    field V val
     constructor(K k, V v) { key = k; val = v }
     method Swap(): Pair<V, K> { return new Pair<V, K>(val, key) }
 }
@@ -358,18 +400,18 @@ sum()  sum(1)  sum(1, 2, 3)                 # extra arguments are packed into an
 sum(existing)                               # or pass one array<int> directly
 method join(string sep, string... parts): string { ... }
 
-method shout(this string s): string { return s + "!" }   # extension method
+method shout(here string s): string { return s + "!" }   # extension method
 "hi".shout()                                # same as shout("hi")
-method total(this array<int> a): int { return sum(a) }
+method total(here array<int> a): int { return sum(a) }
 ```
 
 * A variadic parameter must be the last one; at most one. `hand:` declarations cannot be variadic.
   Passing exactly one argument that already has the array type passes the array itself (no wrapping).
   Methods, class methods and constructors can be variadic.
-* An extension method is a top-level method whose first parameter is marked `this`. `recv.name(...)`
+* An extension method is a top-level method whose first parameter is marked `here`. `recv.name(...)`
   uses it only when the receiver has no built-in method (`push`, `copy`, map methods...) or class method
   of that name, so extensions cannot override those. It is also callable as a plain function. Extensions
-  from another file need `export method` and a `use` of its namespace, like any method. Class members cannot be extensions,
+  from another file need `public method` and a `use` of its namespace, like any method. Class members cannot be extensions,
   and extensions do not apply to `dyn` receivers (their calls are resolved at run time).
 * Both are compile-time rewrites: the ML and the PVM are unchanged.
 
@@ -415,6 +457,57 @@ and `step` is an assignment or a call. A variable declared in `init` is visible 
 `x op= v` means `x = x op v`, with the same typing and runtime errors as the plain operator.
 `break`/`continue` outside a loop are compile errors; they never cross a method boundary.
 
+## Function values and lambdas (0.6.2)
+
+```
+fn(int) : int f            # a function type: parameter types, then ': result' (no result means void)
+fn(int, int) : int add = (int a, int b) => a + b      # a lambda with an expression body
+fn(int) : int inc = x => x + 1                         # parameter types may be left out when the context gives the type
+fn(int) : string sign = (int n) : string => {          # a block body; ': type' after the parameters names the result
+    if (n < 0) { return "neg" }
+    return "pos"
+}
+fn() hello = () => println("hi")                       # no parameters, no result
+println("" + add(1, 2) + " " + inc(4))                 # call a function value like a method
+fn(int) : int d = Double                               # a top-level (non-overloaded) method used as a value
+method Apply(fn(int) : int f, int x) : int { return f(x) }
+Apply(n => n * 3, 5)                                   # lambda arguments take their types from the parameter
+method Make(int k) : fn(int) : int { return x => x + k }
+Make(3)(4)                                             # calling the result of a call
+obj.callback(5)                                        # a field of function type is called the same way
+```
+
+* A lambda **captures by value**: variables of the enclosing method that its body mentions are copied when the lambda is created
+  (this is how the PVM's closures work). Arrays, maps and objects are shared, so a change made through them is seen on both sides;
+  assigning to a captured variable inside the lambda is a compile error. Inside a class method a lambda can use `here`, fields and other methods.
+* A lambda's own local variables must not reuse the name of a variable of the enclosing method (the same rule as for any redeclaration).
+* Types of untyped parameters come from a declared variable type, a method parameter, a return type or an assignment. `var f = x => x` has no
+  context, so it is an error: write `(int x) => x`. Result types of expression lambdas are inferred when no type is given.
+* Function values cannot be `null`, are not nullable (`fn(int) : int?` returns an `int?`), cannot be boxed into `obj`/`dyn` and cannot be compared. A function-typed
+  field or element that was never set holds a null reference; calling it is the runtime error `null reference: cannot call a null function value`.
+* Generic inference does not look into lambdas: for `Map<T, R>(xs, f)` write `Map<int, string>(xs, f)`. Overloaded methods cannot be used as values.
+* Not in 0.6.2: a lambda cannot be `async`, recursive through itself (use a method) or change captured variables.
+* Native backend: programs using function values or `try` are outside the native subset (see [llvm](llvm.md)) and run as bundled executables.
+
+## Errors: `try`, `catch`, `throw` (0.6.2)
+
+```
+try {
+    risky()
+} catch (e) {              # also: catch (string e)  or just  catch { ... }
+    println("failed: " + e)
+}
+throw "something went wrong"       # the message is a string
+```
+
+* An error is a **string message**. `throw "text"` raises one; every runtime error (division by zero, array index out of range, null reference,
+  `int("zz")`, failed host functions, call stack overflow, ...) is raised the same way and can be caught: `e` holds the message without the file and line.
+* The error unwinds method calls up to the nearest enclosing `try`. An error nobody catches ends the program exactly like a runtime error:
+  `<file>:<line>: runtime error: <message>` and exit code 1. Rethrow with `throw e` (or `throw "more: " + e`).
+* `return`, `break` and `continue` work inside `try` and `catch`. A `try` needs a `catch`; there is no `finally` yet.
+* Out-of-memory errors are not catchable. Variables assigned in the `try` block keep the values they had when the error happened.
+* `try`, `catch`, `throw` are keywords since 0.6.2 (and `fn` is read as a type when followed by `(`).
+
 ## Methods *(provisional syntax)*
 
 ```
@@ -440,12 +533,12 @@ host function; the PVM runs it only if it is registered and permitted (see `ml-s
 
 Using any of these gives `'<word>' is not supported yet` (and they cannot be used as names):
 
-`hidden created here operator module`
+`created operator module`
 
 `import` was removed in 0.6 (use `namespace` + `use`); `namespace` is a keyword now.
 
 Also not implemented: negative literals
-in `hand` calls (use an expression), top-level globals (use `static` class fields), constructor overloading, static properties, closures/lambdas, map literals, iterating strings directly,
+in `hand` calls (use an expression), top-level globals (use `shared` class fields), constructor overloading, shared properties, map literals, iterating strings directly,
 member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in array/map ones.
 
 ## Design decisions recorded so far

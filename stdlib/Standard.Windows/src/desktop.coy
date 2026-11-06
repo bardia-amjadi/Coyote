@@ -1,0 +1,153 @@
+# Standard.Windows, part 3: the registry, processes, windows and notifications. Windows only, "windows" permission.
+hand:win regRead(string key, string name): string
+hand:win regExists(string key, string name): boolean
+hand:win regWrite(string key, string name, string value)
+hand:win regWriteInt(string key, string name, int value)
+hand:win regDeleteValue(string key, string name)
+hand:win regDeleteKey(string key)
+hand:win regSubKeys(string key): string
+hand:win regValues(string key): string
+hand:win processList(): string
+hand:win processStart(string program, string arguments): int
+hand:win processRun(string program, string arguments, int timeoutMillis): int
+hand:win processIsRunning(int id): boolean
+hand:win processKill(int id): boolean
+hand:win processId(): int
+hand:win shellOpen(string target): boolean
+hand:win windowList(): string
+hand:win windowFind(string title): int
+hand:win windowTitle(int handle): string
+hand:win windowSetTitle(int handle, string title)
+hand:win windowShow(int handle, int command)
+hand:win windowClose(int handle)
+hand:win windowFocus(int handle): boolean
+hand:win windowRect(int handle): string
+hand:win windowMove(int handle, int x, int y, int width, int height)
+hand:win notify(string title, string text, int millis)
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text indexOf(string s, string part): int
+hand:text lower(string s): string
+
+# "a\nb\nc" -> ["a", "b", "c"]; "" -> []
+method splitLines(string s): array<string> {
+    array<string> parts = new array<string>(0)
+    if (length(s) == 0) { return parts }
+    string rest = s
+    boolean more = true
+    while (more) {
+        int at = indexOf(rest, "\n")
+        if (at < 0) {
+            parts.push(rest)
+            more = false
+        } else {
+            parts.push(substring(rest, 0, at))
+            rest = substring(rest, at + 1, length(rest) - at - 1)
+        }
+    }
+    return parts
+}
+
+# "123\tname" -> the part before and after the first tab
+method beforeTab(string line): string { return substring(line, 0, indexOf(line, "\t")) }
+method afterTab(string line): string {
+    int at = indexOf(line, "\t")
+    return substring(line, at + 1, length(line) - at - 1)
+}
+
+# Keys are written HKCU\Software\MyApp (roots: HKCU, HKLM, HKCR, HKU, HKCC). The value name "" is the key's default value.
+# Writing below HKLM needs administrator rights; a missing key or value is a runtime error (check with Exists first).
+public class Registry {
+    # A text or number value as text (numbers in decimal).
+    public shared method Read(string key, string name): string { return regRead(key, name) }
+    public shared method ReadInt(string key, string name): int { return int(regRead(key, name)) }
+    # The value, or `fallback` when the key or value does not exist.
+    public shared method ReadOr(string key, string name, string fallback): string {
+        if (regExists(key, name)) { return regRead(key, name) }
+        return fallback
+    }
+    public shared method Exists(string key, string name): boolean { return regExists(key, name) }
+    public shared method KeyExists(string key): boolean { return regExists(key, "") }
+    # Creates the key when needed and sets a text value.
+    public shared method Write(string key, string name, string value) { regWrite(key, name, value) }
+    # Creates the key when needed and sets a number (DWORD when it fits in 32 bits, otherwise QWORD).
+    public shared method WriteInt(string key, string name, int value) { regWriteInt(key, name, value) }
+    public shared method DeleteValue(string key, string name) { regDeleteValue(key, name) }
+    # Deletes a key with everything below it. A key needs at least two path parts (HKCU\Software\MyApp, not HKCU\Software).
+    public shared method DeleteKey(string key) { regDeleteKey(key) }
+    public shared method SubKeys(string key): array<string> { return splitLines(regSubKeys(key)) }
+    public shared method Values(string key): array<string> { return splitLines(regValues(key)) }
+}
+
+model ProcessInfo {
+    field int Id
+    field string Name
+}
+
+public class Processes {
+    # The id of this program's own process.
+    public shared method CurrentId(): int { return processId() }
+    # Starts a program and returns at once with its process id.
+    public shared method Start(string program, string arguments): int { return processStart(program, arguments) }
+    # Starts a program, waits for it and returns its exit code. `timeoutMillis` 0 waits for ever; after the timeout
+    # the call is a runtime error and the program keeps running.
+    public shared method Run(string program, string arguments, int timeoutMillis): int { return processRun(program, arguments, timeoutMillis) }
+    public shared method Run(string program, string arguments): int { return processRun(program, arguments, 0) }
+    public shared method IsRunning(int id): boolean { return processIsRunning(id) }
+    # Ends a process immediately (not possible for this program itself).
+    public shared method Kill(int id): boolean { return processKill(id) }
+    # Opens a file, folder or web address with its default program.
+    public shared method Open(string target): boolean { return shellOpen(target) }
+    # Every running process.
+    public shared method List(): array<ProcessInfo> {
+        array<ProcessInfo> result = new array<ProcessInfo>(0)
+        in (var line of splitLines(processList())) { result.push(new ProcessInfo(int(beforeTab(line)), afterTab(line))) }
+        return result
+    }
+    # The processes whose program name contains `text` (ignoring case), e.g. Find("notepad").
+    public shared method Find(string text): array<ProcessInfo> {
+        array<ProcessInfo> result = new array<ProcessInfo>(0)
+        string wanted = lower(text)
+        in (var p of List()) {
+            if (indexOf(lower(p.Name), wanted) >= 0) { result.push(p) }
+        }
+        return result
+    }
+}
+
+model WindowInfo {
+    field int Handle
+    field string Title
+}
+
+public class Windows {
+    # The visible top-level windows that have a title.
+    public shared method List(): array<WindowInfo> {
+        array<WindowInfo> result = new array<WindowInfo>(0)
+        in (var line of splitLines(windowList())) { result.push(new WindowInfo(int(beforeTab(line)), afterTab(line))) }
+        return result
+    }
+    # The handle of the window with exactly this title; 0 when there is none.
+    public shared method Find(string title): int { return windowFind(title) }
+    public shared method Title(int handle): string { return windowTitle(handle) }
+    public shared method SetTitle(int handle, string title) { windowSetTitle(handle, title) }
+    public shared method Hide(int handle) { windowShow(handle, 0) }
+    public shared method Show(int handle) { windowShow(handle, 5) }
+    public shared method Minimize(int handle) { windowShow(handle, 6) }
+    public shared method Maximize(int handle) { windowShow(handle, 3) }
+    public shared method Restore(int handle) { windowShow(handle, 9) }
+    # Asks the window to close (like its close button).
+    public shared method Close(int handle) { windowClose(handle) }
+    # Brings the window to the front; false when Windows refuses.
+    public shared method Focus(int handle): boolean { return windowFocus(handle) }
+    # "x y width height" in screen pixels.
+    public shared method Bounds(int handle): string { return windowRect(handle) }
+    public shared method Move(int handle, int x, int y, int width, int height) { windowMove(handle, x, y, width, height) }
+}
+
+public class Notifications {
+    # Shows a notification balloon for 4 seconds (the call returns when it is gone).
+    public shared method Show(string title, string text) { notify(title, text, 4000) }
+    # `millis`: 500 to 30000.
+    public shared method Show(string title, string text, int millis) { notify(title, text, millis) }
+}

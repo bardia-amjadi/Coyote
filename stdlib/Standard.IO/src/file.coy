@@ -36,35 +36,35 @@ method splitLines(string text): array<string> {
 }
 
 # Reading and writing whole files. A missing file or a failed write stops the program with a clear message; test with Exists first.
-export class File {
+public class File {
     # The whole file as text.
-    public static method ReadAllText(string path): string { return readAll(path) }
+    public shared method ReadAllText(string path): string { return readAll(path) }
     # The lines of a file (line breaks removed).
-    public static method ReadLines(string path): array<string> { return splitLines(readAll(path)) }
+    public shared method ReadLines(string path): array<string> { return splitLines(readAll(path)) }
     # Creates or replaces the file.
-    public static method WriteAllText(string path, string text) { writeAll(path, text) }
+    public shared method WriteAllText(string path, string text) { writeAll(path, text) }
     # Creates or replaces the file with the lines, each followed by a line break.
-    public static method WriteLines(string path, array<string> lines) {
+    public shared method WriteLines(string path, array<string> lines) {
         string all = ""
-        for (string l in lines) { all = all + l + "\n" }
+        in (string l of lines) { all = all + l + "\n" }
         writeAll(path, all)
     }
     # Adds text at the end of the file (creating it when needed).
-    public static method AppendAllText(string path, string text) { append(path, text) }
+    public shared method AppendAllText(string path, string text) { append(path, text) }
     # Adds one line (with a line break) at the end of the file.
-    public static method AppendLine(string path, string line) { append(path, line + "\n") }
+    public shared method AppendLine(string path, string line) { append(path, line + "\n") }
     # true when the path is an existing file.
-    public static method Exists(string path): boolean { return exists(path) }
+    public shared method Exists(string path): boolean { return exists(path) }
     # Deletes a file; false when it did not exist.
-    public static method Delete(string path): boolean { return delete(path) }
+    public shared method Delete(string path): boolean { return delete(path) }
     # Copies a file, replacing the target.
-    public static method Copy(string from, string to) { copy(from, to) }
+    public shared method Copy(string from, string to) { copy(from, to) }
     # Moves or renames a file.
-    public static method Move(string from, string to) { move(from, to) }
+    public shared method Move(string from, string to) { move(from, to) }
     # Size in bytes (files up to 2 GiB).
-    public static method Size(string path): int { return size(path) }
+    public shared method Size(string path): int { return size(path) }
     # Last change as Unix seconds.
-    public static method ModifiedUnix(string path): int { return modified(path) }
+    public shared method ModifiedUnix(string path): int { return modified(path) }
     # The absolute form of a path.
-    public static method FullPath(string path): string { return fullPath(path) }
+    public shared method FullPath(string path): string { return fullPath(path) }
 }

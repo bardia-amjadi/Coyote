@@ -8,41 +8,41 @@ hand:text lower(string s): string
 hand:text trim(string s): string
 hand:text replace(string s, string find, string with): string
 
-export class Text {
+public class Text {
     # Number of characters.
-    public static method Length(string s): int { return length(s) }
+    public shared method Length(string s): int { return length(s) }
     # true for "".
-    public static method IsEmpty(string s): boolean { return length(s) == 0 }
+    public shared method IsEmpty(string s): boolean { return length(s) == 0 }
     # true for "" or only spaces, tabs and line breaks.
-    public static method IsBlank(string s): boolean { return length(trim(s)) == 0 }
+    public shared method IsBlank(string s): boolean { return length(trim(s)) == 0 }
     # count characters from start; a runtime error when start is outside the text.
-    public static method Substring(string s, int start, int count): string { return substring(s, start, count) }
+    public shared method Substring(string s, int start, int count): string { return substring(s, start, count) }
     # The character at an index.
-    public static method CharAt(string s, int index): char { return charAt(s, index) }
+    public shared method CharAt(string s, int index): char { return charAt(s, index) }
     # Index of the first occurrence of part, or -1.
-    public static method IndexOf(string s, string part): int { return indexOf(s, part) }
+    public shared method IndexOf(string s, string part): int { return indexOf(s, part) }
     # true when part occurs in s.
-    public static method Contains(string s, string part): boolean { return indexOf(s, part) >= 0 }
-    public static method StartsWith(string s, string prefix): boolean {
+    public shared method Contains(string s, string part): boolean { return indexOf(s, part) >= 0 }
+    public shared method StartsWith(string s, string prefix): boolean {
         int n = length(prefix)
         if (n > length(s)) { return false }
         return substring(s, 0, n) == prefix
     }
-    public static method EndsWith(string s, string suffix): boolean {
+    public shared method EndsWith(string s, string suffix): boolean {
         int n = length(suffix)
         int total = length(s)
         if (n > total) { return false }
         return substring(s, total - n, n) == suffix
     }
     # ASCII letters only.
-    public static method Upper(string s): string { return upper(s) }
-    public static method Lower(string s): string { return lower(s) }
+    public shared method Upper(string s): string { return upper(s) }
+    public shared method Lower(string s): string { return lower(s) }
     # Removes spaces, tabs and line breaks at both ends.
-    public static method Trim(string s): string { return trim(s) }
+    public shared method Trim(string s): string { return trim(s) }
     # Replaces every occurrence of find (not empty) with with.
-    public static method Replace(string s, string find, string with): string { return replace(s, find, with) }
+    public shared method Replace(string s, string find, string with): string { return replace(s, find, with) }
     # s repeated times times.
-    public static method Repeat(string s, int times): string {
+    public shared method Repeat(string s, int times): string {
         string r = ""
         int i = 0
         while (i < times) {
@@ -52,18 +52,18 @@ export class Text {
         return r
     }
     # Pads on the left with pad (one or more characters) until the text is at least width characters.
-    public static method PadLeft(string s, int width, string pad): string {
+    public shared method PadLeft(string s, int width, string pad): string {
         string r = s
         while (length(r) < width) { r = pad + r }
         return r
     }
-    public static method PadRight(string s, int width, string pad): string {
+    public shared method PadRight(string s, int width, string pad): string {
         string r = s
         while (length(r) < width) { r = r + pad }
         return r
     }
     # The characters in reverse order.
-    public static method Reverse(string s): string {
+    public shared method Reverse(string s): string {
         string r = ""
         int i = length(s)
         while (i > 0) {
@@ -73,7 +73,7 @@ export class Text {
         return r
     }
     # Cuts s at every occurrence of sep (not empty). "a,b,,c" split at "," -> ["a", "b", "", "c"].
-    public static method Split(string s, string sep): array<string> {
+    public shared method Split(string s, string sep): array<string> {
         array<string> parts = new array<string>(0)
         int sl = length(sep)
         if (sl == 0) {
@@ -91,7 +91,7 @@ export class Text {
         return parts
     }
     # The parts joined with sep between them.
-    public static method Join(array<string> parts, string sep): string {
+    public shared method Join(array<string> parts, string sep): string {
         string r = ""
         int i = 0
         while (i < parts.length) {

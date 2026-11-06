@@ -1,0 +1,96 @@
+# Standard.Windows, part 1: message boxes and file/folder dialogs. Windows only (the "windows" permission, granted by `coyote run`
+# and Coyote Studio); on other systems every call is a runtime error that you can catch with try/catch.
+hand:win messageBox(string text, string title, int buttons, int icon): int
+hand:win openFileDialog(string title, string filter, string startDirectory): string
+hand:win saveFileDialog(string title, string filter, string startDirectory, string defaultName): string
+hand:win folderDialog(string title): string
+
+# The button sets of a message box.
+public class DialogButtons {
+    public shared locked field OK = 0
+    public shared locked field OKCancel = 1
+    public shared locked field AbortRetryIgnore = 2
+    public shared locked field YesNoCancel = 3
+    public shared locked field YesNo = 4
+    public shared locked field RetryCancel = 5
+    public shared locked field CancelTryContinue = 6
+}
+
+# The icon of a message box.
+public class DialogIcon {
+    public shared locked field None = 0
+    public shared locked field Error = 16
+    public shared locked field Question = 32
+    public shared locked field Warning = 48
+    public shared locked field Information = 64
+}
+
+# The button the user pressed. Compare with the shared values: if (result == DialogResult.Yes) { ... }
+public class DialogResult {
+    public readonly field int Code
+    public readonly field string Name
+    constructor(int code, string name) {
+        Code = code
+        Name = name
+    }
+    public shared readonly field DialogResult Ok = new DialogResult(1, "Ok")
+    public shared readonly field DialogResult Cancel = new DialogResult(2, "Cancel")
+    public shared readonly field DialogResult Abort = new DialogResult(3, "Abort")
+    public shared readonly field DialogResult Retry = new DialogResult(4, "Retry")
+    public shared readonly field DialogResult Ignore = new DialogResult(5, "Ignore")
+    public shared readonly field DialogResult Yes = new DialogResult(6, "Yes")
+    public shared readonly field DialogResult No = new DialogResult(7, "No")
+    public shared readonly field DialogResult TryAgain = new DialogResult(10, "TryAgain")
+    public shared readonly field DialogResult Continue = new DialogResult(11, "Continue")
+
+    # The shared value for a Windows result code (1 = Ok, 2 = Cancel, 6 = Yes, 7 = No, ...).
+    public shared method FromCode(int code): DialogResult {
+        if (code == 1) { return Ok }
+        if (code == 2) { return Cancel }
+        if (code == 3) { return Abort }
+        if (code == 4) { return Retry }
+        if (code == 5) { return Ignore }
+        if (code == 6) { return Yes }
+        if (code == 7) { return No }
+        if (code == 10) { return TryAgain }
+        if (code == 11) { return Continue }
+        return new DialogResult(code, "Unknown")
+    }
+    public method ToString(): string { return Name }
+}
+
+public class MessageBox {
+    # Shows a message with an OK button.
+    public shared method Show(string text): DialogResult { return Show(text, "Message", DialogButtons.OK, DialogIcon.None) }
+    public shared method Show(string text, string title): DialogResult { return Show(text, title, DialogButtons.OK, DialogIcon.None) }
+    public shared method Show(string text, string title, int buttons): DialogResult { return Show(text, title, buttons, DialogIcon.None) }
+    # Shows the box and waits for the answer. `buttons`: DialogButtons.*, `icon`: DialogIcon.*
+    public shared method Show(string text, string title, int buttons, int icon): DialogResult {
+        return DialogResult.FromCode(messageBox(text, title, buttons, icon))
+    }
+    public shared method ShowInfo(string text, string title) { Show(text, title, DialogButtons.OK, DialogIcon.Information) }
+    public shared method ShowWarning(string text, string title) { Show(text, title, DialogButtons.OK, DialogIcon.Warning) }
+    public shared method ShowError(string text, string title) { Show(text, title, DialogButtons.OK, DialogIcon.Error) }
+    # A Yes/No question: true when the user pressed Yes.
+    public shared method Ask(string question, string title): boolean {
+        return Show(question, title, DialogButtons.YesNo, DialogIcon.Question) == DialogResult.Yes
+    }
+    # An OK/Cancel question: true when the user pressed OK.
+    public shared method Confirm(string text, string title): boolean {
+        return Show(text, title, DialogButtons.OKCancel, DialogIcon.Question) == DialogResult.Ok
+    }
+}
+
+public class FileDialogs {
+    # Lets the user pick an existing file. `filter` is "Text files|*.txt|All files|*.*" (empty: all files).
+    # Returns the path, or "" when the user cancelled.
+    public shared method OpenFile(string title, string filter): string { return openFileDialog(title, filter, "") }
+    public shared method OpenFile(string title, string filter, string startDirectory): string { return openFileDialog(title, filter, startDirectory) }
+    # Lets the user choose where to save. Returns the path, or "" when cancelled (an existing file asks for confirmation).
+    public shared method SaveFile(string title, string filter, string defaultName): string { return saveFileDialog(title, filter, "", defaultName) }
+    public shared method SaveFile(string title, string filter, string startDirectory, string defaultName): string {
+        return saveFileDialog(title, filter, startDirectory, defaultName)
+    }
+    # Lets the user pick a folder. Returns its path, or "" when cancelled.
+    public shared method Folder(string title): string { return folderDialog(title) }
+}

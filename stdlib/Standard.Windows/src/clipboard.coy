@@ -1,0 +1,14 @@
+# Standard.Windows, part 2: the clipboard (text). Windows only, "windows" permission.
+hand:win clipboardGetText(): string
+hand:win clipboardSetText(string text)
+hand:win clipboardClear()
+hand:win clipboardHasText(): boolean
+
+public class Clipboard {
+    # The text on the clipboard; "" when it holds no text.
+    public shared method GetText(): string { return clipboardGetText() }
+    # Replaces the clipboard content with this text.
+    public shared method SetText(string text) { clipboardSetText(text) }
+    public shared method HasText(): boolean { return clipboardHasText() }
+    public shared method Clear() { clipboardClear() }
+}
