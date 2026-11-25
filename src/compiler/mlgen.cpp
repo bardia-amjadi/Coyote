@@ -1,3 +1,5 @@
+#include <cstring>
+#include <cctype>
 #include "mlgen.hpp"
 
 #include <cstdio>
@@ -50,6 +52,7 @@ public:
         {
             std::function<bool(const Stmt&)> hasTry = [&](const Stmt& s) {
                 if (s.kind == Stmt::Kind::Try || s.kind == Stmt::Kind::Throw) return true;
+                for (const auto& b : s.finallyBody) if (hasTry(*b)) return true;
                 if (s.init && hasTry(*s.init)) return true;
                 for (const auto& b : s.body) if (hasTry(*b)) return true;
                 for (const auto& b : s.elseBody) if (hasTry(*b)) return true;
@@ -87,9 +90,56 @@ public:
             if (m.isDispatcher) { dispatcher(m); continue; }
             function(fnName(m), sigText(m.params, m.ret), m.ret, m.localTypes, m.body, m.unit, &m);
         }
+        for (const auto& g : prog_.globals) os_ << "global $G." << g.first << " " << mlTypeName(g.second) << "\n";
         function("$main", "() -> void", Type::Void, prog_.mainLocals, prog_.stmts, 0, nullptr);
         os_ << "entry $main\n";
         std::string out = os_.str();
+        if (!usedMouths_.empty()) {  // mouth declarations go right after the 'source' line; they need ML 10
+            std::string decls;
+            for (const auto& [name, rw] : usedMouths_) decls += "mouth " + name + (rw.first ? " get" : "") + (rw.second ? " set" : "") + "\n";
+            const size_t srcEnd = out.find('\n', out.find('\n') + 1);
+            out.insert(srcEnd + 1, decls);
+            out.replace(0, out.find('\n'), "ml 10");
+            version = 10;
+        } else if (out.find("\n  ocopy\n") != std::string::npos) {  // (copy) of an object or map needs ML 9
+            out.replace(0, out.find('\n'), "ml 9");
+            version = 9;
+        }
+        {   // long, byte and their operations (and string indexing / comparison) need ML 11
+            static const std::set<std::string> v11 = {"str.at", "str.len", "lt.str", "le.str", "gt.str", "ge.str", "push.lng", "i2l", "l2i", "l2d", "d2l",
+                "str.lng", "parse.lng", "i2b", "b2i", "bnot.int", "bnot.lng"};
+            bool need = false;
+            std::istringstream in(out);
+            std::string line;
+            std::getline(in, line);
+            std::getline(in, line);  // 'ml' and 'source' lines
+            while (!need && std::getline(in, line)) {
+                const size_t b0 = line.find_first_not_of(' ');
+                if (b0 == std::string::npos || line.compare(b0, 8, "push.str") == 0) continue;
+                const size_t e0 = line.find_first_of(" \t", b0);
+                const std::string op = line.substr(b0, e0 == std::string::npos ? std::string::npos : e0 - b0);
+                if (v11.count(op)) { need = true; break; }
+                const size_t dot = op.rfind('.');
+                if (dot != std::string::npos) {
+                    const std::string head = op.substr(0, dot), tail = op.substr(dot + 1);
+                    if (tail == "lng" || (tail == "int" && (head == "and" || head == "or" || head == "xor" || head == "shl" || head == "shr"))) { need = true; break; }
+                }
+                for (const char* w : {"long", "byte"}) {
+                    for (size_t at = line.find(w); at != std::string::npos; at = line.find(w, at + 1)) {
+                        const auto isId = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.'; };
+                        if ((at == 0 || !isId(line[at - 1])) && (at + std::strlen(w) >= line.size() || !isId(line[at + std::strlen(w)]))) need = true;
+                    }
+                }
+            }
+            if (need) {
+                out.replace(0, out.find('\n'), "ml 11");
+                version = 11;
+            }
+        }
+        if (out.find("\n  throwx\n") != std::string::npos) {  // exception objects (`throw obj`, `finally`) need ML 12
+            out.replace(0, out.find('\n'), "ml 12");
+            version = 12;
+        }
         if (version < 6) {  // function values need ML 6
             bool fn = false;
             std::istringstream in(out);
@@ -108,6 +158,7 @@ private:
     bool dce_;
     std::vector<char> live_;       // per method: reachable from the top-level code
     std::ostringstream os_;
+    std::map<std::string, std::pair<bool, bool>> usedMouths_;  // "module.name" -> (read, written): declared in the ML header (version 10)
     int curLine_ = 0;
     int labels_ = 0;
 
@@ -131,10 +182,13 @@ private:
         std::function<void(const Stmt&)> st = [&](const Stmt& s) {
             if (s.expr) ex(*s.expr);
             if (s.target) ex(*s.target);
+            if (s.msgExpr) ex(*s.msgExpr);
+            if (s.traceExpr) ex(*s.traceExpr);
             if (s.init) st(*s.init);
             if (s.step) st(*s.step);
             for (const auto& b : s.body) st(*b);
             for (const auto& b : s.elseBody) st(*b);
+            for (const auto& b : s.finallyBody) st(*b);
         };
         for (const auto& s : prog_.stmts) st(*s);
         for (size_t i = 0; i < prog_.methods.size(); ++i)
@@ -225,6 +279,8 @@ private:
     void defaultReturn(Type ret) {
         switch (ret.kind) {
             case Type::Int: os_ << "  push.int 0\n"; break;
+            case Type::Long: os_ << "  push.lng 0\n"; break;
+            case Type::Byte: os_ << "  push.int 0\n  i2b\n"; break;
             case Type::String: os_ << "  push.str \"\"\n"; break;
             case Type::Bool: os_ << "  push.bool false\n"; break;
             case Type::Double: os_ << "  push.dbl 0\n"; break;
@@ -238,9 +294,22 @@ private:
         os_ << "  ret\n";
     }
 
-    std::vector<int> loopTry_;  // try depth when each enclosing loop was entered
-    int tryDepth_ = 0;          // active 'try' blocks of the function being generated
-    void leaveTries(size_t downTo) { for (int i = tryDepth_; i > static_cast<int>(downTo); --i) os_ << "  endtry\n"; }
+    // Active `try` ops of the function being generated, innermost last: fin != null marks the protection of a `finally` block, which
+    // is copied inline wherever control leaves it (normal end, return, break, continue; the exceptional path has its own copy).
+    struct TryScope { const Stmt* fin; };
+    std::vector<TryScope> scopes_;
+    std::vector<size_t> loopTry_;  // scopes_.size() when each enclosing loop was entered
+    void emitFinally(const Stmt& t) { for (const auto& c : t.finallyBody) stmt(*c); }
+    void leaveTries(size_t downTo) {
+        const std::vector<TryScope> saved = scopes_;
+        for (size_t i = saved.size(); i > downTo; --i) {
+            scopes_.resize(i - 1);  // a finally body runs outside its own protection
+            os_ << "  endtry\n";
+            if (saved[i - 1].fin) emitFinally(*saved[i - 1].fin);
+        }
+        scopes_ = saved;
+    }
+    bool hasFinallyScope() const { for (const TryScope& s : scopes_) if (s.fin) return true; return false; }
     std::vector<std::pair<std::string, std::string>> loops_;  // (continue label, break label) of enclosing loops
 
     std::string newLabel() { return "L" + std::to_string(labels_++); }
@@ -266,7 +335,15 @@ private:
                 os_ << "  store " << s.slot << "\n";
                 return;
             case Stmt::Kind::Assign:
-                if (s.target->kind == Expr::Kind::Var) {
+                if (s.target->kind == Expr::Kind::Var && s.target->mouthIndex >= 0) {
+                    const MouthDecl& md = prog_.mouths[static_cast<size_t>(s.target->mouthIndex)];
+                    usedMouths_[md.module + "." + md.name].second = true;
+                    expr(*s.expr);
+                    os_ << "  setmouth " << md.module << "." << md.name << "\n";
+ } else if (s.target->kind == Expr::Kind::Var && s.target->isGlobal) {
+                    expr(*s.expr);
+                    os_ << "  setglobal $G." << s.target->text << "\n";
+                } else if (s.target->kind == Expr::Kind::Var) {
                     expr(*s.expr);
                     os_ << "  store " << s.target->slot << "\n";
                 } else if (s.target->kind == Expr::Kind::Member) {  // class field (sema turned property writes into calls)
@@ -311,7 +388,7 @@ private:
                 os_ << "label " << top << "\n";
                 expr(*s.expr);
                 os_ << "  jump.false " << end << "\n";
-                loops_.push_back({top, end}); loopTry_.push_back(tryDepth_);
+                loops_.push_back({top, end}); loopTry_.push_back(scopes_.size());
                 for (const auto& c : s.body) stmt(*c);
                 loops_.pop_back(); loopTry_.pop_back();
                 os_ << "  jump " << top << "\n";
@@ -326,7 +403,7 @@ private:
                     expr(*s.expr);
                     os_ << "  jump.false " << end << "\n";
                 }
-                loops_.push_back({cont, end}); loopTry_.push_back(tryDepth_);
+                loops_.push_back({cont, end}); loopTry_.push_back(scopes_.size());
                 for (const auto& c : s.body) stmt(*c);
                 loops_.pop_back(); loopTry_.pop_back();
                 os_ << "label " << cont << "\n";  // 'continue' lands here, then the step runs
@@ -343,9 +420,10 @@ private:
                 os_ << "label " << top << "\n";
                 os_ << "  load " << s.slotIdx << "\n  load " << s.slotArr << "\n";
                 setLine(s.loc.line);
-                os_ << "  alen\n  lt.int\n  jump.false " << end << "\n";
-                os_ << "  load " << s.slotArr << "\n  load " << s.slotIdx << "\n  aload\n  store " << s.slot << "\n";
-                loops_.push_back({cont, end}); loopTry_.push_back(tryDepth_);
+                const bool overString = s.expr->type == Type::String;
+                os_ << (overString ? "  str.len\n" : "  alen\n") << "  lt.int\n  jump.false " << end << "\n";
+                os_ << "  load " << s.slotArr << "\n  load " << s.slotIdx << (overString ? "\n  str.at\n  store " : "\n  aload\n  store ") << s.slot << "\n";
+                loops_.push_back({cont, end}); loopTry_.push_back(scopes_.size());
                 for (const auto& c : s.body) stmt(*c);
                 loops_.pop_back(); loopTry_.pop_back();
                 os_ << "label " << cont << "\n";
@@ -355,21 +433,50 @@ private:
                 return;
             }
             case Stmt::Kind::Try: {
-                std::string handler = newLabel(), end = newLabel();
-                os_ << "  try " << handler << "\n";
-                ++tryDepth_;
-                for (const auto& c : s.body) stmt(*c);
-                --tryDepth_;
-                os_ << "  endtry\n  jump " << end << "\n";
-                os_ << "label " << handler << "\n";
-                os_ << "  store " << s.slot << "\n";
-                for (const auto& c : s.elseBody) stmt(*c);
-                os_ << "label " << end << "\n";
+                std::string finHandler, finEnd;
+                if (s.hasFinally) {
+                    finHandler = newLabel();
+                    finEnd = newLabel();
+                    os_ << "  try " << finHandler << "\n";
+                    scopes_.push_back({&s});
+                }
+                if (s.hasElse) {
+                    std::string handler = newLabel(), end = newLabel();
+                    os_ << "  try " << handler << "\n";
+                    scopes_.push_back({nullptr});
+                    for (const auto& c : s.body) stmt(*c);
+                    scopes_.pop_back();
+                    os_ << "  endtry\n  jump " << end << "\n";
+                    os_ << "label " << handler << "\n";
+                    os_ << "  store " << s.slot << "\n";
+                    for (const auto& c : s.elseBody) stmt(*c);
+                    os_ << "label " << end << "\n";
+                } else {
+                    for (const auto& c : s.body) stmt(*c);
+                }
+                if (s.hasFinally) {
+                    scopes_.pop_back();
+                    os_ << "  endtry\n";
+                    emitFinally(s);  // the normal way out
+                    os_ << "  jump " << finEnd << "\nlabel " << finHandler << "\n";
+                    // an exception got out of the try/catch blocks: keep it, run the finally block, raise it again
+                    usedMouths_["sys.exceptionObject"].first = true;
+                    usedMouths_["sys.stackTrace"].first = true;
+                    os_ << "  store " << s.slotMsg << "\n  getmouth sys.exceptionObject\n  store " << s.slotPay << "\n"
+                        << "  getmouth sys.stackTrace\n  unbox string\n  store " << s.slotTrace << "\n";
+                    emitFinally(s);
+                    os_ << "  load " << s.slotPay << "\n  load " << s.slotMsg << "\n  load " << s.slotTrace << "\n  throwx\n";
+                    os_ << "label " << finEnd << "\n";
+                }
                 return;
             }
             case Stmt::Kind::Throw:
+                // sema turned the thrown Exception object into: temp declaration (init), object, message, stack trace
+                stmt(*s.init);
                 expr(*s.expr);
-                os_ << "  throw\n";
+                expr(*s.msgExpr);
+                expr(*s.traceExpr);
+                os_ << "  throwx\n";
                 return;
             case Stmt::Kind::Break:
                 leaveTries(static_cast<size_t>(loopTry_.back()));
@@ -383,6 +490,13 @@ private:
                 for (const auto& c : s.body) stmt(*c);
                 return;
             case Stmt::Kind::Return:
+                if (hasFinallyScope()) {  // the value waits in a hidden local while the finally blocks run
+                    if (s.expr) { expr(*s.expr); os_ << "  store " << s.slot << "\n"; }
+                    leaveTries(0);
+                    if (s.expr) os_ << "  load " << s.slot << "\n";
+                    os_ << "  ret\n";
+                    return;
+                }
                 if (s.expr) expr(*s.expr);
                 os_ << "  ret\n";
                 return;
@@ -392,6 +506,8 @@ private:
     // Converts the value on top of the stack to a string (for concatenation).
     void toString(Type t) {
         if (t == Type::Int) os_ << "  str.int\n";
+        else if (t == Type::Long) os_ << "  str.lng\n";
+        else if (t == Type::Byte) os_ << "  b2i\n  str.int\n";
         else if (t == Type::Bool) os_ << "  str.bool\n";
         else if (t == Type::Double) os_ << "  str.dbl\n";
         else if (t == Type::Char) os_ << "  str.chr\n";
@@ -402,7 +518,7 @@ private:
     void expr(const Expr& e) {
         switch (e.kind) {
             case Expr::Kind::String: os_ << "  push.str " << quote(e.text) << "\n"; return;
-            case Expr::Kind::Int: os_ << "  push.int " << e.ival << "\n"; return;
+            case Expr::Kind::Int: os_ << (e.isLong ? "  push.lng " : "  push.int ") << e.ival << "\n"; return;
             case Expr::Kind::Bool: os_ << "  push.bool " << (e.ival ? "true" : "false") << "\n"; return;
             case Expr::Kind::Double: {
                 char buf[40];
@@ -428,11 +544,52 @@ private:
                 os_ << (e.lhs->type.kind == Type::Class ? "  isinst " : "  istype ") << mlTypeName(e.newType) << "\n";
                 return;
             case Expr::Kind::Convert: convert(e); return;
-            case Expr::Kind::Var: os_ << "  load " << e.slot << "\n"; return;
+            case Expr::Kind::Var:
+                if (e.mouthIndex >= 0) {
+                    const MouthDecl& md = prog_.mouths[static_cast<size_t>(e.mouthIndex)];
+                    usedMouths_[md.module + "." + md.name].first = true;
+                    os_ << "  getmouth " << md.module << "." << md.name << "\n";
+                    return;
+                }
+                if (e.isGlobal) { os_ << "  getglobal $G." << e.text << "\n"; return; }
+                os_ << "  load " << e.slot << "\n";
+                return;
             case Expr::Kind::Lambda:  // closure over the captured values (none for a plain method reference)
                 for (const auto& a : e.args) expr(*a);
                 os_ << "  mkclosure " << fnName(prog_.methods[static_cast<size_t>(e.methodIndex)]) << " " << e.args.size() << "\n";
                 return;
+            case Expr::Kind::Switch: {
+                expr(*e.lhs);
+                os_ << "  store " << e.slot << "\n";
+                const std::string end = newLabel();
+                std::vector<std::string> armL;
+                std::vector<size_t> resIdx;
+                std::string defL;
+                size_t idx = 0;
+                for (const int n : e.armSizes) {
+                    armL.push_back(newLabel());
+                    for (int j = 0; j < n; ++j) {
+                        const std::string next = newLabel();
+                        expr(*e.args[idx++]);
+                        os_ << "  jump.false " << next << "\n  jump " << armL.back() << "\nlabel " << next << "\n";
+                    }
+                    if (n == 0) defL = armL.back();
+                    resIdx.push_back(idx++);
+                }
+                if (defL.empty()) {
+                    setLine(e.loc.line);
+                    os_ << "  push.str \"no switch arm matched the value\"\n  throw\n";
+                } else {
+                    os_ << "  jump " << defL << "\n";
+                }
+                for (size_t k = 0; k < armL.size(); ++k) {
+                    os_ << "label " << armL[k] << "\n";
+                    expr(*e.args[resIdx[k]]);
+                    os_ << "  jump " << end << "\n";
+                }
+                os_ << "label " << end << "\n";
+                return;
+            }
             case Expr::Kind::CallFn:
                 expr(*e.lhs);
                 for (const auto& a : e.args) expr(*a);
@@ -454,8 +611,13 @@ private:
             case Expr::Kind::Unary:
                 expr(*e.lhs);
                 setLine(e.loc.line);
+                if (e.text == "(copy)") {
+                    if (e.lhs->type.kind != Type::Obj) os_ << (e.lhs->type.isArray() ? "  acopy\n" : "  ocopy\n");
+                    return;
+                }
                 if (e.lhs->type == Type::Dyn) os_ << (e.text == "-" ? "  dyn.neg\n" : "  dyn.not\n");
-                else if (e.text == "-") os_ << (e.lhs->type == Type::Double ? "  neg.dbl\n" : "  neg.int\n");
+                else if (e.text == "-") os_ << (e.lhs->type == Type::Double ? "  neg.dbl\n" : e.lhs->type == Type::Long ? "  neg.lng\n" : "  neg.int\n");
+                else if (e.text == "~") os_ << (e.lhs->type == Type::Long ? "  bnot.lng\n" : "  bnot.int\n");
                 else os_ << "  not\n";
                 return;
             case Expr::Kind::Binary: binary(e); return;
@@ -472,7 +634,7 @@ private:
                 expr(*e.lhs);
                 expr(*e.rhs);
                 setLine(e.loc.line);
-                os_ << (e.lhs->type.isMap() ? "  mapget\n" : e.lhs->type == Type::Dyn ? "  dyn.index\n" : "  aload\n");
+                os_ << (e.lhs->type.isMap() ? "  mapget\n" : e.lhs->type == Type::Dyn ? "  dyn.index\n" : e.lhs->type == Type::String ? "  str.at\n" : "  aload\n");
                 return;
             case Expr::Kind::NewObj: {
                 for (const auto& a : e.args) expr(*a);
@@ -495,7 +657,7 @@ private:
                 expr(*e.lhs);
                 setLine(e.loc.line);
                 if (e.lhs->type == Type::Dyn) os_ << "  dyn.member " << quote(e.text) << "\n";
-                else os_ << (e.lhs->type.isMap() ? "  maplen\n" : "  alen\n");  // the only property is .length
+                else os_ << (e.lhs->type.isMap() ? "  maplen\n" : e.lhs->type == Type::String ? "  str.len\n" : "  alen\n");  // the only property is .length
                 return;
             case Expr::Kind::MethodCall: {
                 if (e.methodIndex >= 0) {  // a method of a class (or a property accessor)
@@ -523,9 +685,20 @@ private:
     // Emits a Convert node (see Expr::Conv).
     void convert(const Expr& e) {
         using C = Expr::Conv;
+        if (e.conv == C::IntToLong && e.lhs->kind == Expr::Kind::Int) {  // a literal: write it as a long directly
+            os_ << "  push.lng " << e.lhs->ival << "\n";
+            return;
+        }
         expr(*e.lhs);
         setLine(e.loc.line);
         switch (e.conv) {
+            case C::IntToLong: os_ << "  i2l\n"; return;
+            case C::LongToInt: os_ << "  l2i\n"; return;
+            case C::LongToDouble: os_ << "  l2d\n"; return;
+            case C::DoubleToLong: os_ << "  d2l\n"; return;
+            case C::IntToByte: os_ << "  i2b\n"; return;
+            case C::ByteToInt: os_ << "  b2i\n"; return;
+            case C::StringToLong: os_ << "  parse.lng\n"; return;
             case C::IntToDouble: os_ << "  i2d\n"; return;
             case C::DoubleToInt: os_ << "  d2i\n"; return;
             case C::CharToInt: os_ << "  c2i\n"; return;
@@ -597,10 +770,11 @@ private:
         setLine(e.loc.line);
         Type operand = e.lhs->type;  // both operands have the same type for every remaining op
         if (operand == Type::Int && e.rhs->type == Type::Double) operand = Type::Double;
-        const char* suffix = operand == Type::Int ? "int" : operand == Type::Double ? "dbl" : operand == Type::Char ? "chr"
+        const char* suffix = operand == Type::Int ? "int" : operand == Type::Long ? "lng" : operand == Type::Double ? "dbl" : operand == Type::Char ? "chr"
                            : operand == Type::String ? "str" : operand == Type::Bool ? "bool" : operand == Type::Guid ? "guid"
                            : operand == Type::Obj ? "obj" : "ref";
-        const char* n = op == "+" ? "add" : op == "-" ? "sub" : op == "*" ? "mul" : op == "/" ? "div" : op == "%" ? "rem"
+        const char* n = op == "&" ? "and" : op == "|" ? "or" : op == "^" ? "xor" : op == "<<" ? "shl" : op == ">>" ? "shr" :
+                        op == "+" ? "add" : op == "-" ? "sub" : op == "*" ? "mul" : op == "/" ? "div" : op == "%" ? "rem"
                       : op == "==" ? "eq" : op == "!=" ? "ne" : op == "<" ? "lt" : op == "<=" ? "le" : op == ">" ? "gt" : "ge";
         os_ << "  " << n << "." << suffix << "\n";
     }

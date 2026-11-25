@@ -62,16 +62,47 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
                 advance();
             }
             t.kind = Tok::Ident;
+        } else if (c == '0' && i + 2 < s.size() && (s[i + 1] == 'x' || s[i + 1] == 'X' || s[i + 1] == 'b' || s[i + 1] == 'B') &&
+                   (s[i + 1] == 'x' || s[i + 1] == 'X' ? std::isxdigit(static_cast<unsigned char>(s[i + 2])) != 0 : (s[i + 2] == '0' || s[i + 2] == '1'))) {
+            // hexadecimal (0xFF) and binary (0b1010) integer literals: int when they fit in 32 bits (as non-negative), else long
+            const bool hex = s[i + 1] == 'x' || s[i + 1] == 'X';
+            std::string text = "0";
+            text += s[i + 1];
+            advance();
+            advance();
+            unsigned long long v = 0;
+            size_t count = 0;
+            while (i < s.size() && (hex ? std::isxdigit(static_cast<unsigned char>(s[i])) != 0 : (s[i] == '0' || s[i] == '1'))) {
+                const unsigned d = static_cast<unsigned>(std::isdigit(static_cast<unsigned char>(s[i])) ? s[i] - '0' : (std::tolower(s[i]) - 'a' + 10));
+                if (v >> (hex ? 60 : 63)) fail(t.loc, "integer literal is out of range for long");
+                v = v * (hex ? 16 : 2) + d;
+                text += s[i];
+                ++count;
+                advance();
+            }
+            (void)count;
+            if (v > 9223372036854775807ULL) fail(t.loc, "integer literal '" + text + "' is out of range for long");
+            if (i < s.size() && (s[i] == 'L' || s[i] == 'l')) { t.isLong = true; advance(); }
+            if (i < s.size() && isIdentStart(static_cast<unsigned char>(s[i]))) fail(t.loc, "invalid integer literal '" + text + s[i] + "...'");
+            if (v > 2147483647ULL) t.isLong = true;
+            t.kind = Tok::Int;
+            t.text = text;
+            t.ival = static_cast<long long>(v);
         } else if (isDigit(c)) {
             std::string digits;
             while (i < s.size() && isDigit(static_cast<unsigned char>(s[i]))) {
                 digits += s[i];
                 advance();
             }
+            bool longSuffix = false;
+            if (i < s.size() && (s[i] == 'L' || s[i] == 'l') && !(i + 1 < s.size() && isIdentPart(static_cast<unsigned char>(s[i + 1])))) {
+                longSuffix = true;
+                advance();
+            }
             if (i < s.size() && isIdentStart(static_cast<unsigned char>(s[i]))) {
                 fail(t.loc, "invalid integer literal '" + digits + s[i] + "...'");
             }
-            if (i + 1 < s.size() && s[i] == '.' && isDigit(static_cast<unsigned char>(s[i + 1]))) {
+            if (!longSuffix && i + 1 < s.size() && s[i] == '.' && isDigit(static_cast<unsigned char>(s[i + 1]))) {
                 digits += '.';
                 advance();
                 while (i < s.size() && isDigit(static_cast<unsigned char>(s[i]))) {
@@ -96,13 +127,13 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
                 out.push_back(std::move(t));
                 continue;
             }
-            // 'int' is a 32-bit signed integer (see docs/language.md).
-            if (digits.size() > 10 || std::stoll(digits) > 2147483647LL) {
-                fail(t.loc, "integer literal '" + digits + "' is out of range for int");
-            }
+            // 'int' is a 32-bit signed integer, 'long' a 64-bit one; a literal that does not fit in int (or ends in L) is a long.
+            if (digits.size() > 19 || (digits.size() == 19 && digits > "9223372036854775807"))
+                fail(t.loc, "integer literal '" + digits + "' is out of range for long");
             t.kind = Tok::Int;
             t.text = digits;
             t.ival = std::stoll(digits);
+            t.isLong = longSuffix || t.ival > 2147483647LL;
         } else if (c == '\'') {
             SourceLoc start = t.loc;
             advance();  // opening quote
@@ -176,11 +207,17 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
             }
             if (!closed) fail(start, "unterminated string literal");
             t.kind = Tok::String;
+        } else if (c == '<' && i + 2 < s.size() && s[i + 1] == '<' && s[i + 2] == '=') {
+            t.kind = Tok::Punct;
+            t.text = "<<=";
+            advance();
+            advance();
+            advance();
         } else if (i + 1 < s.size() &&
                    ((c == '=' && (s[i + 1] == '=' || s[i + 1] == '>')) || (c == '!' && s[i + 1] == '=') ||
                     (c == '<' && s[i + 1] == '=') || (c == '>' && s[i + 1] == '=') ||
-                    (c == '&' && s[i + 1] == '&') || (c == '+' && s[i + 1] == '+') || (c == '-' && s[i + 1] == '-') || (c == '?' && s[i + 1] == '?') || (c == '|' && s[i + 1] == '|') ||
-                    ((c == '+' || c == '-' || c == '*' || c == '/' || c == '%') && s[i + 1] == '='))) {
+                    (c == '&' && s[i + 1] == '&') || (c == '<' && s[i + 1] == '<') || (c == '+' && s[i + 1] == '+') || (c == '-' && s[i + 1] == '-') || (c == '?' && s[i + 1] == '?') || (c == '|' && s[i + 1] == '|') ||
+                    ((c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '&' || c == '|' || c == '^') && s[i + 1] == '='))) {
             t.kind = Tok::Punct;
             t.text = s.substr(i, 2);
             advance();
@@ -188,7 +225,7 @@ std::vector<Token> lex(const std::string& s, const std::string& file) {
         } else if (c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || c == ':' ||
                    c == ';' || c == '.' || c == '=' || c == '[' || c == ']' || c == '<' ||
                    c == '>' || c == '+' || c == '-' || c == '*' || c == '/' || c == '?' ||
-                   c == '%' || c == '!') {
+                   c == '%' || c == '!' || c == '&' || c == '|' || c == '^' || c == '~') {
             // Operators and brackets are tokenized so the parser can report "not supported yet"
             // for constructs that use them, instead of a confusing lexical error.
             t.kind = Tok::Punct;

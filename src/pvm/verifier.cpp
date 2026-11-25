@@ -76,6 +76,7 @@ struct Ctx {
     const std::map<std::string, int>& globalIndex;
     const std::map<std::string, int>& hostIndex;
     const std::map<std::string, int>& funcIndex;
+    const std::map<std::string, int>& mouthIndex;
     const std::string& file;
 };
 
@@ -141,6 +142,16 @@ void resolve(Ctx& c, Function& f, size_t nslots) {
                 if (k == cd.fields.size())
                     fail(c.file, in.mlLine, "class '" + cd.name + "' has no field '" + field + "'");
                 in.ival = static_cast<long long>(k);
+                break;
+            }
+            case Op::GetMouth:
+            case Op::SetMouth: {
+                auto it = c.mouthIndex.find(in.str);
+                if (it == c.mouthIndex.end()) fail(c.file, in.mlLine, "'" + std::string(opName(in.op)) + "' uses the undeclared mouth '" + in.str + "'");
+                const MouthDecl& d = c.m.mouths[static_cast<size_t>(it->second)];
+                if (in.op == Op::GetMouth && !d.get) fail(c.file, in.mlLine, "the mouth '" + in.str + "' is not declared with 'get'");
+                if (in.op == Op::SetMouth && !d.set) fail(c.file, in.mlLine, "the mouth '" + in.str + "' is not declared with 'set'");
+                in.host = it->second;
                 break;
             }
             case Op::GetGlobal:
@@ -319,6 +330,11 @@ void verifyFunction(Ctx& c, Function& f) {
                 st = drop(st, 2);
                 break;
             }
+            case Op::OCopy:
+                need(1);
+                if (at(st, 1).kind != Type::Class && at(st, 1).kind != Type::Map)
+                    fail(file, in.mlLine, "operand 1 of 'ocopy' expects a class instance or a map but the stack holds " + typeName(at(st, 1)));
+                break;
             case Op::ACopy:
                 need(1);
                 expectArrayAt(1, 1);  // the array type is unchanged
@@ -335,6 +351,29 @@ void verifyFunction(Ctx& c, Function& f) {
             }
 
             // ---- version 4: double, char, Guid ----
+            case Op::PushLng: st = push(st, Type::Long); break;
+            case Op::AddL: case Op::SubL: case Op::MulL: case Op::DivL: case Op::RemL:
+            case Op::AndL: case Op::OrL: case Op::XorL:
+                op({Type::Long, Type::Long}, Type::Long);
+                break;
+            case Op::ShlL: case Op::ShrL: op({Type::Long, Type::Int}, Type::Long); break;
+            case Op::NegL: case Op::BNotL: op({Type::Long}, Type::Long); break;
+            case Op::EqL: case Op::NeL: case Op::LtL: case Op::LeL: case Op::GtL: case Op::GeL:
+                op({Type::Long, Type::Long}, Type::Bool);
+                break;
+            case Op::AndI: case Op::OrI: case Op::XorI: case Op::ShlI: case Op::ShrI: op({Type::Int, Type::Int}, Type::Int); break;
+            case Op::BNotI: op({Type::Int}, Type::Int); break;
+            case Op::I2L: op({Type::Int}, Type::Long); break;
+            case Op::L2I: op({Type::Long}, Type::Int); break;
+            case Op::L2D: op({Type::Long}, Type::Double); break;
+            case Op::D2L: op({Type::Double}, Type::Long); break;
+            case Op::StrLng: op({Type::Long}, Type::String); break;
+            case Op::ParseLng: op({Type::String}, Type::Long); break;
+            case Op::I2B: op({Type::Int}, Type::Byte); break;
+            case Op::B2I: op({Type::Byte}, Type::Int); break;
+            case Op::StrAt: op({Type::String, Type::Int}, Type::Char); break;
+            case Op::StrLen: op({Type::String}, Type::Int); break;
+            case Op::LtS: case Op::LeS: case Op::GtS: case Op::GeS: op({Type::String, Type::String}, Type::Bool); break;
             case Op::PushDbl: st = push(st, Type::Double); break;
             case Op::PushChr: st = push(st, Type::Char); break;
             case Op::AddD: case Op::SubD: case Op::MulD: case Op::DivD: case Op::RemD:
@@ -426,6 +465,8 @@ void verifyFunction(Ctx& c, Function& f) {
                 st = push(st, in.op == Op::IsInst ? Type(Type::Bool) : Type::classOf(in.str));
                 break;
             }
+            case Op::GetMouth: st = push(st, Type(Type::Obj)); break;
+            case Op::SetMouth: popExpect({Type(Type::Obj)}, "operand", in.str); break;
             case Op::GetGlobal: st = push(st, c.m.globals[static_cast<size_t>(in.target)].type); break;
             case Op::SetGlobal: {
                 need(1);
@@ -511,6 +552,9 @@ void verifyFunction(Ctx& c, Function& f) {
             case Op::Throw:
                 popExpect({Type::String}, "operand", nm);
                 continue;  // no fall-through
+            case Op::Throwx:  // version 12: payload object, message, stack trace ("" = capture here)
+                popExpect({Type::Obj, Type::String, Type::String}, "operand", nm);
+                continue;
             case Op::HostCall: {
                 const HostDecl& h = c.m.hosts[static_cast<size_t>(in.host)];
                 popExpect(h.sig.params, "argument", in.str);
@@ -581,6 +625,18 @@ void verify(Module& m, const HostRegistry& registry, const std::string& file) {
         // host functions it never reaches (a library bundles many) without being granted all of them.
     }
 
+    // Mouths (version 10): unique names, registered with this PVM, and the declared accessors exist.
+    std::map<std::string, int> mouthIndex;
+    for (size_t i = 0; i < m.mouths.size(); ++i) {
+        const MouthDecl& d = m.mouths[i];
+        if (!mouthIndex.emplace(d.name, static_cast<int>(i)).second) fail(file, d.mlLine, "duplicate mouth declaration '" + d.name + "'");
+        const HostMouth* hm = registry.findMouth(d.name);
+        if (!hm) fail(file, d.mlLine, "mouth '" + d.name + "' is not provided by this PVM");
+        if (d.get && !hm->get) fail(file, d.mlLine, "mouth '" + d.name + "' cannot be read on this PVM");
+        if (d.set && !hm->set) fail(file, d.mlLine, "mouth '" + d.name + "' is read-only on this PVM");
+    }
+
+    // (mouths are checked above)
     // Classes and globals (version 5): names are unique and every class type refers to a declared class.
     std::map<std::string, int> classIndex, globalIndex;
     for (size_t i = 0; i < m.classes.size(); ++i) classIndex.emplace(m.classes[i].name, static_cast<int>(i));
@@ -651,7 +707,7 @@ void verify(Module& m, const HostRegistry& registry, const std::string& file) {
         fail(file, m.entryLine, "entry function '" + m.entry + "' must have signature () -> void");
     m.entryFunc = e->second;
 
-    Ctx ctx{m, classIndex, globalIndex, hostIndex, funcIndex, file};
+    Ctx ctx{m, classIndex, globalIndex, hostIndex, funcIndex, mouthIndex, file};
     for (Function& f : m.funcs) verifyFunction(ctx, f);
 }
 

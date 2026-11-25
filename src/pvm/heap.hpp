@@ -24,6 +24,10 @@ struct Obj {
     bool marked = false;
     std::shared_ptr<const Type> type;
     std::vector<Value> items;
+    // array<byte> only: the bytes are stored compactly here and `items` stays empty (version 11)
+    std::string bytes;
+    size_t byteWeight = 0;  // how many "elements" the byte storage was charged to the heap limit (16 bytes = 1 element)
+    bool isBytes() const { return type && type->kind == Type::Array && type->elem && type->elem->kind == Type::Byte; }
     // Map only
     std::vector<Value> keys;
     std::vector<char> alive;
@@ -72,6 +76,8 @@ public:
     Obj* allocate(const std::shared_ptr<const Type>& type, size_t count, const Value& fill, const RootsFn& roots);
 
     // Creates an empty map object of the given type.
+    Obj* allocateBytes(const std::shared_ptr<const Type>& type, size_t count, const RootsFn& roots);  // array<byte>
+    void growBytes(Obj* o, const RootsFn& roots);
     Obj* allocateMap(const std::shared_ptr<const Type>& type, const RootsFn& roots);
 
     // Removes dead entries from a map (after removals) and fixes the accounting.

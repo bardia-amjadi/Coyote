@@ -53,6 +53,39 @@ bool isPathSpec(const std::string& s) {
            (s.size() > 4 && s.compare(s.size() - 4, 4, ".coy") == 0);
 }
 
+// The implicit prelude (0.8): the base of every exception. Its classes are visible in every file without `use`.
+const char* kPrelude = R"PRELUDE(mouth:sys exception {get;}
+mouth:sys exceptionObject {get;}
+mouth:sys stackTrace {get;}
+
+# The base class of everything that can be thrown. `throw "text"` raises an Exception with that message.
+public class Exception {
+    public field string Message
+    public field string StackTrace = ""
+    public constructor() { Message = "" }
+    public constructor(string message) { Message = message }
+    public method ToString(): string { return "Error: " + Message }
+    # The exception the running `catch` caught: the object that was thrown, or a RuntimeError made from a failure of the runtime.
+    public shared method Caught(): Exception {
+        string trace = string(stackTrace)
+        if (exceptionObject == null) {
+            var r = new RuntimeError(string(exception))
+            r.StackTrace = trace
+            return r
+        }
+        dyn o = exceptionObject
+        Exception ex = o
+        if (ex.StackTrace == "") { ex.StackTrace = trace }
+        return ex
+    }
+}
+
+# What the runtime raises itself: division by zero, index out of range, a null reference, a failed conversion, a failing host function...
+public class RuntimeError : Exception {
+    public constructor(string message) : base(message) { }
+}
+)PRELUDE";
+
 class Loader {
 public:
     Loader(Program& out, std::vector<Diagnostic>& diags) : out_(out), diags_(diags) {}
@@ -65,6 +98,12 @@ public:
         for (size_t i = 0; i < out_.modules.size(); ++i) {
             if (diags_.size() > before_) break;
             resolveImports(i);
+        }
+        if (diags_.size() == before_) {
+            const int pi = add("<prelude>", kPrelude, true);
+            if (pi >= 0)
+                for (ClassDecl& c : out_.classes)
+                    if (c.unit == pi) c.builtin = true;
         }
         return diags_.size() == before_;
     }
@@ -111,6 +150,10 @@ private:
         for (HandDecl& h : p.hands) {
             h.unit = idx;
             out_.hands.push_back(std::move(h));
+        }
+        for (MouthDecl& md : p.mouths) {
+            md.unit = idx;
+            out_.mouths.push_back(std::move(md));
         }
         for (MethodDecl& md : p.methods) {
             md.unit = idx;

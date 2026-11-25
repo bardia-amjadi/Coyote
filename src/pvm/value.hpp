@@ -24,6 +24,8 @@ struct Value {
 
     static Value ofInt(long long v) { Value x; x.kind = Type::Int; x.i = v; return x; }
     static Value ofBool(bool v) { Value x; x.kind = Type::Bool; x.i = v ? 1 : 0; return x; }
+    static Value ofLong(long long v) { Value x; x.kind = Type::Long; x.i = v; return x; }
+    static Value ofByte(long long v) { Value x; x.kind = Type::Byte; x.i = v; return x; }
     static Value ofChar(long long cp) { Value x; x.kind = Type::Char; x.i = cp; return x; }
     static Value ofDouble(double v) { Value x; x.kind = Type::Double; x.d = v; return x; }
     static Value ofString(std::string v) { Value x; x.kind = Type::String; x.s = std::move(v); return x; }
@@ -40,6 +42,8 @@ struct Value {
             case Type::Int: return ofInt(0);
             case Type::Bool: return ofBool(false);
             case Type::Char: return ofChar(0);
+            case Type::Long: return ofLong(0);
+            case Type::Byte: return ofByte(0);
             case Type::Double: return ofDouble(0.0);
             case Type::String: return ofString("");
             case Type::Guid: return ofGuid("00000000-0000-0000-0000-000000000000");

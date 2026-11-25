@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "heap.hpp"
 #include "host.hpp"
 
 #ifdef _WIN32
@@ -58,6 +59,15 @@ fs::path pathOf(const std::string& s) {
 
 [[noreturn]] void fail(const std::string& what, const std::string& path, const std::error_code& ec) {
     throw HostError{what + " '" + path + "': " + (ec ? ec.message() : "failed")};
+}
+
+// A new array<byte> holding `data` (needs the running program's heap).
+Value newByteArray(HostContext& c, const std::string& data) {
+    if (!c.heap || !c.roots) throw HostError{"this host function needs a running program (no heap available)"};
+    static const std::shared_ptr<const Type> byteArrayType = std::make_shared<const Type>(Type::arrayOf(Type(Type::Byte)));
+    Obj* o = c.heap->allocateBytes(byteArrayType, data.size(), *c.roots);
+    o->bytes = data;
+    return Value::ofArray(o);
 }
 
 std::string readFile(const std::string& path) {
@@ -364,6 +374,9 @@ void registerSystemHosts(HostRegistry& r) {
     add(r, "file.readAll", {Type::String}, Type::String, "file", [](const Args& a, HostContext&) { return Value::ofString(readFile(a[0].s)); });
     add(r, "file.writeAll", {Type::String, Type::String}, Type::Void, "file", [](const Args& a, HostContext&) { writeFile(a[0].s, a[1].s, false); return Value::none(); });
     add(r, "file.append", {Type::String, Type::String}, Type::Void, "file", [](const Args& a, HostContext&) { writeFile(a[0].s, a[1].s, true); return Value::none(); });
+    add(r, "file.readBytes", {Type::String}, Type::arrayOf(Type::Byte), "file", [](const Args& a, HostContext& c) { return newByteArray(c, readFile(a[0].s)); });
+    add(r, "file.writeBytes", {Type::String, Type::arrayOf(Type::Byte)}, Type::Void, "file", [](const Args& a, HostContext&) { writeFile(a[0].s, a[1].ref->bytes, false); return Value::none(); });
+    add(r, "file.appendBytes", {Type::String, Type::arrayOf(Type::Byte)}, Type::Void, "file", [](const Args& a, HostContext&) { writeFile(a[0].s, a[1].ref->bytes, true); return Value::none(); });
     add(r, "file.exists", {Type::String}, Type::Bool, "file", [](const Args& a, HostContext&) {
         std::error_code ec;
         return Value::ofBool(fs::is_regular_file(pathOf(a[0].s), ec));
@@ -387,18 +400,17 @@ void registerSystemHosts(HostRegistry& r) {
         if (ec) fail("cannot move", a[0].s, ec);
         return Value::none();
     });
-    add(r, "file.size", {Type::String}, Type::Int, "file", [](const Args& a, HostContext&) {
+    add(r, "file.size", {Type::String}, Type::Long, "file", [](const Args& a, HostContext&) {
         std::error_code ec;
         auto n = fs::file_size(pathOf(a[0].s), ec);
         if (ec) fail("cannot get the size of", a[0].s, ec);
-        if (n > 2147483647ull) throw HostError{"'" + a[0].s + "' is larger than 2 GiB, which does not fit an int"};
-        return Value::ofInt(static_cast<long long>(n));
+        return Value::ofLong(static_cast<long long>(n));
     });
-    add(r, "file.modified", {Type::String}, Type::Int, "file", [](const Args& a, HostContext&) {
+    add(r, "file.modified", {Type::String}, Type::Long, "file", [](const Args& a, HostContext&) {
         std::error_code ec;
         auto t = fs::last_write_time(pathOf(a[0].s), ec);
         if (ec) fail("cannot get the time of", a[0].s, ec);
-        return Value::ofInt(unixOf(t));
+        return Value::ofLong(unixOf(t));
     });
     add(r, "file.fullPath", {Type::String}, Type::String, "file", [](const Args& a, HostContext&) {
         std::error_code ec;
@@ -487,8 +499,38 @@ void registerSystemHosts(HostRegistry& r) {
         return Value::ofString(h ? h : "");
     });
 
+    // ---- encoding (pure): UTF-8 text <-> array<byte> ----
+    add(r, "encoding.toBytes", {Type::String}, Type::arrayOf(Type::Byte), "", [](const Args& a, HostContext& c) { return newByteArray(c, a[0].s); });
+    add(r, "encoding.fromBytes", {Type::arrayOf(Type::Byte)}, Type::String, "", [](const Args& a, HostContext&) {
+        // strict UTF-8 decoding; every broken or overlong sequence, surrogate or value above U+10FFFF becomes U+FFFD
+        const std::string& in = a[0].ref->bytes;
+        std::string out;
+        out.reserve(in.size());
+        size_t i = 0;
+        const auto bad = [&]() { out += "\xEF\xBF\xBD"; };
+        while (i < in.size()) {
+            const unsigned char b = static_cast<unsigned char>(in[i]);
+            size_t need = b < 0x80 ? 0 : (b >= 0xC2 && b < 0xE0) ? 1 : (b >= 0xE0 && b < 0xF0) ? 2 : (b >= 0xF0 && b < 0xF5) ? 3 : 99;
+            if (need == 99) { bad(); ++i; continue; }
+            if (need == 0) { out += static_cast<char>(b); ++i; continue; }
+            if (i + need >= in.size()) { bad(); ++i; continue; }
+            unsigned long cp = need == 1 ? (b & 0x1Fu) : need == 2 ? (b & 0x0Fu) : (b & 0x07u);
+            bool ok = true;
+            for (size_t k = 1; k <= need; ++k) {
+                const unsigned char cb = static_cast<unsigned char>(in[i + k]);
+                if ((cb & 0xC0) != 0x80) { ok = false; break; }
+                cp = (cp << 6) | (cb & 0x3Fu);
+            }
+            if (ok && ((need == 2 && cp < 0x800) || (need == 3 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF))) ok = false;
+            if (!ok) { bad(); ++i; continue; }
+            out.append(in, i, need + 1);
+            i += need + 1;
+        }
+        return Value::ofString(std::move(out));
+    });
+
     // ---- time.format ----
-    add(r, "time.format", {Type::Int, Type::String, Type::Bool}, Type::String, "time", [](const Args& a, HostContext&) {
+    add(r, "time.format", {Type::Long, Type::String, Type::Bool}, Type::String, "time", [](const Args& a, HostContext&) {
         if (a[1].s.empty() || a[1].s.size() > 200) throw HostError{"the time format must be 1 to 200 characters (strftime codes such as %Y-%m-%d %H:%M:%S)"};
         std::time_t t = static_cast<std::time_t>(a[0].i);
         std::tm tmv{};

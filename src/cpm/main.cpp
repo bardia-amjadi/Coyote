@@ -34,7 +34,7 @@ void usage(std::ostream& os) {
        << "  lock                 re-resolve and write the lock file without installing\n"
        << "  list                 list the locked packages\n"
        << "  verify               check the installed packages against the lock file\n"
-       << "  init [name] [--structured|--library|--cyproj]  create packages.json and app.coy (or <name>.cyproj and src/main.coy), or a library project (never overwrites)\n"
+       << "  init [name] [--structured|--library|--cyproj|--vision]  create packages.json and app.coy (or <name>.cyproj and src/main.coy), or a library project (never overwrites)\n"
        << "  layout --structured [--apply]  show (or with --apply, perform) the move of root .coy files into src/\n"
        << "exit codes: 0 ok; 1 operation failed; 64 usage error or invalid packages.json\n";
 }
@@ -230,10 +230,11 @@ std::string sanitizeName(const std::string& s) {
 }
 
 int cmdInit(const std::string& dir, std::vector<std::string> args) {
-    bool structured = false, library = false, cyproj = false;
+    bool structured = false, library = false, cyproj = false, vision = false;
     std::string name;
     for (const std::string& a : args) {
         if (a == "--cyproj") cyproj = true;
+        else if (a == "--vision") { vision = true; cyproj = true; }  // a Vision UI app (Gen One): window files, appsettings.json
         else if (a == "--structured") structured = true;
         else if (a == "--library") library = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "cpm: error: unknown option '" << a << "'\n"; return kExitUsage; }
@@ -241,6 +242,7 @@ int cmdInit(const std::string& dir, std::vector<std::string> args) {
         else { std::cerr << "cpm: error: only one project name is allowed\n"; return kExitUsage; }
     }
     if (library && structured) { std::cerr << "cpm: error: --library and --structured cannot be combined\n"; return kExitUsage; }
+    if (vision && (library || structured)) { std::cerr << "cpm: error: --vision cannot be combined with --library or --structured\n"; return kExitUsage; }
     if (cyproj && structured) { std::cerr << "cpm: error: --cyproj and --structured cannot be combined\n"; return kExitUsage; }
     fs::path root = dir;
     std::error_code ec;
@@ -257,7 +259,7 @@ int cmdInit(const std::string& dir, std::vector<std::string> args) {
         else
             manifest = "{\n  \"schemaVersion\": 1,\n  \"name\": \"" + name + "\",\n  \"version\": \"1.0.0\",\n  \"type\": \"app\",\n  \"entry\": \"src/main.coy\",\n  \"description\": \"\",\n"
                        "  \"output\": { \"directory\": \"bin\", \"name\": \"" + name + "\", \"kind\": \"native\", \"mode\": \"auto\", \"keepUnused\": false },\n"
-                       "  \"run\": { \"args\": [] }\n}\n";
+                       "  \"run\": { \"args\": [] }" + (vision ? ",\n  \"requires\": [\"VisionUI\"]" : "") + "\n}\n";
     } else if (structured) {
         manifest = "{\n  \"schemaVersion\": 1,\n  \"name\": \"" + name + "\",\n  \"version\": \"0.1.0\",\n  \"entry\": \"app.coy\",\n"
                    "  \"workflows\": {\n    \"build\": [[\"coyote\", \"build\", \"app.coy\", \"-o\", \"bin/" + name + ".ml\"]],\n"
@@ -289,7 +291,65 @@ int cmdInit(const std::string& dir, std::vector<std::string> args) {
                          "        Shell.PrintLine(\"Hello, \" + who + \"!\")\n"
                          "    }\n"
                          "}\n"});
-    else
+    else if (vision) {
+        const std::string ns = cls + ".Windows";
+        auto fill = [&](std::string t) {
+            for (const auto& kv : std::vector<std::pair<std::string, std::string>>{{"@NS@", ns}, {"@NAME@", name}}) {
+                size_t at;
+                while ((at = t.find(kv.first)) != std::string::npos) t.replace(at, kv.first.size(), kv.second);
+            }
+            return t;
+        };
+        files.push_back({"appsettings.json", fill(R"({
+  "Targeting": {
+    "Platform": "Windows"
+  },
+  "Logging": {
+    "Level": "Information"
+  }
+}
+)")});
+        files.push_back({"src/main.coy", fill(R"(use "Standard"
+use "VisionUI"
+use "@NS@"
+
+var builder = ApplicationBuilder.Create()
+builder.Configuration.Setup("appsettings.json")
+var app = builder.Build()
+
+app.Map("~/windows/MainWindow.xml", new MainWindow())
+
+app.Run()
+)")});
+        files.push_back({"windows/MainWindow.xml", fill(R"(<Window ns="@NS@" name="MainWindow">
+    <Meta>
+        <Basic title="@NAME@" width="480" height="320" />
+        <Import src="VisionUI.Packages.Designs.Material" />
+    </Meta>
+    <Label text="Hello World" />
+    <Label id="counterLabel" text="You clicked $Model.Counter times" visible="false" />
+    <Button text="Click Me" onClick="ButtonClicked" attach="counterLabel" />
+</Window>
+)")});
+        files.push_back({"windows/MainWindow.xml.coy", fill(R"(namespace @NS@
+use "Standard"
+use "VisionUI"
+
+public class MainWindow : Window {
+    constructor() {
+        here.Model.Set("Counter", 0)
+        here.Handle("ButtonClicked", (EventArgs e) : EventResults => here.ButtonClicked(e))
+    }
+
+    method ButtonClicked(EventArgs e): EventResults {
+        int n = here.Model.GetInt("Counter") + 1
+        here.Model.Set("Counter", n)
+        e.Attached[0].Visible = true
+        return EventResults.Handled
+    }
+}
+)")});
+    } else
         files.push_back({appEntry, "use \"Standard\"\n\nShell.PrintLine(\"Hello from " + name + "\")\n"});
     if (structured) files.push_back({"appsettings.json", "{\n  \"appName\": \"" + name + "\"\n}\n"});
     for (const auto& f : files)

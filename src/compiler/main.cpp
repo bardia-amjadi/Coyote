@@ -25,7 +25,7 @@
 namespace {
 
 void usage(std::ostream& os) {
-    os << "Coyote compiler " COYOTE_VERSION " (ML format version " << coyote::kMlVersion << ")\n"
+    os << "Coyote compiler " COYOTE_VERSION " (ML formats " << coyote::kMlVersion << " to 12)\n"
        << "usage:\n"
        << "  coyote build <file.coy> [-o <out.ml>]   compile to textual ML ('-o -' writes to stdout)\n"
        << "  coyote check <file.coy>                 report diagnostics without writing output\n"

@@ -55,6 +55,47 @@ bool parseIntStrict(const std::string& s, long long& out) {
     return true;
 }
 
+bool parseLongStrict(const std::string& s, long long& out) {
+    size_t i = 0;
+    bool neg = false;
+    if (i < s.size() && (s[i] == '-' || s[i] == '+')) { neg = s[i] == '-'; ++i; }
+    if (i == s.size()) return false;
+    unsigned long long v = 0;
+    const unsigned long long limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    for (; i < s.size(); ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        const unsigned long long d = static_cast<unsigned long long>(s[i] - '0');
+        if (v > (limit - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    out = neg ? static_cast<long long>(0ULL - v) : static_cast<long long>(v);
+    return true;
+}
+
+size_t cpLength(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s)
+        if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+
+bool cpAt(const std::string& s, long long index, long long& cp) {
+    if (index < 0) return false;
+    long long n = -1;
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+        if (++n == index) {
+            long long v = len == 1 ? c : len == 2 ? (c & 0x1F) : len == 3 ? (c & 0x0F) : (c & 0x07);
+            for (size_t k = 1; k < len && i + k < s.size(); ++k) v = (v << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+            cp = v;
+            return true;
+        }
+        i += len;
+    }
+    return false;
+}
+
 bool parseDoubleStrict(const std::string& s, double& out) {
     if (s.empty()) return false;
     for (char c : s)
@@ -90,7 +131,7 @@ bool parseGuidStrict(const std::string& s, std::string& canonical) {
 
 std::string mapKeyText(const Value& k) {
     switch (k.kind) {
-        case Type::Int: case Type::Char: case Type::Bool: return std::to_string(k.i);
+        case Type::Int: case Type::Char: case Type::Bool: case Type::Long: case Type::Byte: return std::to_string(k.i);
         default: return k.s;
     }
 }
@@ -103,6 +144,8 @@ std::string runtimeTypeName(const Value& v) {
     }
     switch (p->kind) {
         case Type::Int: return "int";
+        case Type::Long: return "long";
+        case Type::Byte: return "byte";
         case Type::Bool: return "boolean";
         case Type::Char: return "char";
         case Type::Double: return "double";
@@ -121,14 +164,14 @@ std::string display(const Value& v) {
     }
     if (p->isNull) return "null";
     switch (p->kind) {
-        case Type::Int: return std::to_string(p->i);
+        case Type::Int: case Type::Long: case Type::Byte: return std::to_string(p->i);
         case Type::Bool: return p->i ? "true" : "false";
         case Type::Char: { std::string s; appendUtf8(s, p->i); return s; }
         case Type::Double: return formatDouble(p->d);
         case Type::String: case Type::Guid: return p->s;
         case Type::Array:
             if (!p->ref) return "null";
-            return typeName(*p->ref->type) + "[" + std::to_string(p->ref->items.size()) + " items]";
+            return typeName(*p->ref->type) + "[" + std::to_string(p->ref->isBytes() ? p->ref->bytes.size() : p->ref->items.size()) + " items]";
         case Type::Map:
             if (!p->ref) return "null";
             return typeName(*p->ref->type) + "[" + std::to_string(p->ref->live) + " entries]";
@@ -175,6 +218,7 @@ Value unboxTo(const Value& obj, const Type& t) {
         return v;
     }
     if (want.kind == Type::Double && in.kind == Type::Int) return Value::ofDouble(static_cast<double>(in.i));  // implicit widening
+    if (want.kind == Type::Long && in.kind == Type::Int) return Value::ofLong(in.i);
     throw OpError{"cannot convert " + runtimeTypeName(obj) + " to " + typeName(t)};
 }
 
@@ -184,7 +228,7 @@ bool objEquals(const Value& a, const Value& b) {
     const Value& y = *b.boxed;
     if (x.kind != y.kind) return false;
     switch (x.kind) {
-        case Type::Int: case Type::Bool: case Type::Char: return x.i == y.i;
+        case Type::Int: case Type::Bool: case Type::Char: case Type::Long: case Type::Byte: return x.i == y.i;
         case Type::Double: return x.d == y.d;
         case Type::String: case Type::Guid: return x.s == y.s;
         case Type::Array: case Type::Map: case Type::Class: return x.ref == y.ref;
@@ -194,8 +238,9 @@ bool objEquals(const Value& a, const Value& b) {
 
 namespace {
 
-bool isNumber(const Value& v) { return v.kind == Type::Int || v.kind == Type::Double; }
-double asDouble(const Value& v) { return v.kind == Type::Int ? static_cast<double>(v.i) : v.d; }
+bool isNumber(const Value& v) { return v.kind == Type::Int || v.kind == Type::Long || v.kind == Type::Byte || v.kind == Type::Double; }
+bool isWhole(const Value& v) { return v.kind == Type::Int || v.kind == Type::Long || v.kind == Type::Byte; }
+double asDouble(const Value& v) { return v.kind == Type::Double ? v.d : static_cast<double>(v.i); }
 
 const char* opText(Op op) {
     switch (op) {
@@ -261,7 +306,25 @@ Value dynBinary(Op op, const Value& oa, const Value& ob) {
     }
 
     if (!isNumber(a) || !isNumber(b)) badOperands(op, oa, ob);
-    if (a.kind == Type::Int && b.kind == Type::Int) {
+    if (isWhole(a) && isWhole(b) && (a.kind == Type::Long || b.kind == Type::Long)) {  // long arithmetic (an int or byte operand widens)
+        long long r = 0;
+        switch (op) {
+            case Op::DynAdd: if (__builtin_add_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynSub: if (__builtin_sub_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynMul: if (__builtin_mul_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynDiv:
+                if (b.i == 0) throw OpError{"division by zero"};
+                if (a.i == LLONG_MIN && b.i == -1) throw OpError{"long overflow"};
+                r = a.i / b.i;
+                break;
+            default:
+                if (b.i == 0) throw OpError{"remainder by zero"};
+                r = b.i == -1 ? 0 : a.i % b.i;
+                break;
+        }
+        return boxValue(Value::ofLong(r));
+    }
+    if (isWhole(a) && isWhole(b)) {  // int and byte arithmetic happens in int
         switch (op) {
             case Op::DynAdd: return boxValue(checkedInt(a.i + b.i));
             case Op::DynSub: return boxValue(checkedInt(a.i - b.i));
@@ -287,7 +350,11 @@ Value dynBinary(Op op, const Value& oa, const Value& ob) {
 Value dynUnary(Op op, const Value& oa) {
     if (oa.boxed) {
         const Value& a = *oa.boxed;
-        if (op == Op::DynNeg && a.kind == Type::Int) return boxValue(checkedInt(-a.i));
+        if (op == Op::DynNeg && (a.kind == Type::Int || a.kind == Type::Byte)) return boxValue(checkedInt(-a.i));
+        if (op == Op::DynNeg && a.kind == Type::Long) {
+            if (a.i == LLONG_MIN) throw OpError{"long overflow"};
+            return boxValue(Value::ofLong(-a.i));
+        }
         if (op == Op::DynNeg && a.kind == Type::Double) return boxValue(Value::ofDouble(-a.d));
         if (op == Op::DynNot && a.kind == Type::Bool) return boxValue(Value::ofBool(a.i == 0));
     }

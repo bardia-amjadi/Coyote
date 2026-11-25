@@ -15,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -34,8 +35,9 @@ Sig sig(std::vector<Type> params, Type ret) {
     return s;
 }
 
-void add(HostRegistry& r, const std::string& name, std::vector<Type> params, Type ret, std::function<Value(const Args&, HostContext&)> fn) {
-    r.add(HostFunction{"win." + name, sig(std::move(params), ret), "windows", std::move(fn)});
+void add(HostRegistry& r, const std::string& name, std::vector<Type> params, Type ret, std::function<Value(const Args&, HostContext&)> fn,
+         const char* permission = "windows") {
+    r.add(HostFunction{"win." + name, sig(std::move(params), ret), permission, std::move(fn)});
 }
 
 #ifndef _WIN32
@@ -77,11 +79,68 @@ void flushOut(HostContext& c) { c.out.flush(); }
 
 // ---------- message box ----------
 
+// Modern look: a TaskDialog (Common Controls 6, enabled by the manifest embedded in the exe, see src/win/coyote.manifest).
+// If comctl32 v6 is not active (or TaskDialogIndirect is missing) the classic MessageBox is used instead.
+typedef HRESULT(WINAPI* TaskDialogIndirectFn)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+
+HRESULT CALLBACK taskDialogCallback(HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR) {
+    if (msg == TDN_CREATED) SetForegroundWindow(hwnd);
+    return S_OK;
+}
+
+// Returns 0 when the TaskDialog could not be shown, otherwise the button id (IDOK, IDCANCEL, IDYES, ...).
+int showTaskDialog(const std::string& text, const std::string& title, long long buttons, long long icon) {
+    if (buttons == 2 || buttons == 6) return 0;  // Abort/Retry/Ignore and Cancel/Try again/Continue have no localized common buttons
+    static TaskDialogIndirectFn fn = [] {
+        HMODULE m = LoadLibraryW(L"comctl32.dll");
+        return m ? reinterpret_cast<TaskDialogIndirectFn>(reinterpret_cast<void*>(GetProcAddress(m, "TaskDialogIndirect"))) : nullptr;
+    }();
+    if (!fn) return 0;
+    TASKDIALOGCONFIG cfg;
+    ZeroMemory(&cfg, sizeof cfg);
+    cfg.cbSize = sizeof cfg;
+    cfg.dwFlags = TDF_SIZE_TO_CONTENT;
+    cfg.pfCallback = taskDialogCallback;
+    switch (buttons) {
+        case 0: cfg.dwCommonButtons = TDCBF_OK_BUTTON; cfg.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION; break;
+        case 1: cfg.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON; cfg.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION; break;
+        case 3: cfg.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON; cfg.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION; break;
+        case 4: cfg.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON; break;
+        case 5: cfg.dwCommonButtons = TDCBF_RETRY_BUTTON | TDCBF_CANCEL_BUTTON; cfg.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION; break;
+        default: return 0;
+    }
+    switch (icon) {
+        case 16: cfg.pszMainIcon = TD_ERROR_ICON; break;
+        case 48: cfg.pszMainIcon = TD_WARNING_ICON; break;
+        case 64: cfg.pszMainIcon = TD_INFORMATION_ICON; break;
+        case 32: cfg.hMainIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32514))  /* IDI_QUESTION */; cfg.dwFlags |= TDF_USE_HICON_MAIN; break;
+        default: break;
+    }
+    // "Headline\nDetails": the first line becomes the large main instruction, the rest the content; a single line is plain content.
+    const std::wstring wtitle = W(title);
+    std::wstring wmain, wcontent = W(text);
+    const size_t nl = wcontent.find(L'\n');
+    if (nl != std::wstring::npos && nl > 0 && nl + 1 < wcontent.size()) {
+        wmain = wcontent.substr(0, nl);
+        wcontent = wcontent.substr(nl + 1);
+        while (!wcontent.empty() && (wcontent.front() == L'\n' || wcontent.front() == L'\r')) wcontent.erase(wcontent.begin());
+        while (!wmain.empty() && wmain.back() == L'\r') wmain.pop_back();
+    }
+    cfg.pszWindowTitle = wtitle.empty() ? L" " : wtitle.c_str();
+    if (!wmain.empty()) cfg.pszMainInstruction = wmain.c_str();
+    cfg.pszContent = wcontent.c_str();
+    int button = 0;
+    if (FAILED(fn(&cfg, &button, nullptr, nullptr))) return 0;
+    if (buttons == 0 && button == IDCANCEL) button = IDOK;  // closing a plain OK box counts as OK, like MessageBox
+    return button;
+}
+
 Value w_messageBox(const Args& a, HostContext& c) {
     const long long buttons = a[2].i, icon = a[3].i;
     if (buttons < 0 || buttons > 6) throw HostError{"MessageBox buttons must be 0..6 (OK, OKCancel, AbortRetryIgnore, YesNoCancel, YesNo, RetryCancel, CancelTryContinue)"};
     if (icon != 0 && icon != 16 && icon != 32 && icon != 48 && icon != 64) throw HostError{"MessageBox icon must be 0 (none), 16 (error), 32 (question), 48 (warning) or 64 (information)"};
     flushOut(c);
+    if (const int modern = showTaskDialog(a[0].s, a[1].s, buttons, icon)) return Value::ofInt(modern);
     const int r = MessageBoxW(nullptr, W(a[0].s).c_str(), W(a[1].s).c_str(), static_cast<UINT>(buttons | icon) | MB_SETFOREGROUND);
     if (r == 0) throw HostError{"MessageBox failed: " + lastError()};
     return Value::ofInt(r);
@@ -356,72 +415,6 @@ Value w_processList(const Args&, HostContext&) {
     return Value::ofString(out);
 }
 
-std::wstring quoteArg(const std::wstring& s) {
-    if (!s.empty() && s.find_first_of(L" \t\"") == std::wstring::npos) return s;
-    return L"\"" + s + L"\"";
-}
-
-bool launch(const std::string& command, const std::string& args, PROCESS_INFORMATION& pi) {
-    if (command.empty()) throw HostError{"the program to start is empty"};
-    std::wstring line = quoteArg(W(command));
-    if (!args.empty()) line += L" " + W(args);
-    std::vector<wchar_t> buf(line.begin(), line.end());
-    buf.push_back(L'\0');
-    STARTUPINFOW si{};
-    si.cb = sizeof si;
-    pi = PROCESS_INFORMATION{};
-    return CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) != 0;
-}
-
-Value w_processStart(const Args& a, HostContext& c) {
-    flushOut(c);
-    PROCESS_INFORMATION pi;
-    if (!launch(a[0].s, a[1].s, pi)) throw HostError{"cannot start '" + a[0].s + "': " + lastError()};
-    const DWORD pid = pi.dwProcessId;
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return Value::ofInt(pid);
-}
-
-Value w_processRun(const Args& a, HostContext& c) {
-    flushOut(c);
-    if (a[2].i < 0 || a[2].i > 86400000LL) throw HostError{"the timeout must be 0..86400000 milliseconds (0 waits for ever)"};
-    PROCESS_INFORMATION pi;
-    if (!launch(a[0].s, a[1].s, pi)) throw HostError{"cannot start '" + a[0].s + "': " + lastError()};
-    CloseHandle(pi.hThread);
-    const DWORD w = WaitForSingleObject(pi.hProcess, a[2].i == 0 ? INFINITE : static_cast<DWORD>(a[2].i));
-    if (w == WAIT_TIMEOUT) {
-        CloseHandle(pi.hProcess);
-        throw HostError{"'" + a[0].s + "' did not finish within " + std::to_string(a[2].i) + " ms (it is still running)"};
-    }
-    DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    return Value::ofInt(static_cast<long long>(static_cast<int>(code)));
-}
-
-Value w_processIsRunning(const Args& a, HostContext&) {
-    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(a[0].i));
-    if (!h) return Value::ofBool(false);
-    const bool running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-    CloseHandle(h);
-    return Value::ofBool(running);
-}
-
-Value w_processKill(const Args& a, HostContext&) {
-    if (a[0].i <= 0 || a[0].i > 0xFFFFFFFFLL) throw HostError{"invalid process id " + std::to_string(a[0].i)};
-    if (static_cast<DWORD>(a[0].i) == GetCurrentProcessId()) throw HostError{"a program cannot kill itself with win.processKill (use Environment.Exit)"};
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(a[0].i));
-    if (!h) throw HostError{"cannot open process " + std::to_string(a[0].i) + ": " + lastError()};
-    const BOOL ok = TerminateProcess(h, 1);
-    const std::string e = ok ? "" : lastError();
-    CloseHandle(h);
-    if (!ok) throw HostError{"cannot end process " + std::to_string(a[0].i) + ": " + e};
-    return Value::ofBool(true);
-}
-
-Value w_processId(const Args&, HostContext&) { return Value::ofInt(GetCurrentProcessId()); }
-
 Value w_shellOpen(const Args& a, HostContext&) {
     if (a[0].s.empty()) throw HostError{"nothing to open"};
     const INT_PTR r = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", W(a[0].s).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
@@ -558,6 +551,114 @@ Value w_notify(const Args& a, HostContext& c) {
     DestroyWindow(hwnd);
     return Value::none();
 }
+
+// ---- native calls (Standard.Windows.InteropServices; permission "interop") -----------------------------------------
+std::map<std::string, HMODULE> g_dlls;
+std::vector<std::vector<char>> g_dllBuffers;
+
+// Number of bytes that hold the next `count` UTF-8 characters starting at pos (item lengths count characters, like Standard.Text).
+size_t utf8Span(const std::string& s, size_t pos, size_t count) {
+    size_t i = pos;
+    while (count > 0 && i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+        i += n;
+        --count;
+    }
+    if (count > 0 || i > s.size()) throw HostError{"malformed argument list"};
+    return i - pos;
+}
+
+std::vector<std::string> decodeCallItems(const std::string& s) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        const size_t colon = s.find(':', pos);
+        if (colon == std::string::npos) throw HostError{"malformed argument list"};
+        const size_t len = static_cast<size_t>(std::strtoull(s.substr(pos, colon - pos).c_str(), nullptr, 10));
+        const size_t bytes = utf8Span(s, colon + 1, len);
+        out.push_back(s.substr(colon + 1, bytes));
+        pos = colon + 1 + bytes;
+    }
+    return out;
+}
+
+Value w_dllLoad(const Args& a, HostContext&) {
+    if (a[0].s.empty()) throw HostError{"the library name is empty"};
+    if (g_dlls.count(a[0].s)) return Value::ofBool(true);
+    HMODULE h = LoadLibraryW(W(a[0].s).c_str());
+    if (!h) return Value::ofBool(false);
+    g_dlls[a[0].s] = h;
+    return Value::ofBool(true);
+}
+
+Value w_dllHasFunction(const Args& a, HostContext&) {
+    auto it = g_dlls.find(a[0].s);
+    if (it == g_dlls.end()) throw HostError{"the library '" + a[0].s + "' is not loaded"};
+    return Value::ofBool(GetProcAddress(it->second, a[1].s.c_str()) != nullptr);
+}
+
+Value w_dllCall(const Args& a, HostContext&) {
+#if !defined(_WIN64)
+    throw HostError{"native calls need a 64-bit build of Coyote"};
+#else
+    auto it = g_dlls.find(a[0].s);
+    if (it == g_dlls.end()) throw HostError{"the library '" + a[0].s + "' is not loaded"};
+    FARPROC fp = GetProcAddress(it->second, a[1].s.c_str());
+    if (!fp) throw HostError{"'" + a[0].s + "' has no function '" + a[1].s + "'"};
+    const std::string& types = a[2].s;
+    std::vector<std::string> vals = decodeCallItems(a[3].s);
+    if (types.size() != vals.size()) throw HostError{"the call has " + std::to_string(types.size()) + " argument types but " + std::to_string(vals.size()) + " values"};
+    if (types.size() > 8) throw HostError{"a native call takes at most 8 arguments"};
+    std::vector<std::string> ansi(types.size());
+    std::vector<std::wstring> wide(types.size());
+    g_dllBuffers.clear();
+    std::vector<long long> bufferOf(types.size(), -1);
+    intptr_t arg[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = 0; i < types.size(); ++i) {
+        switch (types[i]) {
+            case 'i': {
+                char* end = nullptr;
+                const long long v = std::strtoll(vals[i].c_str(), &end, 10);
+                if (vals[i].empty() || *end != '\0') throw HostError{"argument " + std::to_string(i + 1) + " ('" + vals[i] + "') is not an integer"};
+                arg[i] = static_cast<intptr_t>(v);
+                break;
+            }
+            case 'b': arg[i] = vals[i] == "true" ? 1 : 0; break;
+            case 's': ansi[i] = vals[i]; arg[i] = reinterpret_cast<intptr_t>(ansi[i].c_str()); break;
+            case 'w': wide[i] = W(vals[i]); arg[i] = reinterpret_cast<intptr_t>(wide[i].c_str()); break;
+            case 'o': {
+                const long long n = std::strtoll(vals[i].c_str(), nullptr, 10);
+                if (n <= 0 || n > 16 * 1024 * 1024) throw HostError{"an output buffer must be 1 to 16777216 bytes"};
+                g_dllBuffers.emplace_back(static_cast<size_t>(n) + 2, '\0');
+                bufferOf[i] = static_cast<long long>(g_dllBuffers.size() - 1);
+                arg[i] = reinterpret_cast<intptr_t>(g_dllBuffers.back().data());
+                break;
+            }
+            default: throw HostError{std::string("unknown argument type '") + types[i] + "' (use i, b, s, w, o)"};
+        }
+    }
+    typedef intptr_t (*Fn)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
+    const intptr_t r = reinterpret_cast<Fn>(reinterpret_cast<void*>(fp))(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7]);
+    const std::string& ret = a[4].s;
+    if (ret == "v") return Value::ofString("");
+    if (ret == "i") return Value::ofString(std::to_string(static_cast<long long>(static_cast<int>(r))));      // 32-bit signed
+    if (ret == "u") return Value::ofString(std::to_string(static_cast<long long>(static_cast<unsigned int>(r))));  // 32-bit unsigned
+    if (ret == "l") return Value::ofString(std::to_string(static_cast<long long>(r)));                          // 64-bit / pointer
+    if (ret == "b") return Value::ofString((static_cast<int>(r) != 0) ? "true" : "false");
+    if (ret == "s") return Value::ofString(r ? std::string(reinterpret_cast<const char*>(r)) : std::string());
+    if (ret == "w") return Value::ofString(r ? U(reinterpret_cast<const wchar_t*>(r)) : std::string());
+    throw HostError{"unknown return type '" + ret + "' (use v, i, u, l, b, s, w)"};
+#endif
+}
+
+// The text an output buffer of the last native call holds ('o' argument number `index`, counting from 0).
+Value w_dllBuffer(const Args& a, HostContext&) {
+    if (a[0].i < 0 || static_cast<size_t>(a[0].i) >= g_dllBuffers.size()) throw HostError{"no such output buffer"};
+    const std::vector<char>& b = g_dllBuffers[static_cast<size_t>(a[0].i)];
+    if (a[1].i != 0) return Value::ofString(U(reinterpret_cast<const wchar_t*>(b.data())));
+    return Value::ofString(std::string(b.data()));
+}
 #endif  // _WIN32
 
 }  // namespace
@@ -585,11 +686,6 @@ void registerWindowsHosts(HostRegistry& r) {
     add(r, "regValues", {S}, S, IMPL(regValues));
     // processes
     add(r, "processList", {}, S, IMPL(processList));
-    add(r, "processStart", {S, S}, I, IMPL(processStart));
-    add(r, "processRun", {S, S, I}, I, IMPL(processRun));
-    add(r, "processIsRunning", {I}, B, IMPL(processIsRunning));
-    add(r, "processKill", {I}, B, IMPL(processKill));
-    add(r, "processId", {}, I, IMPL(processId));
     add(r, "shellOpen", {S}, B, IMPL(shellOpen));
     // windows
     add(r, "windowList", {}, S, IMPL(windowList));
@@ -603,6 +699,11 @@ void registerWindowsHosts(HostRegistry& r) {
     add(r, "windowMove", {I, I, I, I, I}, V, IMPL(windowMove));
     // notifications
     add(r, "notify", {S, S, I}, V, IMPL(notify));
+    // native calls (permission "interop")
+    add(r, "dllLoad", {S}, B, IMPL(dllLoad), "interop");
+    add(r, "dllHasFunction", {S, S}, B, IMPL(dllHasFunction), "interop");
+    add(r, "dllCall", {S, S, S, S, S}, S, IMPL(dllCall), "interop");
+    add(r, "dllBuffer", {I, B}, S, IMPL(dllBuffer), "interop");
 }
 
 }  // namespace pvm

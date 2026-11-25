@@ -74,8 +74,46 @@ std::string substringCp(const std::string& s, long long start, long long len) {
     return s.substr(b, e - b);
 }
 
-std::mt19937_64& rng() {
-    static std::mt19937_64 g{std::random_device{}()};
+// The random generator is xoshiro256** seeded through splitmix64, with Lemire's unbiased range reduction; the native runtime
+// (src/llvm/main.cpp, rt_rand_*) has the same code, so a seeded program prints the same numbers on both (and on every platform).
+struct Rng {
+    unsigned long long s[4];
+    static unsigned long long rotl(unsigned long long x, int k) { return (x << k) | (x >> (64 - k)); }
+    void seed(unsigned long long v) {
+        for (int i = 0; i < 4; ++i) {
+            unsigned long long z = (v += 0x9E3779B97F4A7C15ULL);
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            s[i] = z ^ (z >> 31);
+        }
+    }
+    unsigned long long next() {
+        const unsigned long long result = rotl(s[1] * 5, 7) * 9, t = s[1] << 17;
+        s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3]; s[2] ^= t; s[3] = rotl(s[3], 45);
+        return result;
+    }
+    static void mul128(unsigned long long a, unsigned long long b, unsigned long long& hi, unsigned long long& lo) {
+        const unsigned long long a0 = a & 0xFFFFFFFFULL, a1 = a >> 32, b0 = b & 0xFFFFFFFFULL, b1 = b >> 32;
+        const unsigned long long p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+        const unsigned long long mid = (p00 >> 32) + (p01 & 0xFFFFFFFFULL) + (p10 & 0xFFFFFFFFULL);
+        lo = (mid << 32) | (p00 & 0xFFFFFFFFULL);
+        hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    }
+    long long range(long long lo, long long hi) {  // lo <= hi
+        const unsigned long long n = static_cast<unsigned long long>(hi) - static_cast<unsigned long long>(lo) + 1ULL;
+        if (n == 0) return static_cast<long long>(next());
+        unsigned long long h, l;
+        mul128(next(), n, h, l);
+        if (l < n) {
+            const unsigned long long t = (0ULL - n) % n;
+            while (l < t) mul128(next(), n, h, l);
+        }
+        return static_cast<long long>(static_cast<unsigned long long>(lo) + h);
+    }
+    double unit() { return static_cast<double>(next() >> 11) * (1.0 / 9007199254740992.0); }
+};
+Rng& rng() {
+    static Rng g = [] { Rng r; r.seed(static_cast<unsigned long long>(std::random_device{}()) << 32 ^ std::random_device{}()); return r; }();
     return g;
 }
 
@@ -90,6 +128,8 @@ void registerAllHosts(HostRegistry& r) {
     registerConsoleHosts(r);
     registerSystemHosts(r);
     registerWindowsHosts(r);
+    registerUiHosts(r);
+    registerProcessHosts(r);
 
     // con: input
     r.add(HostFunction{"con.readLine", sig({}, Type::String), "console", [](const std::vector<Value>&, HostContext& c) {
@@ -176,17 +216,15 @@ void registerAllHosts(HostRegistry& r) {
     }});
 
     // time ("time")
-    r.add(HostFunction{"time.uptimeMs", sig({}, Type::Int), "time", [](const std::vector<Value>&, HostContext&) {
-        // Milliseconds since the first call in this process; wraps to 0 after about 24 days (int is 32-bit).
+    r.add(HostFunction{"time.uptimeMs", sig({}, Type::Long), "time", [](const std::vector<Value>&, HostContext&) {
+        // Milliseconds since the first call in this process.
         using namespace std::chrono;
         static const steady_clock::time_point start = steady_clock::now();
-        return Value::ofInt(static_cast<long long>(duration_cast<milliseconds>(steady_clock::now() - start).count() % 2147483647LL));
+        return Value::ofLong(static_cast<long long>(duration_cast<milliseconds>(steady_clock::now() - start).count()));
     }});
-    r.add(HostFunction{"time.unixSeconds", sig({}, Type::Int), "time", [](const std::vector<Value>&, HostContext&) {
+    r.add(HostFunction{"time.unixSeconds", sig({}, Type::Long), "time", [](const std::vector<Value>&, HostContext&) {
         using namespace std::chrono;
-        long long s = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
-        if (s > 2147483647LL) throw HostError{"the Unix time no longer fits in an int"};
-        return Value::ofInt(s);
+        return Value::ofLong(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
     }});
     r.add(HostFunction{"time.sleep", sig({Type::Int}, Type::Void), "time", [](const std::vector<Value>& a, HostContext& c) {
         if (a[0].i < 0 || a[0].i > 60000) throw HostError{"sleep takes 0 to 60000 milliseconds"};
@@ -202,10 +240,10 @@ void registerAllHosts(HostRegistry& r) {
     }});
     r.add(HostFunction{"random.nextInt", sig({Type::Int, Type::Int}, Type::Int), "random", [](const std::vector<Value>& a, HostContext&) {
         if (a[0].i > a[1].i) throw HostError{"random range is empty (" + std::to_string(a[0].i) + " > " + std::to_string(a[1].i) + ")"};
-        return Value::ofInt(std::uniform_int_distribution<long long>(a[0].i, a[1].i)(rng()));
+        return Value::ofInt(rng().range(a[0].i, a[1].i));
     }});
     r.add(HostFunction{"random.nextDouble", sig({}, Type::Double), "random", [](const std::vector<Value>&, HostContext&) {
-        return Value::ofDouble(std::uniform_real_distribution<double>(0.0, 1.0)(rng()));
+        return Value::ofDouble(rng().unit());
     }});
 }
 
@@ -215,6 +253,9 @@ void grantAllPermissions(HostRegistry& r) {
     r.grant("system");
     r.grant("net");
     r.grant("windows");
+    r.grant("ui");
+    r.grant("process");
+    r.grant("interop");
 }
 
 void grantDefaultPermissions(HostRegistry& r) {

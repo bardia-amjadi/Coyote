@@ -11,7 +11,7 @@ namespace pvm {
 
 // A runtime/ML type. Arrays and nullable types carry an element type; maps also carry a key type.
 struct Type {
-    enum Kind { Void, Int, String, Bool, Array, Double, Char, Guid, Map, Nullable, Obj, Class, Fn };
+    enum Kind { Void, Int, String, Bool, Array, Double, Char, Guid, Map, Nullable, Obj, Class, Fn, Long, Byte };
 
     Kind kind = Void;
     std::shared_ptr<const Type> elem;  // Array: element; Map: value; Nullable: the wrapped type
@@ -77,6 +77,8 @@ inline std::string typeName(const Type& t) {
         case Type::Double: return "double";
         case Type::Char: return "char";
         case Type::Guid: return "Guid";
+        case Type::Long: return "long";
+        case Type::Byte: return "byte";
         case Type::Obj: return "obj";
         case Type::Array: return "array<" + typeName(*t.elem) + ">";
         case Type::Map: return "map<" + typeName(*t.key) + "," + typeName(*t.elem) + ">";
@@ -113,6 +115,14 @@ struct HostDecl {
     int mlLine = 0;
 };
 
+// `mouth sys.exception get set`: a host variable of type obj (version 10).
+struct MouthDecl {
+    std::string name;  // "<module>.<name>"
+    bool get = false;
+    bool set = false;
+    int mlLine = 0;
+};
+
 enum class Op {
     PushStr, PushInt, PushBool, Load, Store,
     AddI, SubI, MulI, DivI, RemI, NegI,
@@ -139,7 +149,17 @@ enum class Op {
     // version 7: class hierarchies
     Upcast, Downcast, IsInst,
     // version 8: exceptions
-    Try, EndTry, Throw
+    Try, EndTry, Throw, Throwx,
+    // version 9: (copy)
+    OCopy,
+    // version 10: mouths (host variables)
+    GetMouth, SetMouth,
+    // version 11: strings, long, bitwise operators, byte
+    StrAt, StrLen, LtS, LeS, GtS, GeS,
+    PushLng, AddL, SubL, MulL, DivL, RemL, NegL, EqL, NeL, LtL, LeL, GtL, GeL,
+    I2L, L2I, L2D, D2L, StrLng, ParseLng,
+    AndI, OrI, XorI, ShlI, ShrI, BNotI, AndL, OrL, XorL, ShlL, ShrL, BNotL,
+    I2B, B2I
 };
 
 // Instruction names and the ML version that introduced each.
@@ -194,7 +214,20 @@ inline const std::vector<OpInfo>& opTable() {
         {Op::GetGlobal, "getglobal", 5}, {Op::SetGlobal, "setglobal", 5},
         {Op::MkClosure, "mkclosure", 6}, {Op::CallFn, "callfn", 6},
         {Op::Upcast, "upcast", 7}, {Op::Downcast, "downcast", 7}, {Op::IsInst, "isinst", 7},
-        {Op::Try, "try", 8}, {Op::EndTry, "endtry", 8}, {Op::Throw, "throw", 8},
+        {Op::Try, "try", 8}, {Op::EndTry, "endtry", 8}, {Op::Throw, "throw", 8}, {Op::Throwx, "throwx", 12},
+        {Op::OCopy, "ocopy", 9},
+        {Op::GetMouth, "getmouth", 10}, {Op::SetMouth, "setmouth", 10},
+        {Op::StrAt, "str.at", 11}, {Op::StrLen, "str.len", 11}, {Op::LtS, "lt.str", 11}, {Op::LeS, "le.str", 11},
+        {Op::GtS, "gt.str", 11}, {Op::GeS, "ge.str", 11},
+        {Op::PushLng, "push.lng", 11}, {Op::AddL, "add.lng", 11}, {Op::SubL, "sub.lng", 11}, {Op::MulL, "mul.lng", 11},
+        {Op::DivL, "div.lng", 11}, {Op::RemL, "rem.lng", 11}, {Op::NegL, "neg.lng", 11}, {Op::EqL, "eq.lng", 11},
+        {Op::NeL, "ne.lng", 11}, {Op::LtL, "lt.lng", 11}, {Op::LeL, "le.lng", 11}, {Op::GtL, "gt.lng", 11}, {Op::GeL, "ge.lng", 11},
+        {Op::I2L, "i2l", 11}, {Op::L2I, "l2i", 11}, {Op::L2D, "l2d", 11}, {Op::D2L, "d2l", 11}, {Op::StrLng, "str.lng", 11},
+        {Op::ParseLng, "parse.lng", 11},
+        {Op::AndI, "and.int", 11}, {Op::OrI, "or.int", 11}, {Op::XorI, "xor.int", 11}, {Op::ShlI, "shl.int", 11},
+        {Op::ShrI, "shr.int", 11}, {Op::BNotI, "bnot.int", 11}, {Op::AndL, "and.lng", 11}, {Op::OrL, "or.lng", 11},
+        {Op::XorL, "xor.lng", 11}, {Op::ShlL, "shl.lng", 11}, {Op::ShrL, "shr.lng", 11}, {Op::BNotL, "bnot.lng", 11},
+        {Op::I2B, "i2b", 11}, {Op::B2I, "b2i", 11},
     };
     return t;
 }
@@ -215,7 +248,7 @@ struct Instr {
     long long ival = 0;  // PushInt value, PushBool 0/1, Load/Store slot, HostCall/Call argument count, ArrayLit length
     Type type;           // NewArray/ArrayLit: the element type; NewMap: the map type; PushNull/Unbox/IsType: the type
     std::shared_ptr<const Type> objType;  // NewArray/ArrayLit: array<elem>; NewMap: the map type (set by the loader)
-    int host = -1;       // HostCall: index into Module::hosts (resolved by the verifier)
+    int host = -1;       // HostCall: index into Module::hosts; GetMouth/SetMouth: index into Module::mouths (resolved by the verifier)
     int cls = -1;        // NewObj/GetField/SetField: class index (resolved by the verifier); field index is in ival
     int target = -1;     // Call: function index; GetGlobal/SetGlobal: global index; Jump/JumpFalse: instruction index (resolved by the verifier)
 };
@@ -256,6 +289,7 @@ struct Module {
     std::vector<std::string> files;  // [0] = source; more from '.file' directives (version 5)
     const std::string& fileName(int i) const { return i > 0 && static_cast<size_t>(i) < files.size() ? files[static_cast<size_t>(i)] : source; }
     std::vector<HostDecl> hosts;
+    std::vector<MouthDecl> mouths;    // version 10
     std::vector<ClassDecl> classes;   // version 5
     std::vector<GlobalDecl> globals;  // version 5
     std::vector<Function> funcs;

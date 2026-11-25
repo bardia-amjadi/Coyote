@@ -1,6 +1,7 @@
 #include "parser.hpp"
 
 #include <algorithm>
+#include <list>
 #include <set>
 
 namespace coyote {
@@ -16,10 +17,10 @@ const std::set<std::string>& unsupportedWords() {
 }
 
 const std::set<std::string>& keywords() {
-    static const std::set<std::string> w = {"hand", "method", "var", "int", "string", "boolean",
+    static const std::set<std::string> w = {"hand", "mouth", "method", "var", "int", "long", "byte", "string", "boolean",
                                             "if", "else", "while", "for", "break", "continue", "return", "true", "false", "array", "new",
-                                            "double", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use", "namespace",
-                                            "class", "model", "interface", "property", "field", "constructor", "public", "private", "protected", "override", "static", "this", "try", "catch", "throw",
+                                            "double", "long", "byte", "char", "Guid", "obj", "dyn", "map", "null", "in", "is", "import", "export", "use", "namespace",
+                                            "enum", "switch", "case", "default", "class", "model", "interface", "property", "field", "constructor", "public", "private", "protected", "override", "static", "this", "try", "catch", "finally", "throw",
                                             "hidden", "shared", "here", "locked", "readonly"};
     return w;
 }
@@ -134,7 +135,7 @@ private:
                 p.imports.push_back(std::move(imp));
             } else if (isWord("export")) {
                 failIfRenamed(peek());
-            } else if (isWord("public") || isWord("shared") || isWord("hidden") || isWord("class") || isWord("model") || isWord("interface") || isWord("method")) {
+            } else if (isWord("public") || isWord("shared") || isWord("hidden") || isWord("class") || isWord("model") || isWord("interface") || isWord("method") || isWord("enum")) {
                 bool isPublic = false, isShared = false, sawVis = false;
                 const Token first = peek();
                 while (isWord("public") || isWord("shared") || isWord("hidden")) {
@@ -149,7 +150,11 @@ private:
                     take();
                 }
                 failIfRenamed(peek());
-                if (isWord("class") || isWord("model") || isWord("interface")) {
+                if (isWord("enum")) {
+                    if (isShared) fail(first, "'shared' cannot be applied to an enum");
+                    p.classes.push_back(enumDecl());
+                    p.classes.back().exported = isPublic;
+                } else if (isWord("class") || isWord("model") || isWord("interface")) {
                     if (isShared && !isWord("class")) fail(peek(), "only a class can be 'shared'");
                     p.classes.push_back(classDecl(isShared));
                     p.classes.back().exported = isPublic;
@@ -162,6 +167,9 @@ private:
                 }
             } else if (isWord("hand")) {
                 p.hands.push_back(handDecl());
+                endStatement();
+            } else if (isWord("mouth")) {
+                p.mouths.push_back(mouthDecl());
                 endStatement();
             } else if (isWord("method")) {
                 p.methods.push_back(methodDecl());
@@ -239,27 +247,39 @@ private:
     bool startsClassDeclaration() const {
         const Token& t = peek();
         if (t.kind != Tok::Ident || keywords().count(t.text) || unsupportedWords().count(t.text)) return false;
-        const Token& n = peekNext();
+        size_t p = pos_;  // skip a qualified name: Ns.Sub.Point
+        while (p + 2 < toks_.size() && tokIsPunct(toks_[p + 1], ".") && toks_[p + 2].kind == Tok::Ident && !keywords().count(toks_[p + 2].text)) p += 2;
+        const Token& n = p + 1 < toks_.size() ? toks_[p + 1] : peekNext();
         auto isName = [&](const Token& x) { return x.kind == Tok::Ident && !keywords().count(x.text); };
         if (tokIsPunct(n, "<")) {  // Box<int> b / Pair<string, int>? p: scan the balanced <...> and look at what follows
-            size_t k = pos_ + 1;
+            size_t k = p + 1;
             int depth = 0;
-            for (; k < toks_.size() && k < pos_ + 80; ++k) {
+            for (; k < toks_.size() && k < p + 80; ++k) {
                 const Token& x = toks_[k];
                 if (x.kind == Tok::Punct && x.text == "<") ++depth;
                 else if (x.kind == Tok::Punct && x.text == ">") { if (--depth == 0) break; }
-                else if (!(x.kind == Tok::Ident || (x.kind == Tok::Punct && (x.text == "," || x.text == "?")))) return false;
+                else if (!(x.kind == Tok::Ident || (x.kind == Tok::Punct && (x.text == "," || x.text == "?" || x.text == ".")))) return false;
             }
             if (k + 1 >= toks_.size() || depth != 0) return false;
             if (isName(toks_[k + 1])) return true;
             return tokIsPunct(toks_[k + 1], "?") && k + 2 < toks_.size() && isName(toks_[k + 2]);
         }
         if (isName(n)) return true;
-        return tokIsPunct(n, "?") && pos_ + 2 < toks_.size() && isName(toks_[pos_ + 2]);
+        return tokIsPunct(n, "?") && p + 2 < toks_.size() && isName(toks_[p + 2]);
+    }
+
+    // A class name, possibly qualified with namespaces: Ns.Sub.Point
+    std::string qualifiedName() {
+        std::string n = take().text;
+        while (isPunct(".") && peekNext().kind == Tok::Ident && !keywords().count(peekNext().text)) {
+            take();
+            n += "." + take().text;
+        }
+        return n;
     }
 
     static bool isTypeWord(const std::string& w) {
-        return w == "var" || w == "int" || w == "string" || w == "boolean" || w == "array" || w == "double" ||
+        return w == "var" || w == "int" || w == "long" || w == "byte" || w == "string" || w == "boolean" || w == "array" || w == "double" ||
                w == "char" || w == "Guid" || w == "obj" || w == "dyn" || w == "map";
     }
 
@@ -387,6 +407,8 @@ private:
         const Token& t = peek();
         if (t.text == "string") { take(); return Type::String; }
         if (t.text == "int") { take(); return Type::Int; }
+        if (t.text == "long") { take(); return Type::Long; }
+        if (t.text == "byte") { take(); return Type::Byte; }
         if (t.text == "boolean") { take(); return Type::Bool; }
         if (t.text == "double") { take(); return Type::Double; }
         if (t.text == "char") { take(); return Type::Char; }
@@ -421,7 +443,7 @@ private:
             expectPunct("<", "after 'map' (e.g. map<string, int>)");
             const Token& kt = peek();
             Type key = typeName();
-            if (key != Type::Int && key != Type::String && key != Type::Char && key != Type::Bool && key != Type::Guid)
+            if (key != Type::Int && key != Type::Long && key != Type::Byte && key != Type::String && key != Type::Char && key != Type::Bool && key != Type::Guid)
                 fail(kt, "map keys must be int, string, char, boolean or Guid, not " + coyote::typeName(key));
             expectPunct(",", "between the key and value types of a map");
             Type value = typeName();
@@ -430,7 +452,7 @@ private:
         }
         if (unsupportedWords().count(t.text)) fail(t, "type '" + t.text + "' is not supported yet");
         if (keywords().count(t.text)) fail(t, "expected a type, found keyword '" + t.text + "'");
-        Type ct = Type::classOf(take().text);  // a class name; semantic analysis checks that it exists
+        Type ct = Type::classOf(qualifiedName());  // a class name (maybe Ns.Sub.Name); semantic analysis checks that it exists
         if (isPunct("<")) ct.targs = typeArgList();
         return ct;
     }
@@ -504,6 +526,31 @@ private:
         if (isExtension && *isExtension && params.size() == 1 && params[0].variadic)
             fail(toks_[pos_ - 1], "the 'here' parameter of an extension method cannot be variadic");
         return params;
+    }
+
+    // mouth:<module> <name>            read-only host variable
+    // mouth:<module> <name> {get;}     the same, spelled out;  {get; set;} also allows assignment (the host decides whether it can)
+    MouthDecl mouthDecl() {
+        MouthDecl d;
+        d.loc = take().loc;  // 'mouth'
+        if (!isPunct(":")) fail(peek(), "expected ':' after 'mouth' (e.g. mouth:sys exception {get;}), found " + describe(peek()));
+        take();
+        d.module = expectName("a host module name after 'mouth:'");
+        d.name = expectName("a mouth name");
+        if (isPunct("{")) {
+            take();
+            d.canGet = d.canSet = false;
+            while (!isPunct("}")) {
+                const Token t = take();
+                if (t.text == "get" && t.kind == Tok::Ident) d.canGet = true;
+                else if (t.text == "set" && t.kind == Tok::Ident) d.canSet = true;
+                else fail(t, "a mouth has only 'get;' and 'set;' accessors, found " + describe(t));
+                if (isPunct(";")) take();
+            }
+            take();  // '}'
+            if (!d.canGet && !d.canSet) fail(toks_[pos_ - 1], "a mouth needs at least one accessor: {get;} or {get; set;}");
+        }
+        return d;
     }
 
     HandDecl handDecl() {
@@ -642,8 +689,6 @@ private:
         if (isWord("constructor")) {
             if (c.isShared) fail(t, "a shared class has no constructor: it cannot be instantiated");
             if (isStatic) fail(t, "a constructor cannot be shared");
-            for (const MethodDecl& m : c.methods)
-                if (m.isCtor) fail(t, "class '" + c.name + "' already has a constructor (overloading is not supported)");
             MethodDecl m;
             m.isCtor = true;
             m.isPrivate = isPrivate;
@@ -906,9 +951,11 @@ private:
         failIfRenamed(t);
         if (w == "import" || w == "use") fail(t, "'" + w + "' is only allowed at the top level of a file");
         if (w == "hand") fail(t, "hand declarations are only allowed at the top level of a file");
+        if (w == "mouth") fail(t, "mouth declarations are only allowed at the top level of a file");
         if (w == "method") fail(t, "methods can only be declared at the top level of a file");
         if (w == "else") fail(t, "'else' without a matching 'if'");
         if (w == "if") return ifStatement();
+        if (w == "switch") return switchStatement();
         if (w == "try") return tryStatement();
         if (w == "throw") {
             auto s = make(Stmt::Kind::Throw, take().loc);
@@ -963,17 +1010,21 @@ private:
     StmtPtr exprStatement(bool terminate) {
         const Token& t = peek();
         ExprPtr lhs = postfix(primary());
-        if (peek().kind == Tok::Punct && (peek().text == "+=" || peek().text == "-=" || peek().text == "*=" ||
-                                          peek().text == "/=" || peek().text == "%=" || peek().text == "++" || peek().text == "--")) {
+        const bool shiftRightAssign = peek().kind == Tok::Punct && peek().text == ">" && pos_ + 1 < toks_.size() && toks_[pos_ + 1].text == ">=" &&
+                                      toks_[pos_ + 1].loc.line == peek().loc.line && toks_[pos_ + 1].loc.col == peek().loc.col + 1;
+        if (shiftRightAssign || (peek().kind == Tok::Punct && (peek().text == "+=" || peek().text == "-=" || peek().text == "*=" ||
+                                          peek().text == "/=" || peek().text == "%=" || peek().text == "&=" || peek().text == "|=" ||
+                                          peek().text == "^=" || peek().text == "<<=" || peek().text == "++" || peek().text == "--"))) {
             const bool step = peek().text == "++" || peek().text == "--";
-            const Token op = take();
+            Token op = take();
+            if (shiftRightAssign) { take(); op.text = ">>="; }
             ExprPtr copy = cloneSimple(*lhs);
             if (!copy)
                 fail(op, "'" + op.text + "' needs a target without side effects (a variable, a field or an element with a simple index); write the full assignment");
             auto bin = std::make_unique<Expr>();
             bin->kind = Expr::Kind::Binary;
             bin->loc = op.loc;
-            bin->text = op.text.substr(0, 1);
+            bin->text = step ? op.text.substr(0, 1) : op.text.substr(0, op.text.size() - 1);
             bin->lhs = std::move(copy);
             if (step) {
                 auto one = std::make_unique<Expr>();
@@ -1036,6 +1087,211 @@ private:
         return s;
     }
 
+    // ---- enum (0.7) ----
+    // enum Color { Red, Green = 5, Blue }  is desugared to a class: one shared, read-only instance per member (compared with ==),
+    // with Name, Value, ToString(), CompareTo(other), Parse(text), TryParse(text), FromValue(n) and Values().
+    std::list<std::vector<Token>> generated_;
+    ClassDecl enumDecl() {
+        const Token kw = take();  // 'enum'
+        const SourceLoc at = kw.loc;
+        const std::string name = expectName("an enum name");
+        if (!isPunct("{")) fail(peek(), "expected '{' to start the enum '" + name + "', found " + describe(peek()));
+        const Token open = take();
+        std::vector<std::pair<std::string, long long>> members;
+        std::set<std::string> seen;
+        static const std::set<std::string> reserved = {"Name", "Value", "ToString", "CompareTo", "Parse", "TryParse", "FromValue", "Values", "all"};
+        long long next = 0;
+        while (!isPunct("}")) {
+            if (peek().kind == Tok::Eof) fail(peek(), "expected '}' to close the enum opened at line " + std::to_string(open.loc.line));
+            const Token mt = peek();
+            const std::string m = expectName("an enum member name");
+            if (reserved.count(m)) fail(mt, "'" + m + "' is used by every enum (Name, Value, ToString, CompareTo, Parse, TryParse, FromValue, Values); choose another member name");
+            if (!seen.insert(m).second) fail(mt, "the enum '" + name + "' already has a member '" + m + "'");
+            long long v = next;
+            if (isPunct("=")) {
+                take();
+                bool neg = false;
+                if (isPunct("-")) { take(); neg = true; }
+                if (peek().kind != Tok::Int || peek().isLong) fail(peek(), "an enum value is an int literal, found " + describe(peek()));
+                v = take().ival;
+                if (neg) v = -v;
+            }
+            members.push_back({m, v});
+            next = v + 1;
+            if (isPunct(",")) take();
+            else if (!isPunct("}") && !peek().nlBefore) fail(peek(), "expected ',' or '}' after the enum member '" + m + "', found " + describe(peek()));
+        }
+        take();  // '}'
+        if (members.empty()) fail(kw, "the enum '" + name + "' has no members");
+        std::string src = "class " + name + " {\n  public readonly field string Name\n  public readonly field int Value\n"
+                          "  hidden constructor(string n, int v) {\n    Name = n\n    Value = v\n  }\n";
+        std::string all;
+        for (const auto& [m, v] : members) {
+            src += "  public shared readonly field " + name + " " + m + " = new " + name + "(\"" + m + "\", " + std::to_string(v) + ")\n";
+            all += (all.empty() ? "" : ", ") + name + "." + m;
+        }
+        src += "  hidden shared field array<" + name + "> all = [" + all + "]\n";
+        src += "  public method ToString(): string {\n    return Name\n  }\n";
+        src += "  public method CompareTo(" + name + " other): int {\n    if (Value < other.Value) {\n      return -1\n    }\n    if (Value > other.Value) {\n      return 1\n    }\n    return 0\n  }\n";
+        src += "  public shared method TryParse(string text): " + name + "? {\n    in (var c of all) {\n      if (c.Name == text) {\n        return c\n      }\n    }\n    return null\n  }\n";
+        src += "  public shared method Parse(string text): " + name + " {\n    in (var c of all) {\n      if (c.Name == text) {\n        return c\n      }\n    }\n    throw \"'\" + text + \"' is not a member of the enum " + name + "\"\n  }\n";
+        src += "  public shared method FromValue(int n): " + name + " {\n    in (var c of all) {\n      if (c.Value == n) {\n        return c\n      }\n    }\n    throw \"" + name + " has no member with the value \" + n\n  }\n";
+        src += "  public shared method Values(): array<" + name + "> {\n    return (copy)all\n  }\n}\n";
+        std::vector<Token> toks;
+        try {
+            toks = lex(src, file_);
+        } catch (const CompileError& e) {
+            fail(kw, "internal error while expanding the enum '" + name + "': " + e.diag.message);
+        }
+        for (Token& k : toks) k.loc = at;  // diagnostics point at the enum
+        generated_.push_back(std::move(toks));
+        Parser sub(generated_.back(), file_);
+        sub.depth_ = depth_;
+        Program q = sub.run(nullptr);
+        if (q.classes.size() != 1) fail(kw, "internal error while expanding the enum '" + name + "'");
+        ClassDecl c = std::move(q.classes[0]);
+        c.isEnum = true;
+        for (const auto& mv : members) c.enumNames.push_back(mv.first);
+        c.loc = at;
+        return c;
+    }
+
+    // switch (subject) { case A, B: ... default: ... }  -- desugared to { var $sw = subject; if ($sw == A || $sw == B) {...} else {...} }.
+    // There is no fall-through; 'break' still refers to the enclosing loop.
+    int switchCounter_ = 0;
+    StmtPtr switchStatement() {
+        Depth guard(*this, peek());
+        const Token kw = take();  // 'switch'
+        expectPunct("(", "after 'switch'");
+        ExprPtr subject = expression();
+        expectPunct(")", "after the switch subject");
+        if (!isPunct("{")) fail(peek(), "expected '{' to start the switch body, found " + describe(peek()));
+        const Token open = take();
+        const std::string tmp = "$sw" + std::to_string(switchCounter_++);
+        auto block = make(Stmt::Kind::Block, kw.loc);
+        auto decl = make(Stmt::Kind::VarDecl, kw.loc);
+        decl->name = tmp;
+        decl->inferred = true;
+        decl->expr = std::move(subject);
+        block->body.push_back(std::move(decl));
+        struct Arm { std::vector<ExprPtr> pats; std::vector<StmtPtr> body; bool isDefault = false; SourceLoc loc; };
+        std::vector<Arm> arms;
+        bool sawDefault = false;
+        while (!isPunct("}")) {
+            if (peek().kind == Tok::Eof) fail(peek(), "expected '}' to close the switch opened at line " + std::to_string(open.loc.line));
+            Arm arm;
+            arm.loc = peek().loc;
+            if (isWord("default")) {
+                if (sawDefault) fail(peek(), "a switch can have only one 'default'");
+                sawDefault = true;
+                take();
+                arm.isDefault = true;
+            } else if (isWord("case")) {
+                take();
+                for (;;) {
+                    arm.pats.push_back(expression());
+                    if (!isPunct(",")) break;
+                    take();
+                }
+            } else {
+                fail(peek(), "a switch body holds 'case value:' and 'default:' sections, found " + describe(peek()));
+            }
+            expectPunct(":", "after the case value");
+            while (!isPunct("}") && !isWord("case") && !isWord("default")) {
+                if (peek().kind == Tok::Eof) fail(peek(), "expected '}' to close the switch opened at line " + std::to_string(open.loc.line));
+                arm.body.push_back(statement());
+            }
+            arms.push_back(std::move(arm));
+        }
+        take();  // '}'
+        // build the if-chain from the last arm backwards
+        std::vector<StmtPtr> defaultBody;
+        bool hasDefault = false;
+        for (auto& a : arms) if (a.isDefault) { defaultBody = std::move(a.body); hasDefault = true; }
+        StmtPtr chain;
+        for (size_t k = arms.size(); k-- > 0;) {
+            Arm& a = arms[k];
+            if (a.isDefault) continue;
+            auto ifs = make(Stmt::Kind::If, a.loc);
+            ExprPtr cond;
+            for (auto& pat : a.pats) {
+                auto var = std::make_unique<Expr>();
+                var->kind = Expr::Kind::Var;
+                var->loc = pat->loc;
+                var->text = tmp;
+                var->depth = 1;
+                auto cmp = std::make_unique<Expr>();
+                cmp->kind = Expr::Kind::Binary;
+                cmp->loc = pat->loc;
+                cmp->text = "==";
+                cmp->lhs = std::move(var);
+                cmp->rhs = std::move(pat);
+                measure(*cmp);
+                if (!cond) {
+                    cond = std::move(cmp);
+                } else {
+                    auto orx = std::make_unique<Expr>();
+                    orx->kind = Expr::Kind::Binary;
+                    orx->loc = cmp->loc;
+                    orx->text = "||";
+                    orx->lhs = std::move(cond);
+                    orx->rhs = std::move(cmp);
+                    measure(*orx);
+                    cond = std::move(orx);
+                }
+            }
+            ifs->expr = std::move(cond);
+            ifs->body = std::move(a.body);
+            if (chain) {
+                ifs->hasElse = true;
+                ifs->elseBody.push_back(std::move(chain));
+            } else if (hasDefault) {
+                ifs->hasElse = true;
+                ifs->elseBody = std::move(defaultBody);
+            }
+            chain = std::move(ifs);
+        }
+        if (chain) block->body.push_back(std::move(chain));
+        else for (auto& d : defaultBody) block->body.push_back(std::move(d));
+        return block;
+    }
+
+    // switch (subject) { A, B => result, C => result, _ => result }
+    ExprPtr switchExpression() {
+        Depth guard(*this, peek());
+        auto e = std::make_unique<Expr>();
+        e->kind = Expr::Kind::Switch;
+        e->loc = take().loc;  // 'switch'
+        expectPunct("(", "after 'switch'");
+        e->lhs = expression();
+        expectPunct(")", "after the switch subject");
+        if (!isPunct("{")) fail(peek(), "expected '{' to start the switch body, found " + describe(peek()));
+        const Token open = take();
+        while (!isPunct("}")) {
+            if (peek().kind == Tok::Eof) fail(peek(), "expected '}' to close the switch opened at line " + std::to_string(open.loc.line));
+            int count = 0;
+            if (isWord("_")) {
+                take();
+            } else {
+                for (;;) {
+                    e->args.push_back(expression());
+                    ++count;
+                    if (!isPunct(",")) break;
+                    take();
+                }
+            }
+            expectPunct("=>", "after the switch pattern");
+            e->args.push_back(expression());
+            e->armSizes.push_back(count);
+            if (isPunct(",")) take();
+            else if (!isPunct("}") && !peek().nlBefore) fail(peek(), "expected ',' or '}' after the switch arm, found " + describe(peek()));
+        }
+        take();  // '}'
+        if (e->armSizes.empty()) fail(open, "a switch expression needs at least one arm");
+        measure(*e);
+        return e;
+    }
+
     StmtPtr ifStatement() {
         Depth guard(*this, peek());
         auto s = condition(make(Stmt::Kind::If, peek().loc), "if");
@@ -1052,21 +1308,121 @@ private:
         return s;
     }
 
-    // try { ... } catch (e) { ... }   -- 'e' (optionally written "string e") holds the error message
+    // try { ... } catch (e: IoError) { ... } catch (e) { ... } finally { ... }
+    // The typed catches are lowered here: the VM's single catch gets `var $ex = Exception.Caught()` followed by an if-chain of `is` tests;
+    // `catch (e)` (or `catch (e: Exception)`) catches everything and must come last; without it an unmatched exception is rethrown.
+    int catchCounter_ = 0;
+    ExprPtr nameExpr(const std::string& n, SourceLoc loc) {
+        auto v = std::make_unique<Expr>();
+        v->kind = Expr::Kind::Var;
+        v->loc = loc;
+        v->text = n;
+        v->depth = 1;
+        return v;
+    }
     StmtPtr tryStatement() {
         Depth guard(*this, peek());
         auto s = make(Stmt::Kind::Try, take().loc);
         s->body = block("to start the 'try' body");
-        if (!isWord("catch")) fail(peek(), "'try' needs a 'catch' block (expected 'catch', found " + describe(peek()) + ")");
-        take();
-        if (isPunct("(")) {
-            take();
-            if (isWord("string") || isWord("var")) take();
-            s->name = expectName("a name for the error message");
-            expectPunct(")", "after the catch variable");
+        struct Clause { std::string var; bool typed = false; Type type = Type::Invalid; std::vector<StmtPtr> body; SourceLoc loc; };
+        std::vector<Clause> clauses;
+        while (isWord("catch")) {
+            Clause c;
+            c.loc = take().loc;
+            if (isPunct("(")) {
+                take();
+                if (isWord("string") || isWord("var")) fail(peek(), "since 0.8 a catch variable is an Exception object: write catch (e) and use e.Message (or catch (e: SomeError))");
+                c.var = expectName("a name for the caught exception");
+                if (isPunct(":")) {
+                    take();
+                    c.typed = true;
+                    c.type = typeName();
+                    if (c.type.kind != Type::Class) fail(peek(), "a catch type must be a class derived from Exception");
+                }
+                expectPunct(")", "after the catch variable");
+            }
+            c.body = block("to start the 'catch' body");
+            if (!clauses.empty() && (!clauses.back().typed || clauses.back().type.name == "Exception"))
+                fail(peek(), "this catch can never run: an earlier 'catch' already catches every exception");
+            clauses.push_back(std::move(c));
         }
+        if (isWord("finally")) {
+            take();
+            s->hasFinally = true;
+            s->finallyBody = block("to start the 'finally' body");
+        }
+        if (clauses.empty() && !s->hasFinally) fail(peek(), "'try' needs a 'catch' or 'finally' block (expected 'catch', found " + describe(peek()) + ")");
+        if (clauses.empty()) return s;
+        const SourceLoc at = s->loc;
+        const std::string ex = "$ex" + std::to_string(catchCounter_++);
         s->hasElse = true;
-        s->elseBody = block("to start the 'catch' body");
+        {   // var $ex = Exception.Caught()
+            auto call = std::make_unique<Expr>();
+            call->kind = Expr::Kind::MethodCall;
+            call->loc = at;
+            call->text = "Caught";
+            call->lhs = nameExpr("Exception", at);
+            measure(*call);
+            auto decl = make(Stmt::Kind::VarDecl, at);
+            decl->name = ex;
+            decl->inferred = true;
+            decl->expr = std::move(call);
+            s->elseBody.push_back(std::move(decl));
+        }
+        StmtPtr chain;
+        bool hasAll = false;
+        for (size_t k = clauses.size(); k-- > 0;) {
+            Clause& c = clauses[k];
+            const bool all = !c.typed || c.type.name == "Exception";
+            std::vector<StmtPtr> body;
+            if (!c.var.empty()) {
+                auto decl = make(Stmt::Kind::VarDecl, c.loc);
+                decl->name = c.var;
+                decl->inferred = true;
+                if (all) {
+                    decl->expr = nameExpr(ex, c.loc);
+                } else {
+                    auto as = std::make_unique<Expr>();
+                    as->kind = Expr::Kind::Convert;
+                    as->conv = Expr::Conv::Downcast;
+                    as->loc = c.loc;
+                    as->lhs = nameExpr(ex, c.loc);
+                    as->newType = c.type;
+                    measure(*as);
+                    decl->expr = std::move(as);
+                }
+                body.push_back(std::move(decl));
+            }
+            for (auto& b : c.body) body.push_back(std::move(b));
+            if (all) {  // the catch-all: it is the last clause, everything before it is tested first
+                hasAll = true;
+                auto blk = make(Stmt::Kind::Block, c.loc);
+                blk->body = std::move(body);
+                chain = std::move(blk);
+                continue;
+            }
+            auto test = std::make_unique<Expr>();
+            test->kind = Expr::Kind::Is;
+            test->loc = c.loc;
+            test->lhs = nameExpr(ex, c.loc);
+            test->newType = c.type;
+            measure(*test);
+            auto ifs = make(Stmt::Kind::If, c.loc);
+            ifs->expr = std::move(test);
+            ifs->body = std::move(body);
+            if (chain) {
+                ifs->hasElse = true;
+                ifs->elseBody.push_back(std::move(chain));
+            } else {  // nothing catches it: rethrow
+                auto thr = make(Stmt::Kind::Throw, c.loc);
+                thr->expr = nameExpr(ex, c.loc);
+                ifs->hasElse = true;
+                ifs->elseBody.push_back(std::move(thr));
+            }
+            chain = std::move(ifs);
+        }
+        (void)hasAll;
+        s->elseBody.push_back(std::move(chain));
         return s;
     }
 
@@ -1266,12 +1622,29 @@ private:
 
     ExprPtr binary(size_t level) {
         static const std::vector<std::vector<std::string>> levels = {
-            {"||"}, {"&&"}, {"==", "!="}, {"<", "<=", ">", ">="}, {"+", "-"}, {"*", "/", "%"}};
+            {"||"}, {"&&"}, {"|"}, {"^"}, {"&"}, {"==", "!="}, {"<", "<=", ">", ">="}, {"<<", ">>"}, {"+", "-"}, {"*", "/", "%"}};
+        constexpr size_t kRelational = 6, kShift = 7;
         if (level == levels.size()) return unary();
         ExprPtr lhs = binary(level + 1);
         for (;;) {
             const Token& t = peek();
-            if (level == 3 && isWord("is")) {
+            if (level == kShift && t.kind == Tok::Punct && t.text == ">" && pos_ + 1 < toks_.size() && toks_[pos_ + 1].kind == Tok::Punct &&
+                toks_[pos_ + 1].text == ">" && toks_[pos_ + 1].loc.line == t.loc.line && toks_[pos_ + 1].loc.col == t.loc.col + 1 && !toks_[pos_ + 1].nlBefore &&
+                !(pos_ + 2 < toks_.size() && toks_[pos_ + 2].text == "=" && toks_[pos_ + 2].loc.line == t.loc.line && toks_[pos_ + 2].loc.col == t.loc.col + 2)) {
+                // '>>' is two adjacent '>' tokens (the lexer keeps them apart so that List<List<int>> still parses)
+                auto e = std::make_unique<Expr>();
+                e->kind = Expr::Kind::Binary;
+                e->loc = t.loc;
+                e->text = ">>";
+                take();
+                take();
+                e->lhs = std::move(lhs);
+                e->rhs = binary(level + 1);
+                measure(*e);
+                lhs = std::move(e);
+                continue;
+            }
+            if (level == kRelational && isWord("is")) {
                 auto e = std::make_unique<Expr>();
                 e->kind = Expr::Kind::Is;
                 e->loc = t.loc;
@@ -1282,7 +1655,7 @@ private:
                 lhs = std::move(e);
                 continue;
             }
-            if (level == 3 && isWord("as")) {  // downcast: animal as Dog
+            if (level == kRelational && isWord("as")) {  // downcast: animal as Dog
                 auto e = std::make_unique<Expr>();
                 e->kind = Expr::Kind::Convert;
                 e->conv = Expr::Conv::Downcast;
@@ -1312,12 +1685,24 @@ private:
     ExprPtr unary() {
         Depth guard(*this, peek());
         const Token& t = peek();
-        if (t.kind == Tok::Punct && (t.text == "-" || t.text == "!")) {
+        if (t.kind == Tok::Punct && (t.text == "-" || t.text == "!" || t.text == "~")) {
             auto e = std::make_unique<Expr>();
             e->kind = Expr::Kind::Unary;
             e->loc = t.loc;
             e->text = t.text;
             take();
+            e->lhs = unary();
+            measure(*e);
+            return e;
+        }
+        if (t.kind == Tok::Punct && t.text == "(" && peekAt(1).kind == Tok::Ident && (peekAt(1).text == "copy" || peekAt(1).text == "ref") &&
+            tokIsPunct(peekAt(2), ")") &&
+            (peekAt(3).kind != Tok::Punct || tokIsPunct(peekAt(3), "("))) {  // (copy)expr  /  (ref)variable
+            auto e = std::make_unique<Expr>();
+            e->kind = Expr::Kind::Unary;
+            e->loc = t.loc;
+            e->text = "(" + peekAt(1).text + ")";
+            take(); take(); take();
             e->lhs = unary();
             measure(*e);
             return e;
@@ -1411,6 +1796,7 @@ private:
             case Tok::Int:
                 e->kind = Expr::Kind::Int;
                 e->ival = t.ival;
+                e->isLong = t.isLong;
                 take();
                 return e;
             case Tok::Double:
@@ -1444,12 +1830,13 @@ private:
                     measure(*e);
                     return e;
                 }
+                if (t.text == "switch" && tokIsPunct(peekNext(), "(")) return switchExpression();
                 if (t.text == "null") {
                     e->kind = Expr::Kind::Null;
                     take();
                     return e;
                 }
-                if ((t.text == "int" || t.text == "double" || t.text == "string" || t.text == "char" || t.text == "Guid") &&
+                if ((t.text == "int" || t.text == "long" || t.text == "byte" || t.text == "double" || t.text == "string" || t.text == "char" || t.text == "Guid") &&
                     tokIsPunct(peekNext(), "(")) {  // conversion: int(x), double(x), string(x), char(x), Guid(x)
                     e->kind = Expr::Kind::Convert;
                     e->newType = baseType();
@@ -1471,7 +1858,7 @@ private:
                     if (peek().kind == Tok::Ident && !keywords().count(peek().text) && !unsupportedWords().count(peek().text)) {
                         e->kind = Expr::Kind::NewObj;  // new Point(1, 2)
                         e->loc = peek().loc;
-                        e->text = take().text;
+                        e->text = qualifiedName();
                         if (isPunct("<")) e->newType = [&] { Type ct = Type::classOf(e->text); ct.targs = typeArgList(); return ct; }();
                         e->args = argList();
                         measure(*e);

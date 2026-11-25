@@ -61,6 +61,8 @@ ExprPtr cloneExpr(const Expr& e, const Subst* s) {
     n->loc = e.loc;
     n->text = e.text;
     n->ival = e.ival;
+    n->isLong = e.isLong;
+    n->armSizes = e.armSizes;
     n->dval = e.dval;
     n->conv = e.conv;
     if (e.lhs) n->lhs = cloneExpr(*e.lhs, s);
@@ -94,6 +96,8 @@ StmtPtr cloneStmt(const Stmt& st, const Subst* s) {
     if (st.step) n->step = cloneStmt(*st.step, s);
     for (const auto& b : st.body) n->body.push_back(cloneStmt(*b, s));
     for (const auto& b : st.elseBody) n->elseBody.push_back(cloneStmt(*b, s));
+    for (const auto& b : st.finallyBody) n->finallyBody.push_back(cloneStmt(*b, s));
+    n->hasFinally = st.hasFinally;
     n->hasElse = st.hasElse;
     return n;
 }
@@ -254,6 +258,7 @@ private:
         for (auto& b : s.body) walkStmt(*b);
         scopes_.pop_back();
         walkBody(s.elseBody);
+        walkBody(s.finallyBody);
     }
 
     void walkExpr(Expr& e) {
@@ -307,7 +312,7 @@ private:
         using K = Expr::Kind;
         switch (e.kind) {
             case K::String: return Type::String;
-            case K::Int: return Type::Int;
+            case K::Int: return e.isLong ? Type(Type::Long) : Type(Type::Int);
             case K::Bool: return Type::Bool;
             case K::Double: return Type::Double;
             case K::Char: return Type::Char;
@@ -350,6 +355,7 @@ private:
                 if (a == Type::Invalid || b == Type::Invalid) return Type::Invalid;
                 if (o == "+" && (a == Type::String || b == Type::String)) return Type::String;
                 if (a == Type::Double || b == Type::Double) return Type::Double;
+                if (a == Type::Long || b == Type::Long) return Type::Long;
                 return a;
             }
             case K::Member: {
@@ -374,7 +380,7 @@ private:
                         }
                 return Type::Invalid;
             }
-            case K::Lambda: case K::CallFn: return Type::Invalid;
+            case K::Lambda: case K::CallFn: case K::Switch: return Type::Invalid;
             case K::Call: {
                 if (const MethodDecl* m = findMethod(e.text, -1)) return m->ret;
                 const HandDecl* h = nullptr;
@@ -619,5 +625,7 @@ private:
 void expandGenerics(Program& program, std::vector<Diagnostic>& diagnostics) {
     Expander(program, diagnostics).run();
 }
+
+StmtPtr cloneStatement(const Stmt& st) { return cloneStmt(st, nullptr); }
 
 } // namespace coyote

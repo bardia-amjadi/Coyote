@@ -12,4 +12,7 @@ namespace coyote {
 // output never see a type parameter. Appends diagnostics for misuse (wrong argument count, ...).
 void expandGenerics(Program& program, std::vector<Diagnostic>& diagnostics);
 
+// A deep copy of a statement that has not been analyzed yet (sema copies field initializers into every constructor).
+StmtPtr cloneStatement(const Stmt& st);
+
 } // namespace coyote

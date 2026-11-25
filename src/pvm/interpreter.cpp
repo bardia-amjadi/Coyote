@@ -1,6 +1,7 @@
 #include "interpreter.hpp"
 
 #include <climits>
+#include <cstdint>
 #include <cmath>
 #include <vector>
 
@@ -9,6 +10,9 @@
 namespace pvm {
 
 namespace {
+
+// The name shown in a stack trace: the entry function is "<main>".
+std::string traceName(const std::string& fn) { return fn == "$main" ? "<main>" : fn; }
 
 // Maximum depth of nested method calls. Deeper recursion is a runtime error, not a crash.
 constexpr size_t kMaxCallDepth = 5000;
@@ -71,6 +75,12 @@ std::string describeValue(const Module& m, const Value& v, int depth) {
                 if (o->live > kShown) r += ", ...";
                 return r + "} (" + std::to_string(o->live) + ")";
             }
+            if (o->isBytes()) {
+                r = "[";
+                for (size_t i = 0; i < o->bytes.size() && i < kShown; ++i) r += (i ? ", " : "") + std::to_string(static_cast<unsigned char>(o->bytes[i]));
+                if (o->bytes.size() > kShown) r += ", ...";
+                return r + "] (" + std::to_string(o->bytes.size()) + ")";
+            }
             r = "[";
             for (size_t i = 0; i < o->items.size() && i < kShown; ++i) {
                 if (i) r += ", ";
@@ -85,8 +95,9 @@ std::string describeValue(const Module& m, const Value& v, int depth) {
 
 } // namespace
 
-void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap& heap, DebugHook* hook) {
+void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap& heap, DebugHook* hook, CallRequest* call) {
     HostContext ctx = registry.context(out);
+    ctx.heap = &heap;
     std::vector<Value> stack;
     std::vector<Frame> frames;
     std::vector<Value> globals;  // version 5; GC roots
@@ -102,10 +113,17 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
         f.base = stack.size();
         frames.push_back(std::move(f));
     };
-    enter(m.funcs[static_cast<size_t>(m.entryFunc)], 0);
+    if (call) {
+        const Function& fn = m.funcs[static_cast<size_t>(call->func)];
+        for (Value& v : call->args) stack.push_back(std::move(v));
+        enter(fn, call->args.size());
+    } else {
+        enter(m.funcs[static_cast<size_t>(m.entryFunc)], 0);
+    }
 
     // GC roots: everything reachable without going through the heap.
     RootsFn roots = [&](MarkFn mark) {
+        mark(ctx.lastPayload);
         for (const Value& v : globals) mark(v);
         for (const Value& v : stack) mark(v);
         for (const Frame& f : frames)
@@ -246,6 +264,17 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 stack.pop_back();
                 throw rtError(msg);
             }
+            case Op::Throwx: {
+                std::string trace = stack.back().s;
+                stack.pop_back();
+                std::string msg = stack.back().s;
+                stack.pop_back();
+                RuntimeError e = rtError(msg);
+                e.trace = std::move(trace);
+                e.payload = std::make_shared<Value>(stack.back());
+                stack.pop_back();
+                throw e;
+            }
             case Op::Jump: fr.pc = static_cast<size_t>(in.target); break;
             case Op::JumpFalse:
                 if (popInt() == 0) fr.pc = static_cast<size_t>(in.target);
@@ -290,6 +319,12 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 size_t argc = static_cast<size_t>(in.ival);
                 std::vector<Value> args(stack.end() - static_cast<std::ptrdiff_t>(argc), stack.end());
                 stack.resize(stack.size() - argc);
+                RootsFn hostRoots = [&](MarkFn mark) {  // the arguments left the stack but stay alive while the host function runs
+                    roots(mark);
+                    for (const Value& a : args) mark(a);
+                };
+                ctx.roots = &hostRoots;
+                struct ResetRoots { HostContext& c; ~ResetRoots() { c.roots = nullptr; } } resetRoots{ctx};
                 try {
                     Value result = hf->fn(args, ctx);
                     if (decl.sig.ret != Type::Void) stack.push_back(std::move(result));
@@ -298,9 +333,128 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 }
                 break;
             }
+            // ---- ML 11: strings, long, bitwise operators, byte ----
+            case Op::StrAt: {
+                long long idx = popInt();
+                long long cp = 0;
+                if (!cpAt(stack.back().s, idx, cp))
+                    throw rtError("string index " + std::to_string(idx) + " is out of range for a string of length " + std::to_string(cpLength(stack.back().s)));
+                stack.back() = Value::ofChar(cp);
+                break;
+            }
+            case Op::StrLen: { long long n = static_cast<long long>(cpLength(stack.back().s)); stack.back() = Value::ofInt(n); break; }
+            case Op::LtS: case Op::LeS: case Op::GtS: case Op::GeS: {  // UTF-8 byte order equals code point order
+                std::string b = std::move(stack.back().s);
+                stack.pop_back();
+                const int c = stack.back().s.compare(b);
+                bool r = in.op == Op::LtS ? c < 0 : in.op == Op::LeS ? c <= 0 : in.op == Op::GtS ? c > 0 : c >= 0;
+                stack.back() = Value::ofBool(r);
+                break;
+            }
+            case Op::PushLng: stack.push_back(Value::ofLong(in.ival)); break;
+            case Op::AddL: case Op::SubL: case Op::MulL: {
+                long long b = popInt(), a = popInt(), r = 0;
+                const bool ovf = in.op == Op::AddL ? __builtin_add_overflow(a, b, &r) : in.op == Op::SubL ? __builtin_sub_overflow(a, b, &r) : __builtin_mul_overflow(a, b, &r);
+                if (ovf) throw rtError("long overflow");
+                stack.push_back(Value::ofLong(r));
+                break;
+            }
+            case Op::DivL: case Op::RemL: {
+                long long b = popInt(), a = popInt();
+                if (b == 0) throw rtError(in.op == Op::DivL ? "division by zero" : "remainder by zero");
+                if (a == LLONG_MIN && b == -1) throw rtError("long overflow");
+                stack.push_back(Value::ofLong(in.op == Op::DivL ? a / b : a % b));
+                break;
+            }
+            case Op::NegL: { long long a = popInt(); if (a == LLONG_MIN) throw rtError("long overflow"); stack.push_back(Value::ofLong(-a)); break; }
+            case Op::EqL: case Op::NeL: case Op::LtL: case Op::LeL: case Op::GtL: case Op::GeL: {
+                long long b = popInt(), a = popInt();
+                bool r = in.op == Op::EqL ? a == b : in.op == Op::NeL ? a != b : in.op == Op::LtL ? a < b : in.op == Op::LeL ? a <= b : in.op == Op::GtL ? a > b : a >= b;
+                stack.push_back(Value::ofBool(r));
+                break;
+            }
+            case Op::I2L: { long long a = popInt(); stack.push_back(Value::ofLong(a)); break; }
+            case Op::L2I: {
+                long long a = popInt();
+                if (a < INT_MIN || a > INT_MAX) throw rtError("cannot convert the long value " + std::to_string(a) + " to int (out of range)");
+                stack.push_back(Value::ofInt(a));
+                break;
+            }
+            case Op::L2D: { long long a = popInt(); stack.push_back(Value::ofDouble(static_cast<double>(a))); break; }
+            case Op::D2L: {
+                double d = stack.back().d;
+                stack.pop_back();
+                if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0)) throw rtError("cannot convert " + formatDouble(d) + " to long (out of range)");
+                stack.push_back(Value::ofLong(static_cast<long long>(d)));  // truncates toward zero
+                break;
+            }
+            case Op::StrLng: { long long a = popInt(); stack.push_back(Value::ofString(std::to_string(a))); break; }
+            case Op::ParseLng: {
+                std::string t = std::move(stack.back().s);
+                stack.pop_back();
+                long long v;
+                if (!parseLongStrict(t, v)) throw rtError("cannot convert \"" + t + "\" to long");
+                stack.push_back(Value::ofLong(v));
+                break;
+            }
+            case Op::AndI: case Op::OrI: case Op::XorI: case Op::AndL: case Op::OrL: case Op::XorL: {
+                long long b = popInt(), a = popInt();
+                long long r = (in.op == Op::AndI || in.op == Op::AndL) ? (a & b) : (in.op == Op::OrI || in.op == Op::OrL) ? (a | b) : (a ^ b);
+                stack.push_back(in.op == Op::AndI || in.op == Op::OrI || in.op == Op::XorI ? Value::ofInt(r) : Value::ofLong(r));
+                break;
+            }
+            case Op::ShlI: case Op::ShrI: {  // 32-bit: the count is taken modulo 32, `shl` wraps like two's complement
+                long long n = popInt(), a = popInt();
+                const int c = static_cast<int>(n & 31);
+                int32_t r = in.op == Op::ShlI ? static_cast<int32_t>(static_cast<uint32_t>(static_cast<int32_t>(a)) << c) : static_cast<int32_t>(a) >> c;
+                stack.push_back(Value::ofInt(r));
+                break;
+            }
+            case Op::ShlL: case Op::ShrL: {  // 64-bit: the count is taken modulo 64
+                long long n = popInt(), a = popInt();
+                const int c = static_cast<int>(n & 63);
+                long long r = in.op == Op::ShlL ? static_cast<long long>(static_cast<uint64_t>(a) << c) : (a >> c);
+                stack.push_back(Value::ofLong(r));
+                break;
+            }
+            case Op::BNotI: { long long a = popInt(); stack.push_back(Value::ofInt(~a)); break; }
+            case Op::BNotL: { long long a = popInt(); stack.push_back(Value::ofLong(~a)); break; }
+            case Op::I2B: {
+                long long a = popInt();
+                if (a < 0 || a > 255) throw rtError("cannot convert " + std::to_string(a) + " to byte (0..255)");
+                stack.push_back(Value::ofByte(a));
+                break;
+            }
+            case Op::B2I: { long long a = popInt(); stack.push_back(Value::ofInt(a)); break; }
+
+            case Op::GetMouth:
+            case Op::SetMouth: {
+                const MouthDecl& decl = m.mouths[static_cast<size_t>(in.host)];
+                const HostMouth* hm = registry.findMouth(decl.name);  // presence checked by verify()
+                if (!registry.isGranted(hm->permission))
+                    throw rtError("mouth '" + decl.name + "' needs the '" + hm->permission + "' permission, which was not granted (run with --allow " + hm->permission + ", or use `coyote run`)");
+                try {
+                    if (in.op == Op::GetMouth) {
+                        stack.push_back(boxValue(hm->get(ctx)));
+                    } else {
+                        Value v = std::move(stack.back());
+                        stack.pop_back();
+                        hm->set(v, ctx);
+                    }
+                } catch (const HostError& e) {
+                    throw rtError("mouth '" + decl.name + "' failed: " + e.message);
+                }
+                break;
+            }
             case Op::NewArray: {
                 long long n = stack.back().i;
                 if (n < 0) throw rtError("negative array size " + std::to_string(n));
+                if (in.type.kind == Type::Byte) {
+                    Obj* b = heap.allocateBytes(in.objType, static_cast<size_t>(n), roots);
+                    stack.pop_back();
+                    stack.push_back(Value::ofArray(b));
+                    break;
+                }
                 Obj* o = heap.allocate(in.objType, static_cast<size_t>(n), Value::defaultOf(in.type), roots);  // operand stays rooted
                 stack.pop_back();
                 stack.push_back(Value::ofArray(o));
@@ -308,6 +462,13 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             }
             case Op::ArrayLit: {
                 size_t n = static_cast<size_t>(in.ival);
+                if (in.type.kind == Type::Byte) {
+                    Obj* b = heap.allocateBytes(in.objType, n, roots);  // elements are still on the stack, hence rooted
+                    for (size_t k = 0; k < n; ++k) b->bytes[k] = static_cast<char>(stack[stack.size() - n + k].i);
+                    stack.resize(stack.size() - n);
+                    stack.push_back(Value::ofArray(b));
+                    break;
+                }
                 Obj* o = heap.allocate(in.objType, n, Value::none(), roots);  // elements are still on the stack, hence rooted
                 for (size_t k = 0; k < n; ++k) o->items[k] = std::move(stack[stack.size() - n + k]);
                 stack.resize(stack.size() - n);
@@ -319,6 +480,12 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 Obj* o = stack.back().ref;
                 stack.pop_back();
                 if (!o) throw rtError("null array reference");
+                if (o->isBytes()) {
+                    if (idx < 0 || idx >= static_cast<long long>(o->bytes.size()))
+                        throw rtError("array index " + std::to_string(idx) + " is out of range for an array of length " + std::to_string(o->bytes.size()));
+                    stack.push_back(Value::ofByte(static_cast<unsigned char>(o->bytes[static_cast<size_t>(idx)])));
+                    break;
+                }
                 if (idx < 0 || idx >= static_cast<long long>(o->items.size()))
                     throw rtError("array index " + std::to_string(idx) + " is out of range for an array of length " +
                                   std::to_string(o->items.size()));
@@ -332,6 +499,12 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 Obj* o = stack.back().ref;
                 stack.pop_back();
                 if (!o) throw rtError("null array reference");
+                if (o->isBytes()) {
+                    if (idx < 0 || idx >= static_cast<long long>(o->bytes.size()))
+                        throw rtError("array index " + std::to_string(idx) + " is out of range for an array of length " + std::to_string(o->bytes.size()));
+                    o->bytes[static_cast<size_t>(idx)] = static_cast<char>(v.i);
+                    break;
+                }
                 if (idx < 0 || idx >= static_cast<long long>(o->items.size()))
                     throw rtError("array index " + std::to_string(idx) + " is out of range for an array of length " +
                                   std::to_string(o->items.size()));
@@ -342,12 +515,19 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 Obj* o = stack.back().ref;
                 stack.pop_back();
                 if (!o) throw rtError("null array reference");
-                stack.push_back(Value::ofInt(static_cast<long long>(o->items.size())));
+                stack.push_back(Value::ofInt(static_cast<long long>(o->isBytes() ? o->bytes.size() : o->items.size())));
                 break;
             }
             case Op::APush: {
                 Obj* o = stack[stack.size() - 2].ref;
                 if (!o) throw rtError("null array reference");
+                if (o->isBytes()) {
+                    o->bytes.push_back(static_cast<char>(stack.back().i));
+                    heap.growBytes(o, roots);  // may collect; the array is still on the stack
+                    stack.pop_back();
+                    stack.pop_back();
+                    break;
+                }
                 heap.reserve(1, roots);  // may collect; the array and the value are still on the stack
                 Value v = std::move(stack.back());
                 stack.pop_back();
@@ -355,11 +535,33 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 o->items.push_back(std::move(v));
                 break;
             }
+            case Op::OCopy: {  // shallow clone of a class instance or a map
+                Obj* src = stack.back().ref;
+                if (!src) throw rtError("null reference: cannot copy a null value");
+                Obj* o;
+                if (src->isMap()) o = heap.allocateMap(src->type, roots);
+                else o = heap.allocate(src->type, src->items.size(), Value::none(), roots);  // src is still rooted
+                o->items = src->items;
+                o->keys = src->keys;
+                o->alive = src->alive;
+                o->index = src->index;
+                o->live = src->live;
+                Value r = stack.back();
+                r.ref = o;
+                stack.back() = std::move(r);
+                break;
+            }
             case Op::ACopy: {
                 Obj* src = stack.back().ref;
                 if (!src) throw rtError("null array reference");
-                Obj* o = heap.allocate(src->type, src->items.size(), Value::none(), roots);  // src is still rooted
-                o->items = src->items;
+                Obj* o;
+                if (src->isBytes()) {
+                    o = heap.allocateBytes(src->type, src->bytes.size(), roots);  // src is still rooted
+                    o->bytes = src->bytes;
+                } else {
+                    o = heap.allocate(src->type, src->items.size(), Value::none(), roots);  // src is still rooted
+                    o->items = src->items;
+                }
                 stack.pop_back();
                 stack.push_back(Value::ofArray(o));
                 break;
@@ -613,6 +815,20 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             case Op::Box: stack.back() = boxValue(stack.back()); break;
             case Op::Unbox: {
                 try {
+                    {   // an obj holding an instance of a subclass can be unboxed as its base class
+                        const Type& want = in.type.kind == Type::Nullable ? *in.type.elem : in.type;
+                        const Value& ob = stack.back();
+                        if (want.kind == Type::Class && ob.boxed && ob.boxed->kind == Type::Class && ob.boxed->ref && ob.boxed->ref->type) {
+                            size_t from = 0, to = 0;
+                            while (from < m.classes.size() && m.classes[from].name != ob.boxed->ref->type->name) ++from;
+                            while (to < m.classes.size() && m.classes[to].name != want.name) ++to;
+                            if (from < m.classes.size() && to < m.classes.size() && m.classes[from].isa[to]) {
+                                Value inner = *ob.boxed;
+                                stack.back() = std::move(inner);
+                                break;
+                            }
+                        }
+                    }
                     Value r = unboxTo(stack.back(), in.type);
                     stack.back() = std::move(r);
                 } catch (const OpError& e) {
@@ -658,6 +874,7 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 const Value& inner = *c.boxed;
                 Obj* o = inner.ref;
                 if (inner.kind == Type::Array && o) {
+                    if (o->isBytes()) throw rtError("an array<byte> cannot be indexed through dyn; use a variable of type array<byte>");
                     if (!idx.boxed || idx.boxed->kind != Type::Int) throw rtError("array index must be int but got " + runtimeTypeName(idx));
                     long long i = idx.boxed->i;
                     if (i < 0 || i >= static_cast<long long>(o->items.size()))
@@ -687,6 +904,7 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 Obj* o = inner.ref;
                 try {
                     if (inner.kind == Type::Array && o) {
+                        if (o->isBytes()) throw rtError("an array<byte> cannot be indexed through dyn; use a variable of type array<byte>");
                         if (!idx.boxed || idx.boxed->kind != Type::Int) throw rtError("array index must be int but got " + runtimeTypeName(idx));
                         long long i = idx.boxed->i;
                         if (i < 0 || i >= static_cast<long long>(o->items.size()))
@@ -721,9 +939,9 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 if (!c.boxed) throw rtError("null reference: cannot read property '" + in.str + "' of null");
                 const Value& inner = *c.boxed;
                 long long n;
-                if (in.str == "length" && inner.kind == Type::Array && inner.ref) n = static_cast<long long>(inner.ref->items.size());
+                if (in.str == "length" && inner.kind == Type::Array && inner.ref) n = static_cast<long long>(inner.ref->isBytes() ? inner.ref->bytes.size() : inner.ref->items.size());
                 else if (in.str == "length" && inner.kind == Type::Map && inner.ref) n = static_cast<long long>(inner.ref->live);
-                else if (in.str == "length" && inner.kind == Type::String) n = static_cast<long long>(inner.s.size());
+                else if (in.str == "length" && inner.kind == Type::String) n = static_cast<long long>(cpLength(inner.s));
                 else throw rtError(runtimeTypeName(c) + " has no property '" + in.str + "'");
                 stack.back() = boxValue(Value::ofInt(n));
                 break;
@@ -738,6 +956,7 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 auto expectArgs = [&](size_t n) {
                     if (argc != n) throw rtError("method '" + in.str + "' of " + runtimeTypeName(c) + " expects " + std::to_string(n) + " argument(s) but got " + std::to_string(argc));
                 };
+                if (inner.kind == Type::Array && o && o->isBytes()) throw rtError("methods of an array<byte> cannot be called through dyn; use a variable of type array<byte>");
                 Value result = Value::nullObj();
                 try {
                     if (inner.kind == Type::Array && o && in.str == "push") {
@@ -808,8 +1027,23 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
         }
     }
     break;  // the program finished
-    } catch (const RuntimeError& err) {
+    } catch (const RuntimeError& caught) {
         // An error (a runtime failure or `throw`): resume at the innermost active 'try', or give up when there is none.
+        RuntimeError err = caught;
+        if (err.trace.empty()) {  // the call stack as it was where the error was raised
+            std::string t;
+            const size_t n = frames.size();
+            for (size_t k = 0; k < n; ++k) {
+                if (n > 25 && k == 20) { t += "  ... (" + std::to_string(n - 25) + " more frames)\n"; k = n - 6; continue; }
+                const Frame& f = frames[n - 1 - k];
+                size_t pc = f.pc > 0 ? f.pc - 1 : 0;  // the instruction being executed (the innermost) or the call (outer frames)
+                if (pc >= f.fn->code.size()) pc = f.fn->code.size() - 1;
+                const Instr& fi = f.fn->code[pc];
+                t += "  at " + traceName(f.fn->name) + " (" + m.fileName(fi.srcFile) + ":" + std::to_string(fi.srcLine) + ")\n";
+            }
+            if (!t.empty()) t.pop_back();
+            err.trace = std::move(t);
+        }
         bool handled = false;
         while (!frames.empty()) {
             Frame& f = frames.back();
@@ -818,6 +1052,10 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
                 f.handlers.pop_back();
                 stack.resize(f.base);
                 stack.push_back(Value::ofString(err.message));
+                ctx.lastError = err.message;  // mouth sys.exception
+                ctx.hasLastError = true;
+                ctx.lastTrace = err.trace;  // mouths sys.stackTrace / sys.exceptionObject
+                ctx.lastPayload = err.payload ? *err.payload : Value::nullObj();
                 f.pc = target;
                 handled = true;
                 break;
@@ -825,9 +1063,14 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             stack.resize(f.base);
             frames.pop_back();
         }
-        if (!handled) throw;
+        if (!handled) throw err;
     }
     }
+    if (call && call->func >= 0 && m.funcs[static_cast<size_t>(call->func)].sig.ret.kind != Type::Void && !stack.empty()) {
+        call->result = std::move(stack.back());
+        call->hasResult = true;
+    }
+        if (!call && ctx.exitCodeSet) throw HostExit{static_cast<int>(ctx.exitCode & 0xFF)};  // mouth sys.exitCode
     } catch (const HeapError& e) {
         throw RuntimeError{m.fileName(current ? current->srcFile : 0), current ? current->srcLine : 0, e.message};
     }

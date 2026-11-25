@@ -123,6 +123,7 @@ std::string expr(const Expr& e) {
         case Expr::Kind::NewObj: return "(new-object " + e.text + exprs(e.args) + ")";
         case Expr::Kind::Lambda: return std::string("(lambda ") + std::to_string(e.lparams.size()) + " param(s))";
         case Expr::Kind::CallFn: return "(call-fn " + e.text + exprs(e.args) + ")";
+        case Expr::Kind::Switch: return "(switch " + expr(*e.lhs) + exprs(e.args) + ")";
         case Expr::Kind::MethodCall: return "(method-call " + expr(*e.lhs) + " " + e.text + exprs(e.args) + ")";
     }
     return "?";

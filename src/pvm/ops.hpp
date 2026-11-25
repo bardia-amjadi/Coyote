@@ -17,6 +17,9 @@ struct OpError {
 
 std::string formatDouble(double v);
 void appendUtf8(std::string& out, long long codePoint);
+bool parseLongStrict(const std::string& s, long long& out);      // like parseIntStrict but fits in 64 bits
+size_t cpLength(const std::string& s);                            // number of code points
+bool cpAt(const std::string& s, long long index, long long& cp);  // code point at a code point index (false when out of range)
 bool parseIntStrict(const std::string& s, long long& out);       // optional '-'/'+', digits only, fits in 32 bits
 bool parseDoubleStrict(const std::string& s, double& out);       // decimal or exponent form; no spaces, no hex
 bool parseGuidStrict(const std::string& s, std::string& canonical);  // 8-4-4-4-12 hex, any case; canonical is lower case

@@ -1,4 +1,5 @@
 #include "loader.hpp"
+#include "ops.hpp"
 
 #include <cctype>
 #include <climits>
@@ -10,7 +11,7 @@ namespace pvm {
 namespace {
 
 constexpr int kMinVersion = 1;
-constexpr int kMaxVersion = 8;
+constexpr int kMaxVersion = 12;
 constexpr int kMaxTypeDepth = 32;  // nesting limit for array<array<...>>, so hostile input cannot recurse deeply
 
 struct Word {
@@ -94,7 +95,7 @@ std::string tokenize(const std::string& line, std::vector<Word>& out) {
 
 // Map keys must be hashable scalars.
 bool isMapKey(const Type& k) {
-    return k.kind == Type::Int || k.kind == Type::String || k.kind == Type::Char || k.kind == Type::Bool || k.kind == Type::Guid;
+    return k.kind == Type::Int || k.kind == Type::Long || k.kind == Type::Byte || k.kind == Type::String || k.kind == Type::Char || k.kind == Type::Bool || k.kind == Type::Guid;
 }
 
 bool parseInt(const std::string& s, long long& out) {
@@ -165,6 +166,8 @@ bool parseType(const std::string& s, int version, Type& t, int depth = 0) {
     if (version >= 4) {
         if (s == "double") { t = Type::Double; return true; }
         if (s == "char") { t = Type::Char; return true; }
+        if (s == "long" && version >= 11) { t = Type::Long; return true; }
+        if (s == "byte" && version >= 11) { t = Type::Byte; return true; }
         if (s == "Guid") { t = Type::Guid; return true; }
         if (s == "obj") { t = Type::Obj; return true; }
         if (s.size() > 6 && s.compare(0, 4, "map<") == 0 && s.back() == '>') {
@@ -246,7 +249,7 @@ public:
             }
 
             if (cur) {
-                if (head == "func" || head == "entry" || head == "host" || head == "source" || head == "class" || head == "global") {
+                if (head == "func" || head == "entry" || head == "host" || head == "mouth" || head == "source" || head == "class" || head == "global") {
                     fail("function '" + cur->name + "' is not closed (missing 'end') before '" + head + "'");
                 }
                 if (head == "end") {
@@ -360,6 +363,18 @@ public:
                 h.mlLine = lineNo_;
                 parseDecl(w, h.name, h.sig, "host");
                 mod_.hosts.push_back(std::move(h));
+            } else if (head == "mouth") {
+                if (mod_.version < 10) fail("'mouth' declarations need ML version 10");
+                if (w.size() < 3 || w[1].quoted) fail("'mouth' needs a name and at least one of 'get' / 'set' (mouth sys.exception get)");
+                MouthDecl d;
+                d.mlLine = lineNo_;
+                d.name = w[1].text;
+                for (size_t k = 2; k < w.size(); ++k) {
+                    if (w[k].text == "get" && !w[k].quoted) d.get = true;
+                    else if (w[k].text == "set" && !w[k].quoted) d.set = true;
+                    else fail("a mouth accessor must be 'get' or 'set', got '" + w[k].text + "'");
+                }
+                mod_.mouths.push_back(std::move(d));
             } else if (head == "func") {
                 Function f;
                 f.mlLine = lineNo_;
@@ -467,6 +482,13 @@ private:
                 long long v;
                 if (!parseInt(w[1].text, v) || v < INT_MIN || v > INT_MAX)
                     fail("'push.int' needs a 32-bit integer, got '" + w[1].text + "'");
+                in.ival = v;
+                break;
+            }
+            case Op::PushLng: {
+                needArgs(w, 2);
+                long long v;
+                if (w[1].quoted || !parseLongStrict(w[1].text, v)) fail("'push.lng' needs a 64-bit integer, got '" + w[1].text + "'");
                 in.ival = v;
                 break;
             }
@@ -584,6 +606,12 @@ private:
                 in.ival = n;
                 break;
             }
+            case Op::GetMouth:
+            case Op::SetMouth:
+                needArgs(w, 2);
+                if (w[1].quoted) fail(std::string("'") + head + "' needs a mouth name");
+                in.str = w[1].text;
+                break;
             case Op::MkClosure:
             case Op::Call:
             case Op::HostCall: {

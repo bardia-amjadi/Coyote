@@ -15,7 +15,7 @@ namespace coyote {
 // errors so one mistake yields one diagnostic. `Null` is the type of the literal `null` before it
 // is coerced to a nullable/obj/dyn type. `Dyn` is `obj` plus runtime-validated operations.
 struct Type {
-    enum Kind { Void, Int, String, Bool, Invalid, Array, Double, Char, Guid, Map, Nullable, Obj, Dyn, Null, Class, Fn };
+    enum Kind { Void, Int, String, Bool, Invalid, Array, Double, Char, Guid, Map, Nullable, Obj, Dyn, Null, Class, Fn, Long, Byte };
 
     Kind kind = Invalid;
     std::shared_ptr<const Type> elem;  // Array/Nullable element, Map value
@@ -90,6 +90,8 @@ inline std::string typeName(const Type& t) {
         case Type::Double: return "double";
         case Type::Char: return "char";
         case Type::Guid: return "Guid";
+        case Type::Long: return "long";
+        case Type::Byte: return "byte";
         case Type::Map: return "map<" + typeName(*t.key) + ", " + typeName(*t.elem) + ">";
         case Type::Nullable: return typeName(*t.elem) + "?";
         case Type::Obj: return "obj";
@@ -146,14 +148,19 @@ using StmtPtr = std::unique_ptr<Stmt>;
 
 struct Expr {
     enum class Kind { String, Int, Bool, Double, Char, Null, Var, Call, Unary, Binary, ArrayLit, NewArray, NewMap, NewObj, Index,
-                      Member, MethodCall, Convert, Unwrap, IsNull, Is, Lambda, CallFn };
+                      Member, MethodCall, Convert, Unwrap, IsNull, Is, Lambda, CallFn, Switch };
     // Convert: how `lhs` is turned into `type` (inserted by sema, or written as int(x), double(x), ...).
     enum class Conv { IntToDouble, DoubleToInt, CharToInt, IntToChar, StringToInt, StringToDouble, StringToGuid,
+                      IntToLong, LongToInt, LongToDouble, DoubleToLong, IntToByte, ByteToInt, StringToLong,
                       ToString, Wrap, Box, Unbox, Retype, Upcast, Downcast };
     Kind kind = Kind::String;
     SourceLoc loc;               // Unary/Binary: the operator; Index: the '['; Member/MethodCall: the member name
     std::string text;            // string value, variable/callee/member name, or operator
     long long ival = 0;          // Int value, Bool (0/1), Char code point; IsNull: 1 for '!= null'
+    // Switch (expression): lhs is the subject; args holds, for each arm, its patterns and then its result;
+    // armSizes[k] is the number of patterns of arm k (0 = the default arm `_`). `slot` is a hidden local holding the subject.
+    std::vector<int> armSizes;
+    bool isLong = false;         // Int literal: a long (L suffix or too large for int)
     double dval = 0;             // Double value
     Conv conv = Conv::Retype;    // Convert only
     ExprPtr lhs, rhs;            // Unary: lhs. Index: lhs[rhs]. Member/MethodCall: lhs is the receiver.
@@ -174,10 +181,12 @@ struct Expr {
     // Filled in by semantic analysis.
     Type type = Type::Void;
     int hostIndex = -1;          // Call to a hand declaration
+    int mouthIndex = -1;         // Var that names a mouth (a host-provided variable): index into Program::mouths
     int methodIndex = -1;        // Call to a method
     int slot = -1;               // Var: local slot
     int classIndex = -1;         // Member/MethodCall on a class: the class (Program::classes); NewObj: the class
     bool isStatic = false;       // Member: a static field; MethodCall: a static method (no receiver value)
+    bool isGlobal = false;       // Var: a file-level variable of the entry file (an ML global named $G.<text>)
 };
 
 struct Stmt {
@@ -193,6 +202,10 @@ struct Stmt {
     StmtPtr init, step;          // For: optional initializer (declaration or assignment) and step (assignment or call)
     std::vector<StmtPtr> body;   // If-then, While, For, Block
     std::vector<StmtPtr> elseBody;
+    std::vector<StmtPtr> finallyBody;  // Try: the `finally` block (runs on every way out of the try and catch blocks)
+    bool hasFinally = false;
+    int slotMsg = -1, slotPay = -1, slotTrace = -1;  // Try with finally: hidden locals that keep an escaping exception while the finally block runs
+    ExprPtr msgExpr, traceExpr;  // Throw of an Exception object (filled by sema): message and stack trace for `throwx`; `init` holds the hidden temp
     bool hasElse = false;       // Try: the catch variable is named in `name` (empty: none); body = try block, elseBody = catch block
 
     int slot = -1;               // VarDecl/ForEach: local slot of the variable (filled by sema)
@@ -208,6 +221,16 @@ struct HandDecl {
     std::string name;
     std::vector<Param> params;
     Type ret = Type::Void;       // host functions may return int, double, boolean, char or string
+};
+
+// mouth:<module> <name> [{ get; set; }]  -- declares a host variable (always of type obj). Read-only unless `set;` is written.
+struct MouthDecl {
+    int unit = 0;
+    SourceLoc loc;
+    std::string module;
+    std::string name;
+    bool canGet = true;
+    bool canSet = false;
 };
 
 // method <name>(<params>) [: <type>] { ... }
@@ -272,6 +295,9 @@ struct ClassDecl {
     int unit = 0;                // index into Program::modules
     bool exported = false;
     bool isModel = false;        // a constructor taking every field in order is generated when none is declared
+    bool builtin = false;        // a class of the implicit prelude (Exception, RuntimeError): visible everywhere
+    bool isEnum = false;         // written as `enum`: desugared to a class of shared singleton instances
+    std::vector<std::string> enumNames;  // enum: the member names in declaration order (for exhaustive switch checks)
     bool isShared = false;       // `shared class`: every member is shared (static); it cannot be instantiated
     bool isInterface = false;    // `interface I { method m(...): T }`: signatures only
     std::vector<std::string> typeParams;  // `class Box<T>`: a template; instantiated per set of arguments (generics.cpp)
@@ -314,10 +340,12 @@ struct Program {
     std::vector<Module> modules;      // filled by the loader (a bare parse leaves it empty)
     std::vector<ClassDecl> classes;
     std::vector<HandDecl> hands;
+    std::vector<MouthDecl> mouths;
     std::vector<MethodDecl> methods;
     std::vector<StmtPtr> stmts;      // top-level statements, run in order as the entry function
     std::vector<std::string> mainLocalNames;
     std::vector<Type> mainLocals;    // locals of the top-level code (filled by sema)
+    std::vector<std::pair<std::string, Type>> globals;  // file-level variables used by methods (filled by sema)
 };
 
 } // namespace coyote

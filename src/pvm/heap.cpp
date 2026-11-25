@@ -45,7 +45,7 @@ void Heap::collect(const RootsFn& roots) {
             link = &o->next;
         } else {
             *link = o->next;
-            elements_ -= o->items.size();
+            elements_ -= o->items.size() + o->byteWeight;
             --objects_;
             ++freed_;
             delete o;
@@ -76,6 +76,30 @@ Obj* Heap::allocate(const std::shared_ptr<const Type>& type, size_t count, const
     ++objects_;
     elements_ += count;
     return o;
+}
+
+Obj* Heap::allocateBytes(const std::shared_ptr<const Type>& type, size_t count, const RootsFn& roots) {
+    const size_t weight = (count + 15) / 16;
+    if (options_.stress || objects_ >= objectTrigger_ || elements_ >= elementTrigger_) collect(roots);
+    ensureRoom(weight, roots);
+    Obj* o = new Obj;
+    o->type = type;
+    o->bytes.assign(count, '\0');
+    o->byteWeight = weight;
+    o->next = head_;
+    head_ = o;
+    ++objects_;
+    elements_ += weight;
+    return o;
+}
+
+// Charges the growth of a byte array (after push) to the heap limit.
+void Heap::growBytes(Obj* o, const RootsFn& roots) {
+    const size_t weight = (o->bytes.size() + 15) / 16;
+    if (weight > o->byteWeight) {
+        reserve(weight - o->byteWeight, roots);
+        o->byteWeight = weight;
+    }
 }
 
 Obj* Heap::allocateMap(const std::shared_ptr<const Type>& type, const RootsFn& roots) {

@@ -16,6 +16,7 @@ struct Token {
     double dval = 0;        // value of Double tokens
     SourceLoc loc;
     bool nlBefore = false;  // a newline separates this token from the previous one
+    bool isLong = false;    // Int tokens: written with an L suffix or too large for int (the literal is a long)
 };
 
 // Tokenizes a .coy source. Throws CompileError on the first lexical error.

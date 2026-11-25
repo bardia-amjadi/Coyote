@@ -31,10 +31,10 @@
 namespace {
 
 void usage(std::ostream& os) {
-    os << "Pixel Virtual Machine " COYOTE_VERSION " (supports ML format versions 1 to 7)\n"
+    os << "Pixel Virtual Machine " COYOTE_VERSION " (supports ML format versions 1 to 12)\n"
        << "usage: pvm [options] <program.ml>\n"
        << "  --verify-only        load and verify the program without running it\n"
-       << "  --allow <permission> grant a host permission (default: console, time, random; also: file, system, net, windows)\n"
+       << "  --allow <permission> grant a host permission (default: console, time, random; also: file, system, net, windows, process, interop, ui)\n"
        << "  --allow-all          grant every permission\n"
        << "  --unbuffered         flush output after every write\n"
        << "  -- <args...>         program arguments, readable with sys.arg\n"
