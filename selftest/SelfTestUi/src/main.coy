@@ -1,0 +1,60 @@
+# Coyote self test, interactive part (Windows only): dialogs, file pickers, notifications and the clipboard.
+# A person has to look at the screen. Every step shows something and asks "did it look right?"; a "No" is a FAIL.
+# Lines: PASS name | FAIL name | detail | SKIP name | why
+use "Standard.IO"
+use "Standard.System"
+use "Standard.Runtime"
+use "Standard.Windows"
+use "Standard.Text"
+
+int passed = 0
+int failed = 0
+int skipped = 0
+method ok(string name, boolean cond, string detail) {
+    if (cond) {
+        passed = passed + 1
+        Shell.PrintLine("PASS " + name)
+    } else {
+        failed = failed + 1
+        Shell.PrintLine("FAIL " + name + " | " + detail)
+    }
+}
+method looksRight(string name, string what) {
+    boolean yes = MessageBox.Ask("Did you just see: " + what + "?", "Self test: " + name)
+    ok(name, yes, "the person answered No: " + what)
+}
+
+if (Environment.OS() != "windows") {
+    Shell.PrintLine("SKIP interactive tests | not Windows")
+} else {
+    Shell.PrintLine("INFO Coyote " + Runtime.Version() + " " + Runtime.Architecture())
+    MessageBox.Show("This test shows windows and asks you questions.\nAnswer honestly: No means something looked wrong.", "Coyote self test (interactive)")
+    ok("message box returns Ok", MessageBox.Show("Click OK.", "OK button", DialogButtons.OK, DialogIcon.Information).Name == "Ok", "")
+    looksRight("message box information icon", "an information message box with an (i) icon, in the modern Windows style")
+    ok("message box yes/no returns Yes", MessageBox.Show("Click YES.", "Yes/No", DialogButtons.YesNo, DialogIcon.Question).Name == "Yes", "")
+    ok("message box yes/no returns No", MessageBox.Show("Click NO.", "Yes/No", DialogButtons.YesNo, DialogIcon.Warning).Name == "No", "")
+    ok("message box ok/cancel returns Cancel", MessageBox.Show("Click CANCEL.", "OK/Cancel", DialogButtons.OKCancel, DialogIcon.Error).Name == "Cancel", "")
+    ok("message box retry/cancel returns Retry", MessageBox.Show("Click RETRY.", "Retry/Cancel", DialogButtons.RetryCancel, DialogIcon.None).Name == "Retry", "")
+    MessageBox.Show("A long text follows.\n" + "Line two with ü 日本 😀 and a very long sentence that should wrap nicely inside the window without being cut off at the right edge.\nLine three.", "Long text")
+    looksRight("message box long and unicode text", "all three lines complete, including the characters ü 日本 😀")
+    string picked = FileDialogs.OpenFile("Pick any file (or press Cancel)", "All files|*.*")
+    boolean pickedOk = picked == "" || File.Exists(picked)
+    ok("open file dialog", pickedOk, "returned [" + picked + "]")
+    Shell.PrintLine("INFO open file result = [" + picked + "]")
+    string save = FileDialogs.SaveFile("Choose where to save (or press Cancel)", "Text files|*.txt", "selftest.txt")
+    ok("save file dialog", save == "" || save.EndsWith("selftest.txt") || save.EndsWith(".txt"), "returned [" + save + "]")
+    Shell.PrintLine("INFO save file result = [" + save + "]")
+    string folder = FileDialogs.Folder("Pick any folder (or press Cancel)")
+    ok("folder dialog", folder == "" || Directory.Exists(folder), "returned [" + folder + "]")
+    Shell.PrintLine("INFO folder result = [" + folder + "]")
+    Notifications.Show("Coyote self test", "This is a notification (title + text).", 5000)
+    looksRight("notification", "a notification (toast or tray balloon) titled 'Coyote self test'")
+    Clipboard.SetText("Coyote ü 日本 😀")
+    MessageBox.Show("The clipboard now holds a text.\nPaste it into Notepad (Ctrl+V), look at it, then come back and click OK.", "Clipboard")
+    looksRight("clipboard paste", "'Coyote ü 日本 😀' pasted into another program")
+    ok("open a program", Processes.Open("notepad.exe"), "")
+    looksRight("Processes.Open", "Notepad opening (close it now)")
+    Shell.PrintLine("RESULT pass=" + passed + " fail=" + failed + " skip=" + skipped)
+    MessageBox.Show("Finished: " + passed + " passed, " + failed + " failed.\nThe result was written to the console window.", "Coyote self test")
+    if (failed > 0) { Environment.Exit(1) }
+}

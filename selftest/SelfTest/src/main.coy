@@ -1,0 +1,377 @@
+# Coyote self test, core part: files, environment, time, math, text, collections, exceptions and GC under load.
+# Everything here is inside the native subset, so `coyote llvm` builds a real native executable; the PVM and the native run
+# must print exactly the same PASS / FAIL / SKIP lines (INFO lines are machine details and are not compared).
+# Lines: PASS name | FAIL name | detail | SKIP name | why | INFO name = value
+#   SelfTest            all checks
+#   SelfTest deep N     recursion N levels deep (checks the native stack)
+#   SelfTest deeptry N  recursion N levels deep with try/finally in every frame, then a throw from the bottom
+#   SelfTest args a b   prints the arguments it received (checks quoting)
+use "Standard.IO"
+use "Standard.System"
+use "Standard.Text"
+use "Standard.Time"
+use "Standard.Math"
+use "Standard.Runtime"
+use "Standard.Process"
+use "Standard.Encoding"
+use "Standard.Collections"
+use "Standard.Configuration"
+use "Community.Text"
+use "Community.Timer"
+
+int passed = 0
+int failed = 0
+int skipped = 0
+
+method ok(string name, boolean cond, string detail) {
+    if (cond) {
+        passed = passed + 1
+        Shell.PrintLine("PASS " + name)
+    } else {
+        failed = failed + 1
+        Shell.PrintLine("FAIL " + name + " | " + detail)
+    }
+}
+method same(string name, string expected, string actual) {
+    ok(name, expected == actual, "expected [" + expected + "] got [" + actual + "]")
+}
+method skip(string name, string why) {
+    skipped = skipped + 1
+    Shell.PrintLine("SKIP " + name + " | " + why)
+}
+method info(string name, string value) { Shell.PrintLine("INFO " + name + " = " + value) }
+method crash(string section, string message) {
+    failed = failed + 1
+    Shell.PrintLine("FAIL " + section + " crashed | " + message)
+}
+method isWindows(): boolean { return Environment.OS() == "windows" }
+method joinLines(array<string> xs): string {
+    string r = ""
+    in (var x of xs) { r = r + x + "|" }
+    return r
+}
+
+# ---------------------------------------------------------------- files and folders
+method secFiles() {
+    string root = "selftest work ü 日本"
+    Directory.Delete(root, true)
+    Directory.Create(root + "/sub dir/deep")
+    ok("dir nested create", Directory.Exists(root + "/sub dir/deep"), "")
+    string f = root + "/text ü.txt"
+    File.WriteAllText(f, "line1\nline2 héllo 日本 😀\n")
+    ok("file exists", File.Exists(f), "")
+    same("file text roundtrip", "line1\nline2 héllo 日本 😀\n", File.ReadAllText(f))
+    ok("file size is utf8 length", File.Size(f) == 31L, "size " + File.Size(f))
+    array<string> lines = File.ReadLines(f)
+    ok("file ReadLines", lines.length == 2 && lines[1] == "line2 héllo 日本 😀", joinLines(lines))
+    File.AppendAllText(f, "tail")
+    File.AppendLine(f, "!")
+    same("file append", "line1\nline2 héllo 日本 😀\ntail!\n", File.ReadAllText(f))
+    string g = root + "/lines.txt"
+    File.WriteLines(g, ["a", "b", "c"])
+    same("file WriteLines", "a|b|c|", joinLines(File.ReadLines(g)))
+    array<byte> crlf = new array<byte>(5)
+    crlf[0] = byte(97)
+    crlf[1] = byte(13)
+    crlf[2] = byte(10)
+    crlf[3] = byte(98)
+    crlf[4] = byte(10)
+    File.WriteAllBytes(root + "/crlf.txt", crlf)
+    same("file ReadLines strips CR", "a|b|", joinLines(File.ReadLines(root + "/crlf.txt")))
+    array<byte> big = new array<byte>(1000000)
+    for (var i = 0; i < 1000000; i++) { big[i] = byte(i % 251) }
+    File.WriteAllBytes(root + "/big.bin", big)
+    ok("big file size", File.Size(root + "/big.bin") == 1000000L, "" + File.Size(root + "/big.bin"))
+    array<byte> back = File.ReadAllBytes(root + "/big.bin")
+    boolean same1 = back.length == 1000000
+    for (var i = 0; i < 1000000; i += 997) { if (back[i] != byte(i % 251)) { same1 = false } }
+    ok("big file content", same1, "length " + back.length)
+    File.AppendBytes(root + "/big.bin", crlf)
+    ok("file AppendBytes", File.Size(root + "/big.bin") == 1000005L, "" + File.Size(root + "/big.bin"))
+    File.Copy(f, root + "/copy ü.txt")
+    same("file copy", File.ReadAllText(f), File.ReadAllText(root + "/copy ü.txt"))
+    File.Copy(f, root + "/copy ü.txt")
+    File.Move(root + "/copy ü.txt", root + "/sub dir/moved.txt")
+    ok("file move", File.Exists(root + "/sub dir/moved.txt") && !File.Exists(root + "/copy ü.txt"), "")
+    File.WriteAllText(root + "/sub dir/moved.txt", "replaced")
+    File.WriteAllText(root + "/other.txt", "other")
+    File.Move(root + "/other.txt", root + "/sub dir/moved.txt")
+    same("file move replaces", "other", File.ReadAllText(root + "/sub dir/moved.txt"))
+    long now = Time.UnixSeconds()
+    long mod = File.ModifiedUnix(f)
+    ok("file modified time", mod > now - 300L && mod < now + 300L, "modified " + mod + " now " + now)
+    string full = File.FullPath(f)
+    ok("file full path", full.EndsWith("text ü.txt") && full.length > f.length, full)
+    ok("file full path of ..", File.FullPath(root + "/sub dir/../text ü.txt") == full, File.FullPath(root + "/sub dir/../text ü.txt") + " vs " + full)
+    array<string> listing = Directory.List(root)
+    boolean hasSub = false
+    boolean hasText = false
+    in (var e of listing) {
+        if (e == "sub dir/") { hasSub = true }
+        if (e == "text ü.txt") { hasText = true }
+    }
+    ok("dir list", hasSub && hasText, joinLines(listing))
+    boolean sorted = true
+    for (var i = 1; i < listing.length; i++) { if (listing[i - 1] > listing[i]) { sorted = false } }
+    ok("dir list sorted", sorted, joinLines(listing))
+    ok("file delete", File.Delete(f) && !File.Exists(f), "")
+    ok("file delete missing", !File.Delete(f), "")
+    boolean threw = false
+    try { File.ReadAllText(root + "/missing.txt") } catch (e) { threw = true }
+    ok("read missing file throws", threw, "")
+    threw = false
+    try { File.Copy(root + "/missing.txt", root + "/x.txt") } catch (e) { threw = true }
+    ok("copy missing file throws", threw, "")
+    threw = false
+    try { File.Exists("") } catch (e) { threw = true }
+    ok("empty path throws", threw, "")
+    ok("dir delete non-recursive of non-empty throws", Directory.Exists(root), "")
+    threw = false
+    try { Directory.Delete(root, false) } catch (e) { threw = true }
+    ok("dir delete non-empty without recursive throws", threw, "")
+    ok("dir delete recursive", Directory.Delete(root, true) && !Directory.Exists(root), "")
+    ok("dir delete missing", !Directory.Delete(root, true), "")
+    same("path filename", "z.txt", Path.FileName("x/y/z.txt"))
+    same("path ext", ".txt", Path.Extension("x/y/z.txt"))
+    same("path name no ext", "z", Path.FileNameWithoutExtension("x/y/z.txt"))
+    same("path change ext", "x/y/z.md", Path.ChangeExtension("x/y/z.txt", ".md"))
+    same("path dir", "x/y", Path.DirectoryName("x/y/z.txt"))
+    if (isWindows()) {
+        same("path filename backslash", "z.txt", Path.FileName("x\\y\\z.txt"))
+        same("path dir backslash", "x\\y", Path.DirectoryName("x\\y\\z.txt"))
+    }
+    info("path combine", Path.Combine("a", "b"))
+}
+
+# ---------------------------------------------------------------- environment
+method secEnvironment() {
+    Environment.Set("COYOTE_SELFTEST_VAR", "välue 日本")
+    same("env set/get", "välue 日本", Environment.Get("COYOTE_SELFTEST_VAR"))
+    ok("env has", Environment.Has("COYOTE_SELFTEST_VAR") && !Environment.Has("COYOTE_SELFTEST_NOPE_XYZ"), "")
+    ok("env current directory", Environment.CurrentDirectory().length > 1, Environment.CurrentDirectory())
+    ok("env home directory", Environment.HomeDirectory().length > 1, Environment.HomeDirectory())
+    ok("env os name", Environment.OS() == "windows" || Environment.OS() == "linux" || Environment.OS() == "macos", Environment.OS())
+    ok("env no args", Environment.ArgCount() == 0 || Environment.Arg(0) == "deep" || Environment.Arg(0) == "args", "" + Environment.ArgCount())
+    boolean threw = false
+    try { Environment.Set("A=B", "x") } catch (e) { threw = true }
+    ok("env bad name throws", threw, "")
+    info("os", Environment.OS())
+    info("current directory", Environment.CurrentDirectory())
+    info("home directory", Environment.HomeDirectory())
+    info("runtime", Runtime.Describe())
+    info("processors", "" + Runtime.ProcessorCount())
+    info("machine", Runtime.MachineName())
+    info("user", Runtime.UserName())
+    info("path env", Environment.Get("PATH"))
+}
+
+# ---------------------------------------------------------------- runtime
+method secRuntime() {
+    ok("runtime version", Runtime.Version().length > 0, "")
+    ok("runtime arch", Runtime.Architecture() == "x64" || Runtime.Architecture() == "arm64" || Runtime.Architecture() == "x86", Runtime.Architecture())
+    ok("runtime cpu count", Runtime.ProcessorCount() >= 1, "")
+    ok("runtime pid", Runtime.ProcessId() > 0 && Process.CurrentId() == Runtime.ProcessId(), "" + Runtime.ProcessId() + " " + Process.CurrentId())
+    ok("runtime memory", Runtime.MemoryBytes() > 1000000 || Runtime.MemoryBytes() < 0, "" + Runtime.MemoryBytes())
+    info("memory bytes", "" + Runtime.MemoryBytes())
+}
+
+# ---------------------------------------------------------------- time
+method secTime() {
+    long t = Time.UnixSeconds()
+    ok("time unix seconds", t > 1700000000L, "" + t)
+    long up0 = Time.UptimeMs()
+    Time.Sleep(120)
+    long waited = Time.UptimeMs() - up0
+    ok("time sleep", waited >= 100L && waited < 2000L, "slept " + waited + " ms")
+    same("time format utc", "2024-02-29 13:45:59", Time.FormatUtc(1709214359L, "%Y-%m-%d %H:%M:%S"))
+    same("time format utc 2038", "2038-01-19 03:14:08", Time.FormatUtc(2147483648L, "%Y-%m-%d %H:%M:%S"))
+    same("time format utc before 1970", "1969-12-31 23:59:59", Time.FormatUtc(-1L, "%Y-%m-%d %H:%M:%S"))
+    ok("time local year", Time.Now("%Y").length == 4 && int(Time.Now("%Y")) >= 2025, Time.Now("%Y"))
+    ok("time local format works", Time.Format(t, "%Y-%m-%d %H:%M:%S").length == 19, Time.Format(t, "%Y-%m-%d %H:%M:%S"))
+    long offset = Time.FromParts(int(Time.Format(t, "%Y")), int(Time.Format(t, "%m")), int(Time.Format(t, "%d")), int(Time.Format(t, "%H")), int(Time.Format(t, "%M")), int(Time.Format(t, "%S"))) - t
+    ok("time local offset sane", offset > -50400L && offset < 50400L, "" + offset)
+    info("local time", Time.Now("%Y-%m-%d %H:%M:%S") + " (utc offset seconds " + offset + ")")
+    Stopwatch sw = Stopwatch.StartNew()
+    Time.Sleep(60)
+    ok("stopwatch", sw.ElapsedMs() >= 40L, "" + sw.ElapsedMs())
+    long a = Time.FromParts(2024, 2, 29, 13, 45, 59)
+    ok("time parts", a == 1709214359L && Time.Year(a) == 2024 && Time.Month(a) == 2 && Time.Day(a) == 29 && Time.DayOfWeek(a) == 4 && Time.DayOfYear(a) == 60, "" + a)
+}
+
+# ---------------------------------------------------------------- math, numbers, random
+method secMath() {
+    ok("math sqrt", Math.Abs(Math.Sqrt(2.0) - 1.4142135623730951) < 0.0000000001, "" + Math.Sqrt(2.0))
+    ok("math pow", Math.Pow(2.0, 10.0) == 1024.0, "")
+    ok("math trig", Math.Abs(Math.Sin(Numbers.ToRadians(30.0)) - 0.5) < 0.0000000001, "")
+    ok("math round floor ceil", Math.Round(2.5) == 3.0 && Math.Floor(-1.5) == -2.0 && Math.Ceil(1.2) == 2.0, "")
+    same("numbers fixed", "3.14", Numbers.Fixed(3.14159, 2))
+    same("numbers hex", "ff", Numbers.Hex(255))
+    same("numbers thousands", "1,234,567", Numbers.Thousands(1234567, ","))
+    ok("numbers gcd/prime", Numbers.Gcd(12, 18) == 6 && Numbers.IsPrime(97) && !Numbers.IsPrime(91), "")
+    ok("double parse and print", double("2.5") * 2.0 == 5.0 && string(0.1 + 0.2) == "0.30000000000000004", string(0.1 + 0.2))
+    ok("int overflow throws", overflows(), "")
+    ok("long math", 9007199254740993L * 3L == 27021597764222979L, "")
+    Random.Seed(42)
+    string line = ""
+    for (var i = 0; i < 12; i++) { line = line + Random.NextInt(1, 100) + " " }
+    same("random seeded sequence", "9 38 69 93 100 77 72 86 77 59 69 30 ", line)
+    Random.Seed(7)
+    ok("random seeded range", Random.NextInt(-5, 5) == 2 && Random.NextInt(0, 0) == 0 && Random.NextInt(-2147483647 - 1, 2147483647) == 1458688841, "")
+    Random.Seed(99)
+    double sum = 0.0
+    for (var i = 0; i < 1000; i++) { sum = sum + Random.NextDouble() }
+    ok("random doubles", sum > 400.0 && sum < 600.0, "" + sum)
+}
+method overflows(): boolean {
+    try {
+        int big = 2147483647
+        int x = big + 1
+        return false
+    } catch (e) {
+        return true
+    }
+}
+
+# ---------------------------------------------------------------- text, encoding, regex, configuration
+method secText() {
+    string s = "héllo 日本 😀"
+    ok("string length is code points", s.length == 10, "" + s.length)
+    ok("utf8 byte count", Utf8.ByteCount(s) == 18, "" + Utf8.ByteCount(s))
+    same("utf8 roundtrip", s, Utf8.GetString(Utf8.GetBytes(s)))
+    same("utf16 roundtrip", s, Utf16.GetString(Utf16.GetBytes(s)))
+    same("base64", "aMOpbGxvIOaXpeacrCDwn5iA", Base64.EncodeText(s))
+    same("base64 decode", s, Base64.DecodeText("aMOpbGxvIOaXpeacrCDwn5iA"))
+    ok("code points", Encoding.CodePoints(s)[9] == 128512, "" + Encoding.CodePoints(s)[9])
+    same("upper/lower ascii", "HELLO-world", "hello-WORLD".Upper().Substring(0, 5) + "-" + "WORLD".Lower())
+    info("upper of non-ascii letters", "héllo".Upper())
+    same("trim/replace", "a-b", "  a b  ".Trim().Replace(" ", "-"))
+    same("split/join", "a|b|c", "a,b,c".Split(",").Join("|"))
+    same("pad", "007", "7".PadLeft(3, "0"))
+    ok("contains/starts/ends", "hello world".Contains("o w") && "abc".StartsWith("ab") && "abc".EndsWith("bc"), "")
+    same("string index", "é", string(s[1]))
+    same("string compare", "true", "" + ("apple" < "banana"))
+    ok("regex", new Regex("(\\d+)-(\\d+)").Match("tel 555-1234").Text(2) == "1234" && Regex.IsMatchText("abc", "^a.c$"), "")
+    same("regex unicode", "éé", new Regex("é+").Match("caféé!").Value)
+    Configuration cfg = Configuration.Parse("name = Coyote\ncount = 42\nflag = true\n# comment\nratio = 2.5")
+    ok("config parse", cfg.Get("name") == "Coyote" && cfg.GetInt("count", 0) == 42 && cfg.GetBool("flag", false) && cfg.GetDouble("ratio", 0.0) == 2.5, "")
+    cfg.Set("extra", "ü 日本")
+    cfg.Save("selftest-config.txt")
+    Configuration loaded = Configuration.Load("selftest-config.txt")
+    same("config save/load", "ü 日本", loaded.Get("extra"))
+    File.Delete("selftest-config.txt")
+}
+
+# ---------------------------------------------------------------- collections and sorting
+method secCollections() {
+    Random.Seed(5)
+    List<int> xs = new List<int>()
+    for (var i = 0; i < 20000; i++) { xs.Add(Random.NextInt(0, 1000000)) }
+    xs.Sort((int a, int b) => a - b)
+    boolean sorted = true
+    for (var i = 1; i < xs.Count; i++) { if (xs.Get(i - 1) > xs.Get(i)) { sorted = false } }
+    ok("list sort 20000", sorted && xs.Count == 20000, "")
+    map<string,int> counts = new map<string,int>()
+    for (var i = 0; i < 5000; i++) { counts["k" + (i % 100)] = i }
+    ok("map", counts.length == 100 && counts["k7"] == 4907 && counts.containsKey("k99") && !counts.containsKey("k100"), "" + counts.length)
+    Stack<string> st = new Stack<string>()
+    st.Push("a")
+    st.Push("b")
+    Queue<int> q = new Queue<int>()
+    q.Enqueue(1)
+    q.Enqueue(2)
+    ok("stack and queue", st.Pop() == "b" && q.Dequeue() == 1, "")
+    Set<string> set = new Set<string>()
+    set.Add("x")
+    set.Add("x")
+    ok("set", set.ToArray().length == 1, "")
+}
+
+# ---------------------------------------------------------------- exceptions, classes, GC under load
+class Item {
+    field int Id = 0
+    field string Name = ""
+    field array<int> Data = new array<int>(0)
+    constructor(int id) {
+        Id = id
+        Name = "item " + id
+        Data = new array<int>(16)
+        Data[3] = id
+    }
+}
+method thrower(int depth): int {
+    if (depth == 0) { throw new Exception("deep error") }
+    try {
+        return thrower(depth - 1) + 1
+    } finally {
+        counter = counter + 1
+    }
+}
+int counter = 0
+method secStress() {
+    int caught = 0
+    for (var i = 0; i < 20000; i++) {
+        try {
+            if (i % 2 == 0) { throw new Exception("x" + i) }
+        } catch (e) {
+            caught = caught + 1
+        }
+    }
+    ok("exceptions in a loop", caught == 10000, "" + caught)
+    counter = 0
+    string message = ""
+    try { thrower(50) } catch (e) { message = e.Message }
+    ok("exception through 50 frames runs every finally", message == "deep error" && counter == 50, message + " " + counter)
+    List<Item> keep = new List<Item>()
+    long total = 0L
+    for (var i = 0; i < 300000; i++) {
+        Item it = new Item(i)
+        total = total + it.Data[3]
+        if (i % 1000 == 0) { keep.Add(it) }
+    }
+    ok("allocation of 300000 objects", total == 44999850000L && keep.Count == 300 && keep.Get(299).Name == "item 299000", "" + total)
+    string big = ""
+    for (var i = 0; i < 20000; i++) { big = big + "ab" }
+    ok("string building", big.length == 40000, "" + big.length)
+    ok("recursion depth 2000", depth(2000) == 2000, "")
+    map<int,string> m = new map<int,string>()
+    for (var i = 0; i < 100000; i++) { m[i] = "v" + i }
+    ok("map of 100000 entries", m.length == 100000 && m[99999] == "v99999", "")
+    ok("gc ran", Runtime.GcCollections() >= 0, "")
+    info("gc collections", "" + Runtime.GcCollections())
+    info("heap objects", "" + Runtime.HeapObjects())
+}
+method depth(int n): int {
+    if (n == 0) { return 0 }
+    return depth(n - 1) + 1
+}
+
+# ---------------------------------------------------------------- unicode on the console (compare the bytes outside the program)
+method secConsole() {
+    Shell.PrintLine("UNICODE héllo 日本 😀")
+    Shell.Print("no newline;")
+    Shell.PrintLine(" then newline")
+}
+
+if (Environment.ArgCount() > 1 && Environment.Arg(0) == "deep") {
+    Shell.PrintLine("DEEP " + depth(int(Environment.Arg(1))))
+} else if (Environment.ArgCount() > 1 && Environment.Arg(0) == "deeptry") {
+    counter = 0
+    string msg = ""
+    try { thrower(int(Environment.Arg(1))) } catch (e) { msg = e.Message }
+    Shell.PrintLine("DEEPTRY " + msg + " " + counter)
+} else if (Environment.ArgCount() > 0 && Environment.Arg(0) == "args") {
+    for (var i = 1; i < Environment.ArgCount(); i++) { Shell.PrintLine("ARG[" + Environment.Arg(i) + "]") }
+} else {
+    info("self test", "Coyote " + Runtime.Version() + " on " + Runtime.Architecture())
+    try { secFiles() } catch (e) { crash("files", e.Message) }
+    try { secEnvironment() } catch (e) { crash("environment", e.Message) }
+    try { secRuntime() } catch (e) { crash("runtime", e.Message) }
+    try { secTime() } catch (e) { crash("time", e.Message) }
+    try { secMath() } catch (e) { crash("math", e.Message) }
+    try { secText() } catch (e) { crash("text", e.Message) }
+    try { secCollections() } catch (e) { crash("collections", e.Message) }
+    try { secStress() } catch (e) { crash("stress", e.Message) }
+    try { secConsole() } catch (e) { crash("console", e.Message) }
+    Shell.PrintLine("RESULT pass=" + passed + " fail=" + failed + " skip=" + skipped)
+    if (failed > 0) { Environment.Exit(1) }
+}

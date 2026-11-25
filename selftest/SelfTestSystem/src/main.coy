@@ -1,0 +1,198 @@
+# Coyote self test, system part: other programs, Windows features, DLL calls, HTTP and loading Coyote programs.
+# These hosts run on the PVM (a program that uses them becomes a bundled executable), so this project checks the operating-system side.
+# Lines: PASS name | FAIL name | detail | SKIP name | why | INFO name = value
+use "Standard.IO"
+use "Standard.System"
+use "Standard.Text"
+use "Standard.Time"
+use "Standard.Runtime"
+use "Standard.Process"
+use "Standard.Windows"
+use "Standard.Windows.InteropServices"
+use "Standard.Http"
+use "Standard.Coyote.InteropServices"
+
+int passed = 0
+int failed = 0
+int skipped = 0
+
+method ok(string name, boolean cond, string detail) {
+    if (cond) {
+        passed = passed + 1
+        Shell.PrintLine("PASS " + name)
+    } else {
+        failed = failed + 1
+        Shell.PrintLine("FAIL " + name + " | " + detail)
+    }
+}
+method same(string name, string expected, string actual) {
+    ok(name, expected == actual, "expected [" + expected + "] got [" + actual + "]")
+}
+method skip(string name, string why) {
+    skipped = skipped + 1
+    Shell.PrintLine("SKIP " + name + " | " + why)
+}
+method info(string name, string value) { Shell.PrintLine("INFO " + name + " = " + value) }
+method crash(string section, string message) {
+    failed = failed + 1
+    Shell.PrintLine("FAIL " + section + " crashed | " + message)
+}
+method isWindows(): boolean { return Environment.OS() == "windows" }
+method joinLines(array<string> xs): string {
+    string r = ""
+    in (var x of xs) { r = r + x + "|" }
+    return r
+}
+
+# ---------------------------------------------------------------- other programs
+method pick(string forWindows, string forOthers): string {
+    if (isWindows()) { return forWindows }
+    return forOthers
+}
+method runOs(string winProg, array<string> winArgs, string unixProg, array<string> unixArgs): ProcessResult {
+    if (isWindows()) { return Process.Run(winProg, winArgs) }
+    return Process.Run(unixProg, unixArgs)
+}
+method runFullOs(string winProg, array<string> winArgs, string unixProg, array<string> unixArgs, string folder, string input, int timeoutMs): ProcessResult {
+    if (isWindows()) { return Process.RunFull(winProg, winArgs, folder, input, timeoutMs) }
+    return Process.RunFull(unixProg, unixArgs, folder, input, timeoutMs)
+}
+method startOs(string winProg, array<string> winArgs, string unixProg, array<string> unixArgs): Process {
+    if (isWindows()) { return Process.Start(winProg, winArgs) }
+    return Process.Start(unixProg, unixArgs)
+}
+method secProcess() {
+    string shellName = pick("cmd", "sh")
+    ok("process which finds a program", Process.Which(shellName).length > 0, "")
+    ok("process which missing", Process.Which("definitely-not-a-program-xyz") == "" && !Process.Exists("definitely-not-a-program-xyz"), "")
+    ProcessResult r = Process.Shell("echo hello")
+    ok("process shell echo", r.Succeeded() && r.Output.Trim() == "hello", "exit " + r.ExitCode + " out [" + r.Output + "]")
+    ProcessResult e3 = runOs("cmd", ["/c", "exit", "3"], "sh", ["-c", "exit 3"])
+    ok("process exit code", e3.ExitCode == 3 && !e3.Succeeded(), "exit " + e3.ExitCode)
+    ProcessResult out2 = runOs("cmd", ["/c", "echo out& echo err 1>&2"], "sh", ["-c", "echo out; echo err 1>&2"])
+    ok("process stdout and stderr", out2.Output.Trim() == "out" && out2.Error.Trim() == "err", "out [" + out2.Output + "] err [" + out2.Error + "]")
+    ProcessResult sorted = Process.RunFull("sort", new array<string>(0), "", "b\nc\na\n", 10000)
+    ok("process stdin", sorted.Output.Trim().Split("\n").length == 3 && sorted.Output.Contains("a"), "out [" + sorted.Output + "]")
+    boolean startFailed = false
+    try {
+        ProcessResult noProgram = Process.Run("definitely-not-a-program-xyz", new array<string>(0))
+        startFailed = !noProgram.Succeeded()
+    } catch (e) {
+        startFailed = true
+    }
+    ok("process missing program is an error", startFailed, "")
+    ProcessResult slow = runFullOs("ping", ["-n", "20", "127.0.0.1"], "sleep", ["20"], "", "", 700)
+    ok("process timeout", slow.TimedOut, "timedOut " + slow.TimedOut + " exit " + slow.ExitCode)
+    Process p = startOs("ping", ["-n", "20", "127.0.0.1"], "sleep", ["20"])
+    ok("process start is running", p.Id > 0 && p.IsRunning(), "id " + p.Id)
+    ok("process kill", p.Kill(), "")
+    Time.Sleep(300)
+    ok("process killed is not running", !p.IsRunning(), "")
+    Directory.Create("selftest-cwd")
+    ProcessResult cwd = runFullOs("cmd", ["/c", "cd"], "pwd", new array<string>(0), "selftest-cwd", "", 5000)
+    ok("process working folder", cwd.Output.Trim().EndsWith("selftest-cwd"), "[" + cwd.Output + "]")
+    Directory.Delete("selftest-cwd", true)
+    ProcessResult uni = runOs("cmd", ["/c", "echo", "ü"], "echo", ["ü"])
+    info("process unicode arg echo", uni.Output.Trim())
+    ProcessResult own = runOs("cmd", ["/c", "echo", "two words"], "sh", ["-c", "echo \"two words\""])
+    ok("process argument with a space", own.Output.Trim().Contains("two words"), "[" + own.Output + "]")
+}
+
+# ---------------------------------------------------------------- Windows only
+method secWindows() {
+    if (!isWindows()) {
+        skip("windows features", "not Windows")
+        return
+    }
+    string key = "HKCU\\Software\\CoyoteSelfTest"
+    try { Registry.DeleteKey(key) } catch (e) { }
+    Registry.Write(key, "text", "välue 日本")
+    Registry.WriteInt(key, "number", 12345)
+    Registry.Write(key + "\\child", "name", "x")
+    same("registry text", "välue 日本", Registry.Read(key, "text"))
+    ok("registry int", Registry.ReadInt(key, "number") == 12345, "")
+    ok("registry exists", Registry.Exists(key, "text") && Registry.KeyExists(key) && !Registry.Exists(key, "nope") && !Registry.KeyExists(key + "\\nokey"), "")
+    same("registry read default", "fallback", Registry.ReadOr(key, "missing", "fallback"))
+    ok("registry subkeys and values", Registry.SubKeys(key).length == 1 && Registry.Values(key).length == 2, joinLines(Registry.SubKeys(key)) + joinLines(Registry.Values(key)))
+    Registry.DeleteValue(key, "number")
+    ok("registry delete value", !Registry.Exists(key, "number"), "")
+    Registry.DeleteKey(key)
+    ok("registry delete key", !Registry.KeyExists(key), "")
+    ok("registry read system value", Registry.Read("HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "ProductName").length > 0, "")
+    info("windows product", Registry.Read("HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "ProductName"))
+    Clipboard.SetText("Coyote clipboard ü 日本 😀")
+    ok("clipboard roundtrip", Clipboard.HasText() && Clipboard.GetText() == "Coyote clipboard ü 日本 😀", Clipboard.GetText())
+    Clipboard.Clear()
+    ok("clipboard clear", !Clipboard.HasText(), "")
+    var procs = Processes.List()
+    boolean mine = false
+    in (var pi of procs) { if (pi.Id == Runtime.ProcessId()) { mine = true } }
+    ok("process list contains this program", procs.length > 5 && mine, "" + procs.length + " processes")
+    ok("process find", Processes.Find("explorer").length >= 0, "")
+    var wins = Windows.List()
+    info("top-level windows", "" + wins.length)
+    ok("window find missing", Windows.Find("definitely-no-such-window-xyz") == 0, "")
+}
+
+# ---------------------------------------------------------------- calling DLLs
+method secInterop() {
+    if (!isWindows()) {
+        skip("dll calls", "not Windows")
+        return
+    }
+    ok("dll exists", NativeLibrary.Exists("kernel32.dll") && !NativeLibrary.Exists("coyote-no-such-library-xyz.dll"), "")
+    NativeLibrary k = NativeLibrary.Load("kernel32.dll")
+    ok("dll has function", k.HasFunction("GetCurrentProcessId") && !k.HasFunction("NoSuchFunctionXyz"), "")
+    NativeCall pid = k.Function("GetCurrentProcessId")
+    ok("dll call GetCurrentProcessId", pid.InvokeInt() == Runtime.ProcessId(), "")
+    Environment.Set("COYOTE_DLL_TEST", "abc ü")
+    NativeCall env = k.Function("GetEnvironmentVariableW")
+    env.AddWide("COYOTE_DLL_TEST")
+    int buf = env.AddOutBuffer(512)
+    env.AddInt(256)
+    int len = env.InvokeInt()
+    ok("dll call with wide text and out buffer", len == 5 && env.BufferWide(buf) == "abc ü", "len " + len + " [" + env.BufferWide(buf) + "]")
+    NativeLibrary u = NativeLibrary.Load("user32.dll")
+    NativeCall metrics = u.Function("GetSystemMetrics")
+    metrics.AddInt(0)
+    ok("dll call user32 GetSystemMetrics", metrics.InvokeInt() > 100, "")
+    boolean threw = false
+    try { NativeLibrary.Load("coyote-no-such-library-xyz.dll") } catch (e) { threw = true }
+    ok("dll load missing throws", threw, "")
+}
+
+# ---------------------------------------------------------------- http (only local failures; no internet needed)
+method secHttp() {
+    HttpResponse r = Http.Get("http://127.0.0.1:1/")
+    ok("http connection refused is reported", r.Status == 0 && r.Error.length > 0, "status " + r.Status + " error [" + r.Error + "]")
+    HttpResponse bad = Http.Get("not a url")
+    ok("http bad url is reported", bad.Status == 0 && bad.Error.length > 0, "status " + bad.Status)
+    HttpResponse web = Http.Get("http://example.com/")
+    if (web.Status == 0) { skip("http internet", "no internet: " + web.Error) } else { ok("http internet GET", web.Status == 200 && web.Body.Contains("Example Domain"), "status " + web.Status) }
+    HttpResponse tls = Http.Get("https://example.com/")
+    if (tls.Status == 0) { skip("https internet", "no internet or no TLS: " + tls.Error) } else { ok("https internet GET", tls.Status == 200, "status " + tls.Status) }
+}
+
+# ---------------------------------------------------------------- loading other Coyote programs
+method secCoy() {
+    File.WriteAllText("selftest-plugin.coy", "method Add(int a, int b): int { return a + b }\nmethod Greet(string n): string { return \"hi \" + n }\n")
+    string compiler = CoyoteCompiler.Find()
+    if (compiler == "") {
+        skip("coyote interop", "coyote compiler not found next to the program")
+        File.Delete("selftest-plugin.coy")
+        return
+    }
+    CoyoteModule m = CoyoteProgram.FromSource("selftest-plugin.coy")
+    same("coyote module call int", "7", m.Call("Add", ["3", "4"]))
+    same("coyote module call string", "hi Bardia", m.Call("Greet", ["Bardia"]))
+    File.Delete("selftest-plugin.coy")
+}
+
+info("self test system", "Coyote " + Runtime.Version() + " on " + Runtime.Architecture())
+try { secProcess() } catch (e) { crash("process", e.Message) }
+try { secWindows() } catch (e) { crash("windows", e.Message) }
+try { secInterop() } catch (e) { crash("interop", e.Message) }
+try { secHttp() } catch (e) { crash("http", e.Message) }
+try { secCoy() } catch (e) { crash("coy", e.Message) }
+Shell.PrintLine("RESULT pass=" + passed + " fail=" + failed + " skip=" + skipped)
+if (failed > 0) { Environment.Exit(1) }

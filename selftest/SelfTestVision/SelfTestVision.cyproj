@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "SelfTestVision",
+  "version": "1.0.0",
+  "type": "app",
+  "entry": "src/main.coy",
+  "description": "Coyote self test, Vision UI: real windows and native controls. Needs the Vision UI component.",
+  "output": { "directory": "bin", "name": "SelfTestVision", "kind": "native", "mode": "auto", "keepUnused": false },
+  "run": { "args": [] },
+  "requires": ["VisionUI"]
+}

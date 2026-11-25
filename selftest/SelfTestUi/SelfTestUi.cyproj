@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "SelfTestUi",
+  "version": "1.0.0",
+  "type": "app",
+  "entry": "src/main.coy",
+  "description": "Coyote self test, interactive part: dialogs, notifications, file pickers (a person answers the questions).",
+  "output": { "directory": "bin", "name": "SelfTestUi", "kind": "native", "mode": "auto", "keepUnused": false },
+  "run": { "args": [] },
+  "requires": [],
+  "dependencies": {},
+  "workflows": {}
+}

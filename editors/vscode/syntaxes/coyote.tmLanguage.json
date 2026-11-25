@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comment" },
     { "include": "#hand" },
+    { "include": "#mouth" },
     { "include": "#method" },
     { "include": "#string" },
     { "include": "#char" },
@@ -30,6 +31,15 @@
         "2": { "name": "punctuation.separator.coyote" },
         "3": { "name": "entity.name.namespace.coyote" },
         "4": { "name": "entity.name.function.coyote" }
+      }
+    },
+    "mouth": {
+      "match": "\\b(mouth)(:)([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.mouth.coyote" },
+        "2": { "name": "punctuation.separator.coyote" },
+        "3": { "name": "entity.name.namespace.coyote" },
+        "4": { "name": "variable.other.constant.coyote" }
       }
     },
     "method": {
@@ -58,15 +68,15 @@
     },
     "number": {
       "name": "constant.numeric.integer.coyote",
-      "match": "\\b[0-9]+\\b"
+      "match": "\\b(0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+)[lL]?\\b"
     },
     "keyword-control": {
       "name": "keyword.control.coyote",
-      "match": "\\b(if|else|while|for|break|continue|return|try|catch|throw)\\b"
+      "match": "\\b(if|else|while|for|break|continue|return|try|catch|finally|throw|switch|case|default)\\b"
     },
     "keyword-declaration": {
       "name": "keyword.other.coyote",
-      "match": "\\b(var|new|in|of|is|class|model|interface|property|field|constructor|public|hidden|shared|locked|readonly|protected|override|here|namespace|use)\\b"
+      "match": "\\b(var|new|in|of|is|class|model|enum|interface|property|field|constructor|public|hidden|shared|locked|readonly|protected|override|here|namespace|use)\\b"
     },
     "reserved": {
       "name": "invalid.deprecated.reserved.coyote",
@@ -78,7 +88,7 @@
     },
     "type": {
       "name": "storage.type.coyote",
-      "match": "\\b(int|string|boolean|array|double|char|Guid|obj|dyn|map|fn)\\b"
+      "match": "\\b(int|long|byte|string|boolean|array|double|char|Guid|obj|dyn|map|fn)\\b"
     },
     "call": {
       "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",

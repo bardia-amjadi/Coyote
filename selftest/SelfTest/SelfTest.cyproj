@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "SelfTest",
+  "version": "1.0.0",
+  "type": "app",
+  "entry": "src/main.coy",
+  "description": "Coyote self test, core part (native subset): files, environment, time, math, text, collections, exceptions and GC under load.",
+  "output": { "directory": "bin", "name": "SelfTest", "kind": "native", "mode": "auto", "keepUnused": false },
+  "run": { "args": [] },
+  "requires": [],
+  "dependencies": {},
+  "workflows": {}
+}

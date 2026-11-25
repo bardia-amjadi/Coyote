@@ -1,0 +1,418 @@
+# Coyote verification runner. Runs everything that can be checked without a person and writes one report file.
+#   coyote run selftest/Runner/src/main.coy -- [--bin <folder with coyote.exe>] [--src <source folder>] [--quick] [--ui]
+# (selftest\run-selftest.bat does this for you.)
+#   --bin    the installed Coyote (default: where "coyote" is found on the PATH)
+#   --src    the unpacked source folder with tests\ and selftest\ (default: the current folder)
+#   --quick  skip the GC-stress pass
+#   --ui     also start the interactive part (dialogs: you answer questions)
+use "Standard.IO"
+use "Standard.System"
+use "Standard.Text"
+use "Standard.Time"
+use "Standard.Runtime"
+use "Standard.Process"
+use "Standard.Collections"
+
+string binDir = ""
+string srcDir = ""
+string workDir = ""
+string sep = "/"
+string exe = ""
+array<string> report = new array<string>(0)
+int stepsFailed = 0
+int checks = 0
+int bad = 0
+
+method iff(boolean c, string a, string b): string {
+    if (c) { return a }
+    return b
+}
+method say(string line) {
+    Shell.PrintLine(line)
+    report.push(line)
+}
+method head(string title) {
+    say("")
+    say("=== " + title)
+}
+method good(string name) {
+    checks = checks + 1
+    say("  ok    " + name)
+}
+method fail(string name, string detail) {
+    checks = checks + 1
+    bad = bad + 1
+    say("  FAIL  " + name)
+    in (var l of firstLines(detail, 14)) { say("        " + l) }
+}
+method note(string name, string detail) {
+    say("  NOTE  " + name + iff(detail == "", "", ": " + detail))
+}
+method firstLines(string text, int count): array<string> {
+    array<string> all = text.Replace("\r", "").Split("\n")
+    array<string> r = new array<string>(0)
+    for (var i = 0; i < all.length && i < count; i++) { r.push(all[i]) }
+    return r
+}
+method norm(string s): string { return s.Replace("\r\n", "\n") }
+method path(string a, string b): string { return a + sep + b }
+method tool(string name): string { return binDir + sep + name + exe }
+
+# A finished program, or a failure to even start it (Code -999).
+class Res {
+    field int Code = 0
+    field string Out = ""
+    field string Err = ""
+    field boolean TimedOut = false
+}
+method exec(string program, array<string> args, string folder, string input, int timeoutMs): Res {
+    Res r = new Res()
+    try {
+        ProcessResult p = Process.RunFull(program, args, folder, input, timeoutMs)
+        r.Code = p.ExitCode
+        r.Out = p.Output
+        r.Err = p.Error
+        r.TimedOut = p.TimedOut
+    } catch (e) {
+        r.Code = -999
+        r.Err = "cannot start " + program + ": " + e.Message
+    }
+    return r
+}
+method text(string file): string {
+    if (!File.Exists(file)) { return "" }
+    return File.ReadAllText(file)
+}
+method diffText(string expected, string actual): string {
+    array<string> a = norm(expected).Split("\n")
+    array<string> b = norm(actual).Split("\n")
+    int n = a.length
+    if (b.length > n) { n = b.length }
+    for (var i = 0; i < n; i++) {
+        string x = "<missing>"
+        string y = "<missing>"
+        if (i < a.length) { x = a[i] }
+        if (i < b.length) { y = b[i] }
+        if (x != y) { return "line " + (i + 1) + ": expected [" + x + "] got [" + y + "]" }
+    }
+    return "no difference"
+}
+method names(string folder, string ext): array<string> {
+    array<string> r = new array<string>(0)
+    if (!Directory.Exists(folder)) { return r }
+    in (var n of Directory.List(folder)) {
+        if (n.EndsWith(ext)) { r.push(n.Substring(0, n.length - ext.length)) }
+    }
+    return r
+}
+# Lines of a self-test output that matter (INFO lines are machine details).
+method significant(string output): string {
+    string r = ""
+    in (var l of norm(output).Split("\n")) {
+        if (!l.StartsWith("INFO ") && l != "") { r = r + l + "\n" }
+    }
+    return r
+}
+method failLines(string output): string {
+    string r = ""
+    in (var l of norm(output).Split("\n")) {
+        if (l.StartsWith("FAIL ")) { r = r + l + "\n" }
+    }
+    return r
+}
+method summaryLine(string output): string {
+    string r = ""
+    in (var l of norm(output).Split("\n")) { if (l.StartsWith("RESULT ")) { r = l } }
+    return r
+}
+
+# ------------------------------------------------------------------ setup
+method setup() {
+    int i = 0
+    while (i < Environment.ArgCount()) {
+        string a = Environment.Arg(i)
+        if (a == "--bin" && i + 1 < Environment.ArgCount()) {
+            binDir = Environment.Arg(i + 1)
+            i = i + 1
+        } else if (a == "--src" && i + 1 < Environment.ArgCount()) {
+            srcDir = Environment.Arg(i + 1)
+            i = i + 1
+        }
+        i = i + 1
+    }
+    if (Environment.OS() == "windows") {
+        sep = "\\"
+        exe = ".exe"
+    }
+    if (srcDir == "") { srcDir = Environment.CurrentDirectory() }
+    if (binDir == "") {
+        string found = Process.Which("coyote")
+        if (found != "") { binDir = Path.DirectoryName(found) }
+    }
+    workDir = path(srcDir, "selftest-work")
+    Directory.Delete(workDir, true)
+    Directory.Create(workDir)
+}
+method hasArg(string flag): boolean {
+    for (var i = 0; i < Environment.ArgCount(); i++) { if (Environment.Arg(i) == flag) { return true } }
+    return false
+}
+
+method environmentInfo() {
+    head("environment")
+    say("  time          " + Time.FormatUtc(Time.UnixSeconds(), "%Y-%m-%d %H:%M:%S") + " UTC")
+    say("  os            " + Environment.OS())
+    say("  runtime       " + Runtime.Describe())
+    say("  machine/user  " + Runtime.MachineName() + " / " + Runtime.UserName())
+    say("  processors    " + Runtime.ProcessorCount())
+    say("  source folder " + srcDir)
+    say("  tools folder  " + binDir)
+    if (Environment.OS() == "windows") {
+        say("  windows       " + exec("cmd", ["/c", "ver"], "", "", 20000).Out.Trim())
+        say("  code page     " + exec("cmd", ["/c", "chcp"], "", "", 20000).Out.Trim())
+        say("  arch          " + Environment.Get("PROCESSOR_ARCHITECTURE"))
+    } else {
+        say("  uname         " + exec("uname", ["-a"], "", "", 20000).Out.Trim())
+    }
+    Res v = exec(tool("coyote"), ["--version"], "", "", 20000)
+    say("  coyote        " + v.Out.Trim() + v.Err.Trim() + " (exit " + v.Code + ")")
+    Res l = exec(tool("coyote-llvm"), ["--help"], "", "", 20000)
+    say("  coyote-llvm   " + firstLines(l.Out + l.Err, 1)[0])
+    string clang = binDir + sep + ".." + sep + "clang" + sep + "bin" + sep + "x86_64-w64-mingw32-clang" + exe
+    if (File.Exists(clang)) {
+        say("  clang         " + firstLines(exec(clang, ["--version"], "", "", 20000).Out, 1)[0] + " (installed with Coyote)")
+    } else {
+        Res c = exec("clang", ["--version"], "", "", 20000)
+        say("  clang         " + iff(c.Code == 0, firstLines(c.Out, 1)[0], "NOT FOUND (native builds will fail): " + c.Err))
+    }
+    if (!File.Exists(tool("coyote")) || !File.Exists(tool("pvm"))) { say("  WARNING       coyote or pvm not found in the tools folder; pass --bin <folder>") }
+}
+
+# ------------------------------------------------------------------ conformance on the PVM
+method suitePvm() {
+    head("conformance suite, PVM (tests/cases)")
+    string cases = path(path(srcDir, "tests"), "cases")
+    int ran = 0
+    in (var n of names(cases, ".coy")) {
+        string src = path(cases, n + ".coy")
+        string input = text(path(cases, n + ".in"))
+        Res r = exec(tool("coyote"), ["run", src], workDir, input, 180000)
+        int want = 0
+        string rcText = text(path(cases, n + ".rc")).Trim()
+        if (rcText != "") { want = int(rcText) }
+        string expected = text(path(cases, n + ".out"))
+        if (r.TimedOut) { fail(n, "timed out") }
+        else if (r.Code != want) { fail(n, "exit code " + r.Code + ", expected " + want + "\n" + r.Err) }
+        else if (norm(r.Out) != norm(expected)) { fail(n, diffText(expected, r.Out)) }
+        else { good(n) }
+        ran = ran + 1
+    }
+    say("  (" + ran + " programs)")
+}
+method suiteProjects() {
+    head("project cases and expected compile errors")
+    string projects = path(path(srcDir, "tests"), "projects")
+    in (var d of Directory.List(projects)) {
+        string name = d.Replace("/", "")
+        string dir = path(projects, name)
+        Res r = exec(tool("coyote"), ["run", path(dir, "main.coy")], workDir, "", 120000)
+        if (norm(r.Out) == norm(text(path(dir, "expected.out")))) { good("project " + name) } else { fail("project " + name, diffText(text(path(dir, "expected.out")), r.Out) + "\n" + r.Err) }
+    }
+    string errors = path(path(srcDir, "tests"), "errors")
+    in (var n of names(errors, ".coy")) {
+        Res r = exec(tool("coyote"), ["check", path(errors, n + ".coy")], workDir, "", 60000)
+        string diag = r.Out + r.Err
+        string missing = ""
+        in (var line of norm(text(path(errors, n + ".err"))).Split("\n")) {
+            if (line != "" && !diag.Contains(line)) { missing = missing + "missing diagnostic: " + line + "\n" }
+        }
+        if (r.Code == 0) { fail("error case " + n, "compiled without errors") }
+        else if (missing != "") { fail("error case " + n, missing) }
+        else { good("error case " + n) }
+    }
+}
+
+# ------------------------------------------------------------------ GC stress on the PVM
+method suiteGc() {
+    head("GC stress, PVM (collector forced before every allocation)")
+    string cases = path(path(srcDir, "tests"), "cases")
+    in (var n of names(cases, ".coy")) {
+        string ml = path(workDir, n + ".gc.ml")
+        Res b = exec(tool("coyote"), ["build", path(cases, n + ".coy"), "-o", ml], workDir, "", 120000)
+        if (b.Code != 0) { fail(n + " (gc-stress)", "compile failed: " + b.Err); continue }
+        Res r = exec(tool("pvm"), ["--gc-stress", "--allow-all", ml], workDir, text(path(cases, n + ".in")), 300000)
+        if (r.TimedOut) { fail(n + " (gc-stress)", "timed out") }
+        else if (norm(r.Out) != norm(text(path(cases, n + ".out")))) { fail(n + " (gc-stress)", diffText(text(path(cases, n + ".out")), r.Out)) }
+        else { good(n + " (gc-stress)") }
+    }
+}
+
+# ------------------------------------------------------------------ native vs PVM
+int nativeSame = 0
+int notNative = 0
+method compareNative(string label, string mlFile, string input, string folder) {
+    Res p = exec(tool("pvm"), ["--allow-all", mlFile], folder, input, 300000)
+    string bin = mlFile + ".native" + exe
+    Res b = exec(tool("coyote-llvm"), ["--native-only", mlFile, "-o", bin], folder, "", 300000)
+    if (b.Code != 0) {
+        notNative = notNative + 1
+        say("  --    " + label + ": not native: " + firstLines(b.Out + b.Err, 1)[0])
+        return
+    }
+    Res n = exec(bin, new array<string>(0), folder, input, 300000)
+    if (n.TimedOut) { fail(label + " (native)", "timed out") }
+    else if (n.Out == p.Out && n.Err == p.Err && n.Code == p.Code) { nativeSame = nativeSame + 1; good(label + " (native = PVM)") }
+    else if (norm(n.Out) == norm(p.Out) && norm(n.Err) == norm(p.Err) && n.Code == p.Code) { fail(label + " (native)", "same except line endings (CR LF): native " + n.Out.length + " characters, PVM " + p.Out.length) }
+    else {
+        string d = "exit PVM " + p.Code + " native " + n.Code + "\n"
+        if (norm(n.Out) != norm(p.Out)) { d = d + "stdout: " + diffText(p.Out, n.Out) + "\n" }
+        if (norm(n.Err) != norm(p.Err)) { d = d + "stderr: " + diffText(p.Err, n.Err) }
+        fail(label + " (native)", d)
+    }
+}
+method suiteNative() {
+    head("native executables vs PVM (tests/cases)")
+    string cases = path(path(srcDir, "tests"), "cases")
+    in (var n of names(cases, ".coy")) {
+        string ml = path(workDir, n + ".ml")
+        Res b = exec(tool("coyote"), ["build", path(cases, n + ".coy"), "-o", ml], workDir, "", 120000)
+        if (b.Code != 0) { fail(n + " (native)", "compile failed: " + b.Err); continue }
+        compareNative(n, ml, text(path(cases, n + ".in")), workDir)
+    }
+    say("  (" + nativeSame + " identical, " + notNative + " outside the native subset)")
+}
+
+# ------------------------------------------------------------------ the self-test apps
+method runApp(string project, string label, boolean comparable) {
+    string srcFile = path(path(path(path(srcDir, "selftest"), project), "src"), "main.coy")
+    string ml = path(workDir, project + ".ml")
+    Res b = exec(tool("coyote"), ["build", srcFile, "-o", ml], workDir, "", 120000)
+    if (b.Code != 0) { fail(label + " compile", b.Err + b.Out); return }
+    Res p = exec(tool("pvm"), ["--allow-all", ml], workDir, "", 600000)
+    File.WriteAllText(path(workDir, project + ".pvm.txt"), p.Out + "\n--- stderr\n" + p.Err)
+    say("  PVM     " + summaryLine(p.Out) + " (exit " + p.Code + ")")
+    string fl = failLines(p.Out)
+    if (fl != "") { say("  failures on the PVM:"); in (var l of norm(fl).Split("\n")) { if (l != "") { say("    " + l) } } }
+    if (p.Code != 0 || fl != "") { bad = bad + 1 }
+    string bin = path(workDir, project + exe)
+    Res n = exec(tool("coyote-llvm"), [ml, "-o", bin], workDir, "", 600000)
+    if (n.Code != 0) { fail(label + " executable build", n.Out + n.Err); return }
+    say("  build   " + firstLines(n.Out + n.Err, 2)[0])
+    Res r = exec(bin, new array<string>(0), workDir, "", 600000)
+    File.WriteAllText(path(workDir, project + ".exe.txt"), r.Out + "\n--- stderr\n" + r.Err)
+    say("  EXE     " + summaryLine(r.Out) + " (exit " + r.Code + ")")
+    string fl2 = failLines(r.Out)
+    if (fl2 != "") { say("  failures in the executable:"); in (var l of norm(fl2).Split("\n")) { if (l != "") { say("    " + l) } } }
+    if (r.Code != 0 || fl2 != "") { bad = bad + 1 }
+    if (comparable) {
+        if (significant(p.Out) == significant(r.Out)) { good(label + ": executable prints exactly what the PVM prints") }
+        else { fail(label + ": executable differs from the PVM", diffText(significant(p.Out), significant(r.Out))) }
+    }
+    string uni = "UNICODE héllo 日本 😀"
+    if (project != "SelfTest") { return }
+    if (norm(r.Out).Contains(uni)) { good(label + ": Unicode console output is right") } else { fail(label + ": Unicode console output", "the line [" + uni + "] was not found in the output (console code page?)") }
+}
+method appInfo(string project) {
+    string txt = text(path(workDir, project + ".exe.txt"))
+    say("  machine details (INFO lines of the executable run):")
+    in (var l of norm(txt).Split("\n")) { if (l.StartsWith("INFO ") && !l.StartsWith("INFO path env")) { say("    " + l) } }
+}
+method selfTests() {
+    head("SelfTest (core): PVM and native executable")
+    runApp("SelfTest", "SelfTest core", true)
+    appInfo("SelfTest")
+    string bin = path(workDir, "SelfTest" + exe)
+    if (File.Exists(bin)) {
+        Res d1 = exec(bin, ["deep", "4900"], workDir, "", 60000)
+        if (d1.Out.Trim() == "DEEP 4900") { good("recursion 4900 levels deep") } else { fail("recursion 4900 levels deep", "exit " + d1.Code + " out [" + d1.Out + "] err [" + firstLines(d1.Err, 2)[0] + "] (native stack too small?)") }
+        Res d2 = exec(bin, ["deeptry", "4900"], workDir, "", 60000)
+        if (d2.Out.Trim() == "DEEPTRY deep error 4900") { good("4900 levels with try/finally in every frame, throw from the bottom") } else { fail("deep recursion with try/finally", "exit " + d2.Code + " out [" + d2.Out + "] err [" + firstLines(d2.Err, 2)[0] + "]") }
+        Res d3 = exec(bin, ["deep", "6000"], workDir, "", 60000)
+        if (d3.Code == 1 && (d3.Err + d3.Out).Contains("call stack overflow")) { good("endless recursion is a clean runtime error") } else { fail("endless recursion", "exit " + d3.Code + " [" + firstLines(d3.Err + d3.Out, 2)[0] + "]") }
+        Res a = exec(bin, ["args", "a b", "c\"d", "ü 日本", "", "x\\y"], workDir, "", 60000)
+        string wantArgs = "ARG[a b]\nARG[c\"d]\nARG[ü 日本]\nARG[]\nARG[x\\y]\n"
+        if (norm(a.Out) == wantArgs) { good("command-line arguments with spaces, quotes, Unicode and empty") } else { fail("command-line arguments", diffText(wantArgs, a.Out)) }
+        Res a2 = exec(tool("pvm"), ["--allow-all", path(workDir, "SelfTest.ml"), "--", "args", "a b", "c\"d", "ü 日本", "", "x\\y"], workDir, "", 60000)
+        if (norm(a2.Out) == wantArgs) { good("the same arguments on the PVM") } else { fail("command-line arguments on the PVM", diffText(wantArgs, a2.Out)) }
+    }
+}
+method systemTests() {
+    head("SelfTestSystem: processes, Windows features, DLLs, HTTP (PVM and bundled executable)")
+    runApp("SelfTestSystem", "SelfTest system", true)
+    appInfo("SelfTestSystem")
+}
+method visionTests() {
+    head("SelfTestVision: Vision UI (a real window with native controls on Windows)")
+    string srcFile = path(path(path(path(srcDir, "selftest"), "SelfTestVision"), "src"), "main.coy")
+    Res c = exec(tool("coyote"), ["check", srcFile], workDir, "", 120000)
+    if (c.Code != 0 && (c.Out + c.Err).Contains("VisionUI")) {
+        say("  skipped: the Vision UI component is not installed (visionui.lib not found)")
+        return
+    }
+    runApp("SelfTestVision", "SelfTest Vision", true)
+    appInfo("SelfTestVision")
+}
+method packagingTests() {
+    head("project flow (cpx)")
+    string proj = path(path(srcDir, "selftest"), "SelfTest")
+    Res c = exec(tool("cpx"), ["-C", proj, "check"], workDir, "", 60000)
+    if (c.Code == 0) { good("cpx check") } else { fail("cpx check", c.Out + c.Err) }
+    Res b = exec(tool("cpx"), ["-C", proj, "build"], workDir, "", 600000)
+    string built = path(path(proj, "bin"), "SelfTest" + exe)
+    if (b.Code == 0 && File.Exists(built)) {
+        good("cpx build produced bin/SelfTest" + exe)
+        Res r = exec(built, new array<string>(0), workDir, "", 600000)
+        if (summaryLine(r.Out).Contains("fail=0")) { good("the executable built by cpx passes: " + summaryLine(r.Out)) } else { fail("the executable built by cpx", summaryLine(r.Out) + failLines(r.Out)) }
+    } else { fail("cpx build", "exit " + b.Code + "\n" + b.Out + b.Err) }
+    Directory.Delete(path(proj, "bin"), true)
+    Directory.Delete(path(proj, ".coyote"), true)
+}
+
+method interactive() {
+    head("interactive part (SelfTestUi)")
+    if (Environment.OS() != "windows") { say("  skipped: not Windows"); return }
+    string srcFile = path(path(path(path(srcDir, "selftest"), "SelfTestUi"), "src"), "main.coy")
+    Res r = exec(tool("coyote"), ["run", srcFile], workDir, "", 1800000)
+    say("  " + summaryLine(r.Out))
+    in (var l of norm(r.Out).Split("\n")) { if (l != "") { say("    " + l) } }
+    if (r.Code != 0) { bad = bad + 1 }
+    string visionSrc = path(path(path(path(srcDir, "selftest"), "SelfTestVision"), "src"), "main.coy")
+    Res vc = exec(tool("coyote"), ["check", visionSrc], workDir, "", 120000)
+    if (vc.Code == 0) {
+        Res v = exec(tool("coyote"), ["run", visionSrc, "--", "ui"], workDir, "", 600000)
+        say("  Vision UI: " + summaryLine(v.Out))
+        in (var l of norm(v.Out).Split("\n")) { if (l != "" && (l.StartsWith("FAIL") || l.StartsWith("SKIP"))) { say("    " + l) } }
+        if (v.Code != 0) { bad = bad + 1 }
+    }
+}
+
+# ------------------------------------------------------------------ run
+setup()
+say("Coyote verification report")
+environmentInfo()
+if (binDir == "" || !File.Exists(tool("coyote"))) {
+    say("")
+    say("Cannot continue: coyote" + exe + " was not found. Start this with --bin <folder that contains coyote" + exe + ">.")
+    File.WriteLines(path(srcDir, "selftest-report.txt"), report)
+    Environment.Exit(2)
+}
+try { suitePvm() } catch (e) { fail("suite PVM crashed", e.Message) }
+try { suiteProjects() } catch (e) { fail("suite projects crashed", e.Message) }
+if (!hasArg("--quick")) {
+    try { suiteGc() } catch (e) { fail("gc stress crashed", e.Message) }
+}
+try { suiteNative() } catch (e) { fail("suite native crashed", e.Message) }
+try { selfTests() } catch (e) { fail("self test crashed", e.Message) }
+try { systemTests() } catch (e) { fail("system test crashed", e.Message) }
+try { visionTests() } catch (e) { fail("Vision test crashed", e.Message) }
+try { packagingTests() } catch (e) { fail("packaging crashed", e.Message) }
+if (hasArg("--ui")) {
+    try { interactive() } catch (e) { fail("interactive crashed", e.Message) }
+}
+head("summary")
+say("  " + checks + " checks, " + bad + " failed")
+say(iff(bad == 0, "  ALL GOOD", "  SOMETHING FAILED: send selftest-report.txt (and the folder selftest-work if you can) back"))
+string reportFile = path(srcDir, "selftest-report.txt")
+File.WriteLines(reportFile, report)
+Shell.PrintLine("report written to " + reportFile)
+if (bad > 0) { Environment.Exit(1) }

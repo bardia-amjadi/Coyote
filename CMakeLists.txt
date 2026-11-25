@@ -5,6 +5,16 @@ file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" COYOTE_VERSION_STRING LIMIT_C
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 project(Coyote VERSION ${COYOTE_VERSION_STRING} DESCRIPTION "Coyote programming language and toolchain" LANGUAGES CXX)
 
+# Windows: every executable embeds src/win/coyote.manifest (Common Controls 6 for the modern look of dialogs, per-monitor DPI awareness).
+set(COYOTE_WIN_RC "")
+if(WIN32)
+  enable_language(RC)
+  set(COYOTE_MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/win/coyote.manifest")
+  configure_file(src/win/coyote.rc.in "${CMAKE_CURRENT_BINARY_DIR}/coyote.rc" @ONLY)
+  set(COYOTE_WIN_RC "${CMAKE_CURRENT_BINARY_DIR}/coyote.rc")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/win/coyote.manifest")
+endif()
+
 # Windows: link the C/C++ runtime statically so the tools run without the Visual C++ redistributable.
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -51,7 +61,7 @@ add_library(coyote_compiler STATIC
 target_include_directories(coyote_compiler PUBLIC src/compiler)
 coyote_target_defaults(coyote_compiler)
 
-add_executable(coyote src/compiler/main.cpp)
+add_executable(coyote src/compiler/main.cpp ${COYOTE_WIN_RC})
 coyote_target_defaults(coyote)
 
 # Pixel Virtual Machine: loads, verifies and runs ML. No dependency on the compiler (or LLVM).
@@ -64,19 +74,21 @@ add_library(pvm_core STATIC
   src/pvm/host.cpp
   src/pvm/host_sys.cpp
   src/pvm/host_win.cpp
+  src/pvm/host_ui.cpp
+  src/pvm/host_proc.cpp
   src/pvm/debugger.cpp)
 target_include_directories(pvm_core PUBLIC src/pvm)
 if(WIN32)
-  target_link_libraries(pvm_core PUBLIC winhttp user32 comdlg32 shell32 advapi32 ole32)
+  target_link_libraries(pvm_core PUBLIC winhttp user32 gdi32 comdlg32 shell32 advapi32 ole32 comctl32)
 endif()
 coyote_target_defaults(pvm_core)
 
-add_executable(pvm src/pvm/main.cpp)
+add_executable(pvm src/pvm/main.cpp ${COYOTE_WIN_RC})
 target_link_libraries(pvm PRIVATE pvm_core)
 coyote_target_defaults(pvm)
 
 # Native backend: emits LLVM IR text and drives clang; shares only the ML loader/verifier with the PVM.
-add_executable(coyote-llvm src/llvm/main.cpp)
+add_executable(coyote-llvm src/llvm/main.cpp ${COYOTE_WIN_RC})
 target_link_libraries(coyote-llvm PRIVATE pvm_core)
 coyote_target_defaults(coyote-llvm)
 
@@ -94,22 +106,22 @@ coyote_target_defaults(coyote_pkg)
 target_link_libraries(coyote_compiler PUBLIC coyote_pkg)
 target_link_libraries(coyote PRIVATE coyote_compiler coyote_pkg)
 
-add_executable(cpx src/cpx/main.cpp)
+add_executable(cpx src/cpx/main.cpp ${COYOTE_WIN_RC})
 target_link_libraries(cpx PRIVATE coyote_pkg)
 coyote_target_defaults(cpx)
 
-add_executable(cpm src/cpm/main.cpp)
+add_executable(cpm src/cpm/main.cpp ${COYOTE_WIN_RC})
 target_link_libraries(cpm PRIVATE coyote_pkg)
 coyote_target_defaults(cpm)
 
-add_executable(cdt src/cdt/main.cpp src/cdt/format.cpp)
+add_executable(cdt src/cdt/main.cpp src/cdt/format.cpp ${COYOTE_WIN_RC})
 target_include_directories(cdt PRIVATE src/cdt)
 target_link_libraries(cdt PRIVATE coyote_compiler coyote_pkg)
 coyote_target_defaults(cdt)
 
 # The standard library: every project under stdlib/ is packed with the compiler we just built into <tools>/libs
 # (standard.io.lib, standard.text.lib, ..., and the umbrella standard.lib that requires them all).
-set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard.Collections Standard.Testing Standard.Windows Standard)
+set(COYOTE_STDLIB_PROJECTS Standard.IO Standard.Text Standard.Math Standard.Time Standard.System Standard.Http Standard.Collections Standard.Testing Standard.Windows Standard.Encoding Standard.Process Standard.Runtime Standard.Resources Standard.Configuration Standard.Coyote.InteropServices Standard.Windows.InteropServices Standard Community.Text Community.Timer Community)
 file(GLOB_RECURSE COYOTE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/*.coy ${CMAKE_SOURCE_DIR}/stdlib/*/packages.json)
 if(CMAKE_CROSSCOMPILING)
   message(STATUS "cross-compiling: the standard libraries are not packed (the compiler cannot run on this machine); copy them into <tools>/libs")
@@ -121,8 +133,12 @@ else()
     list(APPEND COYOTE_STDLIB_COMMANDS COMMAND coyote lib pack ${CMAKE_SOURCE_DIR}/stdlib/${p} -o $<TARGET_FILE_DIR:coyote>/libs/${lower}.lib)
     list(APPEND COYOTE_STDLIB_FILES $<TARGET_FILE_DIR:coyote>/libs/${lower}.lib)
   endforeach()
+  # Vision UI (Gen One): an optional component, packed next to the standard libraries (the installer offers it separately).
+  list(APPEND COYOTE_STDLIB_COMMANDS COMMAND coyote lib pack ${CMAKE_SOURCE_DIR}/vision/VisionUI -o $<TARGET_FILE_DIR:coyote>/libs/visionui.lib)
+  list(APPEND COYOTE_STDLIB_FILES $<TARGET_FILE_DIR:coyote>/libs/visionui.lib)
+  file(GLOB_RECURSE COYOTE_VISION_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/vision/*.coy ${CMAKE_SOURCE_DIR}/vision/*/packages.json)
   add_custom_target(stdlib ALL ${COYOTE_STDLIB_COMMANDS}
-    DEPENDS coyote ${COYOTE_STDLIB_SOURCES}
+    DEPENDS coyote ${COYOTE_STDLIB_SOURCES} ${COYOTE_VISION_SOURCES}
     COMMENT "Packing the Standard libraries"
     VERBATIM)
 endif()

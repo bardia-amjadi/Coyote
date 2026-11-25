@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "SelfTestSystem",
+  "version": "1.0.0",
+  "type": "app",
+  "entry": "src/main.coy",
+  "description": "Coyote self test, system part: processes, Windows features, DLL calls, HTTP, loading Coyote programs.",
+  "output": { "directory": "bin", "name": "SelfTestSystem", "kind": "native", "mode": "auto", "keepUnused": false },
+  "run": { "args": [] },
+  "requires": [],
+  "dependencies": {},
+  "workflows": {}
+}

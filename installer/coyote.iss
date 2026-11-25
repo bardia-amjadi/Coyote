@@ -66,6 +66,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 Name: "core"; Description: "Coyote toolchain (coyote, pvm, cpm, cpx, cdt, coyote-llvm), documentation and samples"; Types: full cli custom; Flags: fixed
 Name: "native"; Description: "Native builds: clang compiler (llvm-mingw), used by coyote-llvm and Studio's Build"; Types: full cli custom
 Name: "studio"; Description: "Coyote Studio (editor, run and debug environment)"; Types: full custom
+Name: "vision"; Description: "Vision UI: Windows GUI framework (library VisionUI, `cpm init --vision` projects)"; Types: full custom
 Name: "vscode"; Description: "VS Code extension package (.vsix, installed by you from VS Code)"; Types: custom
 
 [Tasks]
@@ -89,6 +90,7 @@ Source: "{#StageDir}\samples\*"; DestDir: "{app}\samples"; Components: core; Fla
 Source: "{#StageDir}\assets\brand\*"; DestDir: "{app}\assets\brand"; Components: core; Flags: ignoreversion
 Source: "{#StageDir}\coyote.ico"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 Source: "{#StageDir}\VERSION"; DestDir: "{app}"; Components: core; Flags: ignoreversion
+Source: "{#StageDir}\vision\libs\*"; DestDir: "{app}\libs"; Components: vision; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\clang\*"; DestDir: "{app}\clang"; Components: native; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#StageDir}\studio\*"; DestDir: "{app}\studio"; Components: studio; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\extras\*"; DestDir: "{app}\extras"; Components: vscode; Flags: ignoreversion

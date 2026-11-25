@@ -1,0 +1,97 @@
+# Coyote self test, Vision UI: a real window with native controls (Windows) or the headless backend (elsewhere).
+# Automatic part: no person needed (a window flashes on screen for a moment). `-- ui` adds a short look-and-answer step.
+# Lines: PASS name | FAIL name | detail | SKIP name | why | INFO text
+use "Standard"
+use "VisionUI"
+
+int passed = 0
+int failed = 0
+method ok(string name, boolean cond, string detail) {
+    if (cond) {
+        passed = passed + 1
+        Shell.PrintLine("PASS " + name)
+    } else {
+        failed = failed + 1
+        Shell.PrintLine("FAIL " + name + " | " + detail)
+    }
+}
+
+class Probe : Window {
+    constructor() {
+        here.Model.Set("Counter", 0)
+        here.Handle("Clicked", (EventArgs e) : EventResults => here.Clicked(e))
+    }
+    method Clicked(EventArgs e): EventResults {
+        here.Model.Set("Counter", here.Model.GetInt("Counter") + 1)
+        e.Attached[0].Visible = true
+        return EventResults.Handled
+    }
+}
+
+string xml = "<Window ns=\"Probe\" name=\"Probe\"><Meta><Basic title=\"Vision self test\" width=\"480\" height=\"320\" /><Import src=\"VisionUI.Packages.Designs.Material\" /></Meta>" +
+    "<Label id=\"hello\" text=\"Hello World\" />" +
+    "<Label id=\"count\" text=\"You clicked $Model.Counter times\" visible=\"false\" />" +
+    "<TextBox id=\"name\" text=\"$Model.Name\" />" +
+    "<CheckBox id=\"agree\" text=\"I agree\" />" +
+    "<Button id=\"go\" text=\"Click Me\" onClick=\"Clicked\" attach=\"count\" />" +
+    "</Window>"
+
+string backend = UiHost.Backend()
+Shell.PrintLine("INFO ui backend = " + backend)
+boolean windows = Environment.OS() == "windows"
+if (windows) { ok("Windows uses the native Win32 backend", backend == "win32", "backend is " + backend) }
+
+var builder = ApplicationBuilder.Create()
+builder.Configuration.SetupText("{ \"Targeting\": { \"Platform\": \"Windows\" }, \"Logging\": { \"Level\": \"Error\" } }")
+var app = builder.Build()
+var w = new Probe()
+w.Model.Set("Name", "Ada")
+app.MapText(xml, "selftest.xml", w)
+app.Prepare()
+ok("window was created", w.NativeId > 0, "handle " + w.NativeId)
+ok("client size is exactly what was asked (DPI scaling round trip)", UiHost.WindowClientSize(w.NativeId) == "480 320", "got " + UiHost.WindowClientSize(w.NativeId))
+ok("label text", UiHost.ControlGetText(w.Find("hello")!.Handle) == "Hello World", UiHost.ControlGetText(w.Find("hello")!.Handle))
+ok("bound text box shows the model value", UiHost.ControlGetText(w.Find("name")!.Handle) == "Ada", UiHost.ControlGetText(w.Find("name")!.Handle))
+ok("label is laid out at 16,16 and stretches to 448", UiHost.ControlBounds(w.Find("hello")!.Handle) == "16 16 448 22", UiHost.ControlBounds(w.Find("hello")!.Handle))
+ok("hidden label is hidden", !UiHost.ControlGetVisible(w.Find("count")!.Handle), "")
+
+string idle = UiHost.NextEvent(30)
+if (windows) { ok("an idle window waits for events instead of quitting", idle == "", "got [" + idle + "]") } else { ok("headless: no events means quit", idle == "quit", "got [" + idle + "]") }
+
+w.Find("go")!.Click()
+w.Find("go")!.Click()
+w.Find("agree")!.Click()
+w.Find("name")!.Type("Grace")
+app.Run()
+ok("two clicks counted", w.Model.GetInt("Counter") == 2, "Counter=" + w.Model.GetInt("Counter"))
+ok("counter label text follows the model", UiHost.ControlGetText(w.Find("count")!.Handle) == "You clicked 2 times", UiHost.ControlGetText(w.Find("count")!.Handle))
+ok("attached label became visible", UiHost.ControlGetVisible(w.Find("count")!.Handle), "")
+ok("text box edit reaches the model", w.Model.GetString("Name") == "Grace", w.Model.GetString("Name"))
+ok("native text box really holds the text", UiHost.ControlGetText(w.Find("name")!.Handle) == "Grace", UiHost.ControlGetText(w.Find("name")!.Handle))
+ok("check box state", UiHost.ControlGetChecked(w.Find("agree")!.Handle), "")
+ok("layout moved the controls below the shown label", UiHost.ControlBounds(w.Find("name")!.Handle).StartsWith("16 "), UiHost.ControlBounds(w.Find("name")!.Handle))
+
+w.Find("go")!.Enabled = false
+ok("disabled button", !UiHost.ControlGetEnabled(w.Find("go")!.Handle), "")
+
+if (Environment.ArgCount() > 0 && Environment.Arg(0) == "ui") {
+    if (!windows) {
+        Shell.PrintLine("SKIP look-and-answer step | not Windows")
+    } else {
+        w.Find("go")!.Enabled = true
+        Shell.PrintLine("INFO the window stays open for 4 seconds, you may click the button")
+        int ticks = 0
+        while (ticks < 40) {
+            string ev = UiHost.NextEvent(100)
+            if (ev == "quit") { break }
+            if (ev != "") { app.Dispatch(ev) }
+            ticks = ticks + 1
+        }
+        boolean yes = MessageBox.Ask("Did you see a window with a gray-white Material look: 'Hello World', a text box, a check box and a purple flat 'Click Me' button (and the counter appearing when you clicked)?", "Vision self test")
+        ok("Vision window looked right", yes, "the person answered No")
+    }
+}
+w.Close()
+Shell.PrintLine("window closed: " + w.Closed)
+Shell.PrintLine("RESULT pass=" + passed + " fail=" + failed + " skip=0")
+if (failed > 0) { Environment.Exit(1) }
