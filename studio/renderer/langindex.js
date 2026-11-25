@@ -6,9 +6,9 @@
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.CoyoteLang = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
-  const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'try', 'catch', 'throw', 'var', 'new', 'method', 'hand', 'class', 'model',
+  const KEYWORDS = ['if', 'else', 'while', 'for', 'in', 'is', 'break', 'continue', 'return', 'try', 'catch', 'throw', 'switch', 'case', 'default', 'var', 'new', 'method', 'hand', 'mouth', 'class', 'model', 'enum',
     'property', 'constructor', 'field', 'locked', 'readonly', 'public', 'hidden', 'protected', 'shared', 'override', 'interface', 'base', 'as', 'here', 'of', 'namespace', 'use', 'get', 'set'];
-  const TYPES = ['int', 'double', 'boolean', 'string', 'char', 'Guid', 'obj', 'dyn', 'array', 'map', 'void'];
+  const TYPES = ['int', 'long', 'byte', 'double', 'boolean', 'string', 'char', 'Guid', 'obj', 'dyn', 'array', 'map', 'void'];
   const LITERALS = ['true', 'false', 'null'];
   const MODIFIERS = new Set(['public', 'hidden', 'protected', 'shared', 'override', 'locked', 'readonly']);
 
@@ -24,6 +24,10 @@
     readonly: 'A field that can be assigned only by its initializer or in the constructor of its class.',
     class: 'Declares a class with fields, properties, a constructor and methods.',
     model: 'Declares a class whose constructor takes every field in order.',
+    enum: 'Declares named constants: `enum Color { Red, Green = 5, Blue }`. Members are objects with Name, Value, ToString(), CompareTo(other); Color.Parse(text), Color.TryParse(text), Color.FromValue(n), Color.Values().',
+    switch: 'Chooses by value. Statement: `switch (x) { case 1, 2: ... default: ... }` (no fall-through). Expression: `var s = switch (c) { Color.Red => "r", _ => "other" }` (exhaustive for enums).',
+    long: 'A 64-bit integer (`long n = 5000000000` or `5L`). int widens to long implicitly; long to int needs `int(x)` (checked at run time).',
+    byte: 'An unsigned 8-bit integer 0..255; `array<byte>` stores one byte per item. Arithmetic on bytes is done in int; convert back with `byte(x)` (checked).',
     var: 'Declares a variable whose type is taken from its initializer.',
     new: 'Creates an object (`new Counter(1)`), an array (`new array<int>(3)`) or a map (`new map<string,int>()`).',
     shared: 'Member that belongs to the class itself, not to an instance. `shared class` makes every member shared.',

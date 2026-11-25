@@ -1,0 +1,135 @@
+# VisionUI: controls. One class covers every element of a window file; Kind says what it is:
+#   label, button, textbox, checkbox  (native Windows controls)   stack  (a layout container without a window of its own)
+use "Standard"
+
+public class Control {
+    public field string Id = ""
+    public field string Kind = ""
+    public field int Line = 0
+    public field int Handle = 0                  # the native control (0 for a stack)
+    public field boolean Vertical = true         # stack: children from top to bottom (false: left to right)
+    public field Window? Owner = null
+    public field string TextTemplate = ""        # may contain $Model.Name
+    public field string VisibleTemplate = "true"
+    public field string EnabledTemplate = "true"
+    public field string CheckedTemplate = "false"
+    public field string ClickHandler = ""
+    public field string ChangeHandler = ""
+    public field int WidthSpec = 0               # 0 automatic, > 0 pixels, -1 stretch
+    public field int HeightSpec = 0
+    public field int Spacing = -1                # stack: -1 = the design's spacing
+    public field array<string> AttachIds = new array<string>(0)
+    public field array<Control> Children = new array<Control>(0)
+    # layout results and what is currently shown (used to skip needless host calls)
+    public field int MW = 0
+    public field int MH = 0
+    public field int BX = -1
+    public field int BY = -1
+    public field int BW = -1
+    public field int BH = -1
+    public field string ShownText = ""
+    public field boolean ShownEnabled = true
+    public field boolean ShownChecked = false
+    public field boolean WantVisible = true
+    public field boolean NativeVisible = true
+
+    hidden method Truth(string template): boolean {
+        string s = template
+        if (Owner != null) { s = Binding.Expand(template, Owner!.Model) }
+        return s.Lower() == "true"
+    }
+    public method TextNow(): string {
+        if (Owner == null) { return TextTemplate }
+        return Binding.Expand(TextTemplate, Owner!.Model)
+    }
+    hidden method Touch() {
+        if (Owner != null) { Owner!.Refresh() }
+    }
+
+    # The text of the control (labels, buttons, check boxes, text boxes). Setting it replaces a $Model binding.
+    public property string Text {
+        get { return TextNow() }
+        set { TextTemplate = value; Touch() }
+    }
+    public property boolean Visible {
+        get { return Truth(VisibleTemplate) }
+        set {
+            if (value) { VisibleTemplate = "true" } else { VisibleTemplate = "false" }
+            Touch()
+        }
+    }
+    public property boolean Enabled {
+        get { return Truth(EnabledTemplate) }
+        set {
+            if (value) { EnabledTemplate = "true" } else { EnabledTemplate = "false" }
+            Touch()
+        }
+    }
+    public property boolean Checked {
+        get { return Truth(CheckedTemplate) }
+        set {
+            if (value) { CheckedTemplate = "true" } else { CheckedTemplate = "false" }
+            Touch()
+        }
+    }
+
+    # Acts as if the user had clicked the control (tests, automation); the event is handled by Application.Run.
+    public method Click() {
+        if (Handle != 0) { UiHost.SimClick(Handle) }
+    }
+    # Acts as if the user had typed this text into a text box.
+    public method Type(string text) {
+        if (Handle != 0) { UiHost.SimSetText(Handle, text) }
+    }
+
+    # Brings the native control in line with the current values. Returns true when its visibility changed.
+    public method Sync(): boolean {
+        boolean changed = false
+        boolean vis = Truth(VisibleTemplate)
+        if (vis != WantVisible) {
+            WantVisible = vis
+            changed = true
+        }
+        if (Handle != 0) {
+            string t = TextNow()
+            if (t != ShownText) {
+                ShownText = t
+                UiHost.ControlSetText(Handle, t)
+            }
+            boolean en = Truth(EnabledTemplate)
+            if (en != ShownEnabled) {
+                ShownEnabled = en
+                UiHost.ControlSetEnabled(Handle, en)
+            }
+            if (Kind == "checkbox") {
+                boolean ch = Truth(CheckedTemplate)
+                if (ch != ShownChecked) {
+                    ShownChecked = ch
+                    UiHost.ControlSetChecked(Handle, ch)
+                }
+            }
+        }
+        return changed
+    }
+
+    # The user typed into a text box: remember it, write it back to a bound $Model value.
+    public method UserText(string text) {
+        ShownText = text
+        string name = Binding.SingleName(TextTemplate)
+        if (name == "") {
+            TextTemplate = text
+        } else if (Owner != null) {
+            Owner!.Model.Set(name, text)
+        }
+    }
+    # The user ticked or cleared a check box.
+    public method UserChecked(boolean value) {
+        ShownChecked = value
+        string name = Binding.SingleName(CheckedTemplate)
+        if (name == "") {
+            if (value) { CheckedTemplate = "true" } else { CheckedTemplate = "false" }
+        } else if (Owner != null) {
+            Owner!.Model.Set(name, value)
+        }
+    }
+}

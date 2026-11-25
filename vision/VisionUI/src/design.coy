@@ -1,0 +1,45 @@
+# VisionUI: designs (themes). A design sets colors (0xRRGGBB, -1 = system default), the font and the spacing of a window.
+# A window picks one with <Import src="VisionUI.Packages.Designs.Material" /> in its <Meta>.
+public class Design {
+    public field string Name = "Default"
+    public field int Background = -1
+    public field int Foreground = -1
+    public field int Accent = -1          # buttons are drawn flat in this color (white text) when set
+    public field string FontName = ""     # "" = the system UI font
+    public field int FontSize = 0
+    public field int Padding = 12
+    public field int Spacing = 8
+    public field int ButtonHeight = 30
+}
+
+public class Designs {
+    public shared method Find(string name): Design {
+        var d = new Design()
+        if (name == "VisionUI.Packages.Designs.Default") { return d }
+        if (name == "VisionUI.Packages.Designs.Material") {
+            d.Name = "Material"
+            d.Background = 0xFAFAFA
+            d.Foreground = 0x212121
+            d.Accent = 0x6200EE
+            d.FontName = "Segoe UI"
+            d.FontSize = 10
+            d.Padding = 16
+            d.Spacing = 12
+            d.ButtonHeight = 36
+            return d
+        }
+        if (name == "VisionUI.Packages.Designs.Dark") {
+            d.Name = "Dark"
+            d.Background = 0x1E1E1E
+            d.Foreground = 0xF0F0F0
+            d.Accent = 0x0E639C
+            d.FontName = "Segoe UI"
+            d.FontSize = 10
+            d.Padding = 16
+            d.Spacing = 12
+            d.ButtonHeight = 36
+            return d
+        }
+        throw "VisionUI: unknown design '" + name + "' (known: VisionUI.Packages.Designs.Default, .Material, .Dark)"
+    }
+}

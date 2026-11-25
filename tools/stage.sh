@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Collects everything the Windows installer packs into one directory.
 #   tools/stage.sh <toolchain-bin-dir> <studio-app-dir> <stage-dir> [vsix-file]
-# Layout: bin/ (tools), libs/ (standard.lib), studio/ (Coyote Studio), docs/, samples/, assets/brand/ (logo, unmodified), extras/, coyote.ico
+# Layout: bin/ (tools), libs/ (standard.lib), vision/libs/ (visionui.lib), studio/ (Coyote Studio), docs/, samples/, assets/brand/ (logo, unmodified), extras/, coyote.ico
 set -euo pipefail
 bin="$1"; studio="$2"; stage="$3"; vsix="${4:-}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,6 +14,9 @@ for t in coyote pvm cpm cpx cdt coyote-llvm; do
 done
 [ -f "$bin/libs/standard.lib" ] || { echo "stage: $bin/libs/standard.lib is missing (build the stdlib target)" >&2; exit 1; }
 cp "$bin"/libs/*.lib "$stage/libs/"
+# Vision UI is an optional installer component: it lives in vision/libs/ and is copied into {app}\libs when chosen.
+mkdir -p "$stage/vision/libs"
+[ -f "$stage/libs/visionui.lib" ] && mv "$stage/libs/visionui.lib" "$stage/vision/libs/"
 cp -r "$studio"/. "$stage/studio/"
 [ -f "$stage/studio/CoyoteStudio.exe" ] || { echo "stage: CoyoteStudio.exe not found in $studio" >&2; exit 1; }
 if [ -n "${COYOTE_CLANG_DIR:-}" ] && [ -d "$COYOTE_CLANG_DIR" ]; then

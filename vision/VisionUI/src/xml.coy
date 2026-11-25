@@ -1,0 +1,188 @@
+# VisionUI: a small XML reader for window files. Elements, attributes (single or double quotes), text, comments, <?...?>,
+# the entities &lt; &gt; &amp; &quot; &apos;. No namespaces, DTDs or CDATA.
+use "Standard"
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text charAt(string s, int index): char
+hand:text indexOf(string s, string part): int
+hand:text trim(string s): string
+hand:text replace(string s, string find, string with): string
+
+public class XmlNode {
+    public field string Name = ""
+    public field string Text = ""
+    public field int Line = 0
+    public field array<string> AttrNames = new array<string>(0)
+    public field array<string> AttrValues = new array<string>(0)
+    public field array<XmlNode> Children = new array<XmlNode>(0)
+
+    public method Has(string name): boolean {
+        int i = 0
+        while (i < AttrNames.length) {
+            if (AttrNames[i] == name) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    public method Attr(string name, string fallback): string {
+        int i = 0
+        while (i < AttrNames.length) {
+            if (AttrNames[i] == name) { return AttrValues[i] }
+            i = i + 1
+        }
+        return fallback
+    }
+    public method Child(string name): XmlNode? {
+        in (var c of Children) {
+            if (c.Name == name) { return c }
+        }
+        return null
+    }
+}
+
+class XmlReader {
+    field string text = ""
+    field int pos = 0
+    field int n = 0
+    field string source = "XML"
+
+    constructor(string t, string src) {
+        text = t
+        n = length(t)
+        source = src
+    }
+
+    method LineAt(int p): int {
+        int line = 1
+        int i = 0
+        while (i < p && i < n) {
+            if (charAt(text, i) == '\n') { line = line + 1 }
+            i = i + 1
+        }
+        return line
+    }
+
+    method Fail(string msg) { throw source + ": line " + LineAt(pos) + ": " + msg }
+
+    method SkipSpace() {
+        while (pos < n && (charAt(text, pos) == ' ' || charAt(text, pos) == '\t' || charAt(text, pos) == '\r' || charAt(text, pos) == '\n')) { pos = pos + 1 }
+    }
+
+    method Decode(string s): string {
+        if (indexOf(s, "&") < 0) { return s }
+        string r = replace(s, "&lt;", "<")
+        r = replace(r, "&gt;", ">")
+        r = replace(r, "&quot;", "\"")
+        r = replace(r, "&apos;", "'")
+        return replace(r, "&amp;", "&")
+    }
+
+    method StartsWithAt(string part): boolean {
+        return substring(text, pos, length(part)) == part
+    }
+
+    method SkipPast(string marker, string what) {
+        int at = indexOf(substring(text, pos, n - pos), marker)
+        if (at < 0) { Fail(what + " is not closed (missing " + marker + ")") }
+        pos = pos + at + length(marker)
+    }
+
+    method ReadName(): string {
+        int start = pos
+        while (pos < n) {
+            char c = charAt(text, pos)
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '/' || c == '>' || c == '=' || c == '<') { break }
+            pos = pos + 1
+        }
+        if (pos == start) { Fail("a name is expected") }
+        return substring(text, start, pos - start)
+    }
+
+    method Element(): XmlNode {
+        # pos is at '<'
+        var node = new XmlNode()
+        node.Line = LineAt(pos)
+        pos = pos + 1
+        node.Name = ReadName()
+        while (true) {
+            SkipSpace()
+            if (pos >= n) { Fail("the tag <" + node.Name + "> is not closed") }
+            char c = charAt(text, pos)
+            if (c == '/') {
+                if (!StartsWithAt("/>")) { Fail("'/>' is expected") }
+                pos = pos + 2
+                return node
+            }
+            if (c == '>') { pos = pos + 1; break }
+            string an = ReadName()
+            SkipSpace()
+            if (pos >= n || charAt(text, pos) != '=') { Fail("the attribute '" + an + "' needs a value: " + an + "=\"...\"") }
+            pos = pos + 1
+            SkipSpace()
+            if (pos >= n) { Fail("an attribute value is expected") }
+            char q = charAt(text, pos)
+            if (q != '"' && q != '\'') { Fail("the value of '" + an + "' must be in quotes") }
+            pos = pos + 1
+            int start = pos
+            while (pos < n && charAt(text, pos) != q) { pos = pos + 1 }
+            if (pos >= n) { Fail("the value of '" + an + "' is not closed") }
+            node.AttrNames.push(an)
+            node.AttrValues.push(Decode(substring(text, start, pos - start)))
+            pos = pos + 1
+        }
+        # content
+        while (true) {
+            if (pos >= n) { Fail("missing closing tag </" + node.Name + "> (opened in line " + node.Line + ")") }
+            if (StartsWithAt("<!--")) { SkipPast("-->", "a comment"); continue }
+            if (StartsWithAt("<?")) { SkipPast("?>", "a processing instruction"); continue }
+            if (StartsWithAt("</")) {
+                pos = pos + 2
+                string close = ReadName()
+                SkipSpace()
+                if (pos >= n || charAt(text, pos) != '>') { Fail("'>' is expected after </" + close) }
+                pos = pos + 1
+                if (close != node.Name) { Fail("</" + close + "> does not match <" + node.Name + "> (opened in line " + node.Line + ")") }
+                return node
+            }
+            if (charAt(text, pos) == '<') {
+                node.Children.push(Element())
+                continue
+            }
+            int start = pos
+            while (pos < n && charAt(text, pos) != '<') { pos = pos + 1 }
+            string piece = trim(Decode(substring(text, start, pos - start)))
+            if (length(piece) > 0) {
+                if (length(node.Text) > 0) { node.Text = node.Text + " " }
+                node.Text = node.Text + piece
+            }
+        }
+        return node
+    }
+
+    method Document(): XmlNode {
+        while (true) {
+            SkipSpace()
+            if (pos >= n) { Fail("the document has no element") }
+            if (StartsWithAt("<!--")) { SkipPast("-->", "a comment"); continue }
+            if (StartsWithAt("<?")) { SkipPast("?>", "a processing instruction"); continue }
+            break
+        }
+        if (charAt(text, pos) != '<') { Fail("an element is expected") }
+        var root = Element()
+        while (true) {
+            SkipSpace()
+            if (pos >= n) { break }
+            if (StartsWithAt("<!--")) { SkipPast("-->", "a comment"); continue }
+            Fail("only one root element is allowed")
+        }
+        return root
+    }
+}
+
+public class Xml {
+    # Parses XML text; 'source' names the file in error messages.
+    public shared method Parse(string text, string source): XmlNode {
+        var r = new XmlReader(text, source)
+        return r.Document()
+    }
+}

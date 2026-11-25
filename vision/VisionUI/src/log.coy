@@ -1,0 +1,69 @@
+# VisionUI: logging, and the settings read from appsettings.json.
+use "Standard"
+
+# Levels: Trace 0, Debug 1, Information 2, Warning 3, Error 4, None 5.
+public class Logger {
+    public field int Level = 2
+
+    public shared method ParseLevel(string name): int {
+        string n = name.Lower()
+        if (n == "trace") { return 0 }
+        if (n == "debug") { return 1 }
+        if (n == "information" || n == "info") { return 2 }
+        if (n == "warning" || n == "warn") { return 3 }
+        if (n == "error") { return 4 }
+        if (n == "none") { return 5 }
+        throw "VisionUI: unknown Logging.Level '" + name + "' (Trace, Debug, Information, Warning, Error, None)"
+    }
+    public method Trace(string text) { if (Level <= 0) { Shell.PrintLine("[trace] " + text) } }
+    public method Debug(string text) { if (Level <= 1) { Shell.PrintLine("[debug] " + text) } }
+    public method Info(string text) { if (Level <= 2) { Shell.PrintLine("[info] " + text) } }
+    public method Warn(string text) { if (Level <= 3) { Shell.PrintLine("[warn] " + text) } }
+    public method Error(string text) { if (Level <= 4) { Shell.PrintLine("[error] " + text) } }
+}
+
+# The settings of an application, read from appsettings.json.
+#   builder.Configuration.Setup("appsettings.json")
+#   builder.Configuration.Get("Targeting.Platform", "Windows")
+public class Settings {
+    hidden field JsonValue root = new JsonValue()
+    public field string BaseDirectory = ""     # the folder "~" stands for in window paths
+    public field string FilePath = ""
+
+    # Loads a settings file (a missing file is an error). "~" in window paths then means the folder of this file.
+    public method Setup(string path): Settings {
+        if (!File.Exists(path)) { throw "VisionUI: the settings file '" + path + "' does not exist" }
+        FilePath = path
+        BaseDirectory = Path.DirectoryName(File.FullPath(path))
+        root = Json.Parse(File.ReadAllText(path), path)
+        return here
+    }
+    # Parses settings from text (tests, embedded settings).
+    public method SetupText(string text): Settings {
+        root = Json.Parse(text, "settings")
+        return here
+    }
+    # A value by path ("Targeting.Platform" or "Targeting:Platform"); the fallback when it is missing or not a scalar.
+    public method Get(string path, string fallback): string {
+        JsonValue? cur = root
+        in (var part of path.Replace(":", ".").Split(".")) {
+            if (cur == null) { return fallback }
+            cur = cur!.Find(part)
+        }
+        if (cur == null) { return fallback }
+        JsonValue v = cur!
+        if (v.Kind == 1 || v.Kind == 2 || v.Kind == 3) { return v.Text }
+        return fallback
+    }
+    public method GetInt(string path, int fallback): int {
+        string s = Get(path, "")
+        if (s == "") { return fallback }
+        return int(s)
+    }
+    public method GetBool(string path, boolean fallback): boolean {
+        string s = Get(path, "")
+        if (s == "true") { return true }
+        if (s == "false") { return false }
+        return fallback
+    }
+}

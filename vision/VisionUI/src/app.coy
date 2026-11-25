@@ -1,0 +1,124 @@
+# VisionUI: ApplicationBuilder and Application.
+#
+#   var builder = ApplicationBuilder.Create()
+#   builder.Configuration.Setup("appsettings.json")
+#   var app = builder.Build()
+#   app.Map("~/windows/MainWindow.xml", new MainWindow())
+#   app.Run()
+use "Standard"
+
+public class ApplicationBuilder {
+    public field Settings Configuration = new Settings()
+
+    public shared method Create(): ApplicationBuilder { return new ApplicationBuilder() }
+
+    public method Build(): Application {
+        var app = new Application()
+        app.Configuration = here.Configuration
+        app.Log.Level = Logger.ParseLevel(here.Configuration.Get("Logging.Level", "Information"))
+        string platform = here.Configuration.Get("Targeting.Platform", "Windows")
+        if (platform.Lower() != "windows") {
+            throw "VisionUI: Targeting.Platform '" + platform + "' is not supported yet (this version supports Windows only)"
+        }
+        return app
+    }
+}
+
+public class Application {
+    public field Settings Configuration = new Settings()
+    public field Logger Log = new Logger()
+    hidden field array<Window> windows = new array<Window>(0)
+    hidden field boolean prepared = false
+
+    # Registers a window: the XML file ("~" = the folder of appsettings.json) and the code behind it.
+    # The first mapped window is the main window.
+    public method Map(string path, Window w) {
+        string full = path
+        if (path.StartsWith("~/") || path.StartsWith("~\\")) {
+            string rest = path.Substring(2, path.Length() - 2)
+            if (here.Configuration.BaseDirectory == "") { full = rest } else { full = Path.Combine(here.Configuration.BaseDirectory, rest) }
+        }
+        if (!File.Exists(full)) { throw "VisionUI: the window file '" + full + "' does not exist" }
+        MapText(File.ReadAllText(full), full, w)
+    }
+
+    # Registers a window whose XML is given as text ('source' names it in error messages). Used by tests and embedded windows.
+    public method MapText(string xml, string source, Window w) {
+        w.Define(Xml.Parse(xml, source), source)
+        w.App = here
+        windows.push(w)
+        Log.Debug("mapped " + source)
+    }
+
+    # The mapped window with this name (name="..." in its XML), or null.
+    public method WindowNamed(string name): Window? {
+        in (var w of windows) {
+            if (w.XmlName == name) { return w }
+        }
+        return null
+    }
+
+    # Shows a mapped window (creating it on first use).
+    public method Open(string name) {
+        Window? w = WindowNamed(name)
+        if (w == null) { throw "VisionUI: no window named '" + name + "' is mapped" }
+        w!.Realize()
+    }
+
+    # Creates and shows the main window. Run does this itself; call it earlier to work with the window before Run (tests).
+    public method Prepare() {
+        if (prepared) { return }
+        if (windows.length == 0) { throw "VisionUI: no window is mapped (app.Map(\"~/windows/MainWindow.xml\", new MainWindow()))" }
+        Log.Debug("ui backend: " + UiHost.Backend())
+        windows[0].Realize()
+        prepared = true
+    }
+
+    # Handles one event string from UiHost.NextEvent (Run does this in a loop; use it to build your own loop).
+    public method Dispatch(string ev) {
+        array<string> p = ev.Split("\t")
+        string kind = p[0]
+        if (kind == "click" || kind == "change") {
+            int h = int(p[1])
+            in (var w of windows) {
+                if (w.Built && !w.Closed) {
+                    Control? c = w.FindByHandle(h)
+                    if (c != null) {
+                        w.Raise(kind, c!)
+                        return
+                    }
+                }
+            }
+        } else if (kind == "close") {
+            int h = int(p[1])
+            in (var w of windows) {
+                if (w.Built && !w.Closed && w.NativeId == h) {
+                    w.RaiseClose()
+                    if (w.Closed && w == windows[0]) {
+                        in (var o of windows) { o.Close() }
+                    }
+                    return
+                }
+            }
+        } else if (kind == "resize") {
+            int h = int(p[1])
+            in (var w of windows) {
+                if (w.Built && !w.Closed && w.NativeId == h) {
+                    w.OnResize(int(p[2]), int(p[3]))
+                    return
+                }
+            }
+        }
+    }
+
+    # Shows the main window and handles events until every window is closed (headless: until no event is pending).
+    public method Run(): int {
+        Prepare()
+        while (true) {
+            string ev = UiHost.NextEvent(-1)
+            if (ev == "quit") { break }
+            Dispatch(ev)
+        }
+        return 0
+    }
+}

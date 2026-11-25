@@ -1,0 +1,374 @@
+# VisionUI: Window - the base class of every window of an application.
+#
+#   class MainWindow : Window {
+#       constructor() {
+#           here.Model.Set("Counter", 0)
+#           here.Handle("ButtonClicked", (EventArgs e) : EventResults => here.ButtonClicked(e))
+#       }
+#       method ButtonClicked(EventArgs e): EventResults { ... }
+#   }
+use "Standard"
+hand:text length(string s): int
+
+public class Window {
+    public field ViewModel Model = new ViewModel()
+    public field string Title = ""
+    public field string XmlName = ""             # name="..." of the <Window> element
+    public field string XmlNamespace = ""        # ns="..."
+    public field int NativeId = 0                  # the native window (0 until it is shown)
+    public field Application? App = null
+    public field boolean Built = false
+    public field boolean Closed = false
+    public field int Width = 480
+    public field int Height = 360
+    hidden field XmlNode? definition = null
+    hidden field string source = ""
+    hidden field Design design = new Design()
+    hidden field Control? root = null
+    hidden field array<Control> all = new array<Control>(0)
+    hidden field array<string> handlerNames = new array<string>(0)
+    hidden field array<fn(EventArgs) : EventResults> handlerFns = new array<fn(EventArgs) : EventResults>(0)
+    hidden field string closingHandler = ""
+
+    # Registers the code for an event name used in the window file (onClick="Name").
+    public method Handle(string name, fn(EventArgs) : EventResults handler) {
+        int i = 0
+        while (i < handlerNames.length) {
+            if (handlerNames[i] == name) {
+                handlerFns[i] = handler
+                return
+            }
+            i = i + 1
+        }
+        handlerNames.push(name)
+        handlerFns.push(handler)
+    }
+
+    # Alternative to Handle: override this and switch on the handler name. Return Unhandled for names you do not know.
+    public method OnEvent(string handlerName, EventArgs e): EventResults { return EventResults.Unhandled }
+    # Called when the user closes the window; return Cancel to keep it open.
+    public method OnClosing(EventArgs e): EventResults { return EventResults.Handled }
+
+    # Reads the window file (already parsed). Nothing is shown yet.
+    public method Define(XmlNode root, string src) {
+        if (root.Name != "Window") { throw src + ": line " + root.Line + ": the root element must be <Window>, not <" + root.Name + ">" }
+        definition = root
+        source = src
+        XmlName = root.Attr("name", "")
+        XmlNamespace = root.Attr("ns", "")
+        closingHandler = root.Attr("onClosing", "")
+    }
+
+    hidden method Int(XmlNode x, string attr, int fallback): int {
+        string v = x.Attr(attr, "")
+        if (v == "") { return fallback }
+        try { return int(v) } catch (e) { throw source + ": line " + x.Line + ": '" + attr + "' must be a whole number, not '" + v + "'" }
+        return fallback
+    }
+
+    hidden method Make(XmlNode x): Control {
+        var c = new Control()
+        c.Owner = here
+        c.Line = x.Line
+        string n = x.Name
+        if (n == "Label") { c.Kind = "label" }
+        else if (n == "Button") { c.Kind = "button" }
+        else if (n == "TextBox") { c.Kind = "textbox" }
+        else if (n == "CheckBox") { c.Kind = "checkbox" }
+        else if (n == "StackPanel") { c.Kind = "stack" }
+        else { throw source + ": line " + x.Line + ": unknown element <" + n + "> (Label, Button, TextBox, CheckBox, StackPanel)" }
+        c.Id = x.Attr("id", "")
+        c.TextTemplate = x.Attr("text", x.Text)
+        c.VisibleTemplate = x.Attr("visible", "true")
+        c.EnabledTemplate = x.Attr("enabled", "true")
+        c.CheckedTemplate = x.Attr("checked", "false")
+        c.ClickHandler = x.Attr("onClick", "")
+        c.ChangeHandler = x.Attr("onChange", "")
+        string w = x.Attr("width", "")
+        if (w == "stretch") { c.WidthSpec = -1 } else { c.WidthSpec = Int(x, "width", 0) }
+        c.HeightSpec = Int(x, "height", 0)
+        c.Spacing = Int(x, "spacing", -1)
+        string att = x.Attr("attach", "")
+        if (length(att) > 0) {
+            in (var id of att.Split(",")) {
+                if (length(id.Trim()) > 0) { c.AttachIds.push(id.Trim()) }
+            }
+        }
+        if (c.Kind == "stack") {
+            c.Vertical = x.Attr("orientation", "vertical").Lower() != "horizontal"
+            in (var k of x.Children) { c.Children.push(Make(k)) }
+        } else {
+            c.Handle = UiHost.ControlCreate(NativeId, c.Kind, "")
+        }
+        all.push(c)
+        return c
+    }
+
+    # Creates the native window and its controls and shows it.
+    public method Realize() {
+        if (Built) { return }
+        if (definition == null) { throw "VisionUI: this window has no window file (use app.Map(path, window))" }
+        XmlNode x = definition!
+        design = Designs.Find("VisionUI.Packages.Designs.Default")
+        Title = XmlName
+        XmlNode? meta = x.Child("Meta")
+        if (meta != null) {
+            XmlNode? basic = meta!.Child("Basic")
+            if (basic != null) {
+                Title = basic!.Attr("title", Title)
+                Width = Int(basic!, "width", Width)
+                Height = Int(basic!, "height", Height)
+            }
+            in (var m of meta!.Children) {
+                if (m.Name == "Import") { design = Designs.Find(m.Attr("src", "")) }
+            }
+        }
+        NativeId = UiHost.WindowCreate(Title, Width, Height)
+        UiHost.WindowSetTheme(NativeId, design.Background, design.Foreground, design.Accent, design.FontName, design.FontSize)
+        var r = new Control()
+        r.Owner = here
+        r.Kind = "stack"
+        r.Vertical = true
+        in (var k of x.Children) {
+            if (k.Name != "Meta") { r.Children.push(Make(k)) }
+        }
+        root = r
+        in (var c of all) {
+            in (var id of c.AttachIds) {
+                if (Find(id) == null) { throw source + ": line " + c.Line + ": attach refers to the unknown id '" + id + "'" }
+            }
+        }
+        Model.Attach(here)
+        Built = true
+        Refresh()
+        UiHost.WindowShow(NativeId)
+    }
+
+    # The control with this id (id="..." in the window file), or null.
+    public method Find(string id): Control? {
+        in (var c of all) {
+            if (c.Id == id) { return c }
+        }
+        return null
+    }
+    public method FindByHandle(int h): Control? {
+        in (var c of all) {
+            if (c.Handle == h) { return c }
+        }
+        return null
+    }
+
+    # Brings every control in line with the model and lays the window out again.
+    public method Refresh() {
+        if (!Built || Closed) { return }
+        in (var c of all) { c.Sync() }
+        Layout()
+    }
+
+    hidden method DefaultHeight(string kind): int {
+        if (kind == "button") { return design.ButtonHeight }
+        if (kind == "textbox") { return 28 }
+        if (kind == "checkbox") { return 24 }
+        return 22
+    }
+
+    hidden method Measure(Control c, int availW, boolean parentVertical) {
+        if (!c.WantVisible) {
+            c.MW = 0
+            c.MH = 0
+            return
+        }
+        if (c.Kind == "stack") {
+            int sp = c.Spacing
+            if (sp < 0) { sp = design.Spacing }
+            int w = 0
+            int h = 0
+            int count = 0
+            in (var k of c.Children) {
+                if (k.WantVisible) {
+                    Measure(k, availW, c.Vertical)
+                    if (c.Vertical) {
+                        h = h + k.MH
+                        if (k.MW > w) { w = k.MW }
+                    } else {
+                        w = w + k.MW
+                        if (k.MH > h) { h = k.MH }
+                    }
+                    count = count + 1
+                }
+            }
+            if (count > 1) {
+                if (c.Vertical) { h = h + sp * (count - 1) } else { w = w + sp * (count - 1) }
+            }
+            if (c.Vertical && parentVertical) { w = availW }
+            if (c.WidthSpec > 0) { w = c.WidthSpec }
+            if (c.WidthSpec == -1) { w = availW }
+            if (c.HeightSpec > 0) { h = c.HeightSpec }
+            c.MW = w
+            c.MH = h
+            return
+        }
+        string t = c.TextNow()
+        int len = length(t)
+        int hh = c.HeightSpec
+        if (hh <= 0) { hh = DefaultHeight(c.Kind) }
+        int ww = c.WidthSpec
+        if (ww == -1) { ww = availW }
+        else if (ww <= 0) {
+            if (parentVertical) {
+                if (c.Kind == "button") {
+                    ww = 8 * len + 32
+                    if (ww < 140) { ww = 140 }
+                } else { ww = availW }
+            } else {
+                if (c.Kind == "label") { ww = 8 * len + 8 }
+                else if (c.Kind == "button") {
+                    ww = 8 * len + 32
+                    if (ww < 120) { ww = 120 }
+                }
+                else if (c.Kind == "checkbox") { ww = 8 * len + 32 }
+                else { ww = 200 }
+                if (ww < 24) { ww = 24 }
+            }
+        }
+        if (parentVertical && ww > availW) { ww = availW }
+        c.MW = ww
+        c.MH = hh
+    }
+
+    hidden method Arrange(Control c, int x, int y, boolean visible) {
+        boolean show = visible && c.WantVisible
+        if (c.Handle != 0) {
+            if (show != c.NativeVisible) {
+                c.NativeVisible = show
+                UiHost.ControlSetVisible(c.Handle, show)
+            }
+            if (show && (x != c.BX || y != c.BY || c.MW != c.BW || c.MH != c.BH)) {
+                c.BX = x
+                c.BY = y
+                c.BW = c.MW
+                c.BH = c.MH
+                UiHost.ControlSetBounds(c.Handle, x, y, c.MW, c.MH)
+            }
+        }
+        if (c.Kind == "stack") {
+            int sp = c.Spacing
+            if (sp < 0) { sp = design.Spacing }
+            int cx = x
+            int cy = y
+            in (var k of c.Children) {
+                Arrange(k, cx, cy, show)
+                if (show && k.WantVisible) {
+                    if (c.Vertical) { cy = cy + k.MH + sp } else { cx = cx + k.MW + sp }
+                }
+            }
+        }
+    }
+
+    hidden method Layout() {
+        if (root == null) { return }
+        array<string> parts = UiHost.WindowClientSize(NativeId).Split(" ")
+        int cw = int(parts[0])
+        int pad = design.Padding
+        Control r = root!
+        Measure(r, cw - 2 * pad, true)
+        Arrange(r, pad, pad, true)
+    }
+
+    # Called by the application when the window was resized.
+    public method OnResize(int w, int h) {
+        Width = w
+        Height = h
+        Layout()
+    }
+
+    # Runs the code registered for a handler name. Exceptions in handlers are logged, not fatal.
+    public method Invoke(string name, EventArgs e): EventResults {
+        try {
+            int i = 0
+            while (i < handlerNames.length) {
+                if (handlerNames[i] == name) {
+                    fn(EventArgs) : EventResults h = handlerFns[i]
+                    return h(e)
+                }
+                i = i + 1
+            }
+            var r = OnEvent(name, e)
+            if (r == EventResults.Unhandled && App != null) {
+                App!.Log.Warn("window " + XmlName + ": no handler named '" + name + "' (use Handle(\"" + name + "\", ...) or override OnEvent)")
+            }
+            return r
+        } catch (ex) {
+            if (App != null) { App!.Log.Error("window " + XmlName + ": handler '" + name + "' failed: " + ex.Message) }
+            return EventResults.Unhandled
+        }
+    }
+
+    # A control event from the host ("click" or "change").
+    public method Raise(string kind, Control c) {
+        var e = new EventArgs()
+        e.Source = c
+        e.Sender = here
+        e.Name = kind
+        string handlerName = ""
+        if (kind == "change") {
+            if (c.Kind == "textbox") {
+                e.Value = UiHost.ControlGetText(c.Handle)
+                c.UserText(e.Value)
+            } else if (c.Kind == "checkbox") {
+                boolean v = UiHost.ControlGetChecked(c.Handle)
+                if (v) { e.Value = "true" } else { e.Value = "false" }
+                c.UserChecked(v)
+            }
+            handlerName = c.ChangeHandler
+        } else {
+            handlerName = c.ClickHandler
+        }
+        if (length(handlerName) == 0) { return }
+        in (var id of c.AttachIds) {
+            Control? a = Find(id)
+            if (a != null) { e.Attached.push(a!) }
+        }
+        Invoke(handlerName, e)
+        Refresh()
+    }
+
+    # The user asked to close the window.
+    public method RaiseClose() {
+        var e = new EventArgs()
+        e.Sender = here
+        e.Name = "closing"
+        EventResults r = EventResults.Handled
+        if (length(closingHandler) > 0) { r = Invoke(closingHandler, e) } else { r = OnClosing(e) }
+        if (r != EventResults.Cancel) { Close() }
+    }
+
+    public method Close() {
+        if (Closed || NativeId == 0) { return }
+        Closed = true
+        UiHost.WindowClose(NativeId)
+    }
+
+    # A text picture of the window (for tests): one line per control with its text, visibility and bounds.
+    public method Dump(): string {
+        string s = "window \"" + Title + "\" " + Width + "x" + Height + " design=" + design.Name + "\n"
+        if (root != null) { s = s + DumpControl(root!, 1) }
+        return s
+    }
+    hidden method DumpControl(Control c, int depth): string {
+        string pad = "  ".Repeat(depth)
+        string s = ""
+        if (c.Kind == "stack") {
+            string o = "vertical"
+            if (!c.Vertical) { o = "horizontal" }
+            s = pad + "stack " + o + "\n"
+            in (var k of c.Children) { s = s + DumpControl(k, depth + 1) }
+            return s
+        }
+        string vis = "visible"
+        if (!c.NativeVisible) { vis = "hidden" }
+        s = pad + c.Kind + " \"" + c.TextNow() + "\" " + vis + " bounds=" + UiHost.ControlBounds(c.Handle).Replace(" ", ",")
+        if (c.Id != "") { s = s + " id=" + c.Id }
+        return s + "\n"
+    }
+}

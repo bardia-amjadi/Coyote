@@ -1,0 +1,161 @@
+# VisionUI: a small, forgiving JSON reader (used for appsettings.json).
+# Forgiving means: // and /* */ comments are skipped, a missing comma between members is accepted, trailing commas are accepted.
+use "Standard"
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text charAt(string s, int index): char
+
+# One JSON value. Kind: 0 null, 1 boolean, 2 number, 3 string, 4 array, 5 object.
+public class JsonValue {
+    public field int Kind = 0
+    public field string Text = ""            # the text of a string, the source text of a number, "true"/"false" for a boolean
+    public field array<JsonValue> Items = new array<JsonValue>(0)   # array items, or object member values
+    public field array<string> Keys = new array<string>(0)          # object member names (parallel to Items)
+
+    # The member of an object with this name, or null.
+    public method Find(string key): JsonValue? {
+        int i = 0
+        while (i < Keys.length) {
+            if (Keys[i] == key) { return Items[i] }
+            i = i + 1
+        }
+        return null
+    }
+}
+
+class JsonReader {
+    field string text = ""
+    field int pos = 0
+    field int n = 0
+    field string source = "JSON"
+
+    constructor(string t, string src) {
+        text = t
+        n = length(t)
+        source = src
+    }
+
+    method Fail(string msg) {
+        int line = 1
+        int i = 0
+        while (i < pos && i < n) {
+            if (charAt(text, i) == '\n') { line = line + 1 }
+            i = i + 1
+        }
+        throw source + ": line " + line + ": " + msg
+    }
+
+    method SkipSpace() {
+        boolean more = true
+        while (more) {
+            more = false
+            while (pos < n && (charAt(text, pos) == ' ' || charAt(text, pos) == '\t' || charAt(text, pos) == '\r' || charAt(text, pos) == '\n')) { pos = pos + 1 }
+            if (pos + 1 < n && charAt(text, pos) == '/' && charAt(text, pos + 1) == '/') {
+                while (pos < n && charAt(text, pos) != '\n') { pos = pos + 1 }
+                more = true
+            } else if (pos + 1 < n && charAt(text, pos) == '/' && charAt(text, pos + 1) == '*') {
+                pos = pos + 2
+                while (pos + 1 < n && !(charAt(text, pos) == '*' && charAt(text, pos + 1) == '/')) { pos = pos + 1 }
+                pos = pos + 2
+                more = true
+            }
+        }
+    }
+
+    method Hex(char c): int {
+        if (c >= '0' && c <= '9') { return int(c) - int('0') }
+        if (c >= 'a' && c <= 'f') { return int(c) - int('a') + 10 }
+        if (c >= 'A' && c <= 'F') { return int(c) - int('A') + 10 }
+        Fail("bad hex digit in \\u escape")
+        return 0
+    }
+
+    method ReadString(): string {
+        pos = pos + 1
+        string r = ""
+        while (true) {
+            if (pos >= n) { Fail("the string is not closed") }
+            char c = charAt(text, pos)
+            if (c == '"') { pos = pos + 1; return r }
+            if (c == '\\') {
+                pos = pos + 1
+                if (pos >= n) { Fail("the string is not closed") }
+                char e = charAt(text, pos)
+                if (e == 'n') { r = r + "\n" }
+                else if (e == 't') { r = r + "\t" }
+                else if (e == 'r') { r = r + "\r" }
+                else if (e == 'u') {
+                    if (pos + 4 >= n) { Fail("bad \\u escape") }
+                    int code = Hex(charAt(text, pos + 1)) * 4096 + Hex(charAt(text, pos + 2)) * 256 + Hex(charAt(text, pos + 3)) * 16 + Hex(charAt(text, pos + 4))
+                    r = r + string(char(code))
+                    pos = pos + 4
+                } else { r = r + string(e) }
+                pos = pos + 1
+            } else {
+                r = r + string(c)
+                pos = pos + 1
+            }
+        }
+        return r
+    }
+
+    method Value(): JsonValue {
+        SkipSpace()
+        if (pos >= n) { Fail("a value is missing") }
+        char c = charAt(text, pos)
+        var v = new JsonValue()
+        if (c == '{') {
+            v.Kind = 5
+            pos = pos + 1
+            while (true) {
+                SkipSpace()
+                if (pos >= n) { Fail("the object is not closed") }
+                if (charAt(text, pos) == '}') { pos = pos + 1; break }
+                if (charAt(text, pos) == ',') { pos = pos + 1; continue }
+                if (charAt(text, pos) != '"') { Fail("a member name in double quotes is expected") }
+                string key = ReadString()
+                SkipSpace()
+                if (pos >= n || charAt(text, pos) != ':') { Fail("':' is expected after the member name '" + key + "'") }
+                pos = pos + 1
+                v.Keys.push(key)
+                v.Items.push(Value())
+            }
+        } else if (c == '[') {
+            v.Kind = 4
+            pos = pos + 1
+            while (true) {
+                SkipSpace()
+                if (pos >= n) { Fail("the array is not closed") }
+                if (charAt(text, pos) == ']') { pos = pos + 1; break }
+                if (charAt(text, pos) == ',') { pos = pos + 1; continue }
+                v.Items.push(Value())
+            }
+        } else if (c == '"') {
+            v.Kind = 3
+            v.Text = ReadString()
+        } else {
+            int start = pos
+            while (pos < n) {
+                char d = charAt(text, pos)
+                if (d == ',' || d == '}' || d == ']' || d == ' ' || d == '\t' || d == '\r' || d == '\n' || d == ':') { break }
+                pos = pos + 1
+            }
+            string word = substring(text, start, pos - start)
+            if (word == "true" || word == "false") { v.Kind = 1; v.Text = word }
+            else if (word == "null") { v.Kind = 0 }
+            else if (length(word) > 0 && ((charAt(word, 0) >= '0' && charAt(word, 0) <= '9') || charAt(word, 0) == '-')) { v.Kind = 2; v.Text = word }
+            else { pos = start; Fail("unexpected '" + word + "'") }
+        }
+        return v
+    }
+}
+
+public class Json {
+    # Parses JSON text; 'source' names the file in error messages.
+    public shared method Parse(string text, string source): JsonValue {
+        var r = new JsonReader(text, source)
+        var v = r.Value()
+        r.SkipSpace()
+        return v
+    }
+}

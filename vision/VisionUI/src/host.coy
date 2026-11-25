@@ -1,0 +1,49 @@
+# VisionUI: the ui host module (needs the "ui" permission; `coyote run` and Studio grant it).
+hand:ui backend(): string
+hand:ui windowCreate(string title, int width, int height): int
+hand:ui windowShow(int win)
+hand:ui windowClose(int win)
+hand:ui windowSetTitle(int win, string title)
+hand:ui windowSetTheme(int win, int background, int foreground, int accent, string font, int fontSize)
+hand:ui windowClientSize(int win): string
+hand:ui controlCreate(int win, string kind, string text): int
+hand:ui controlSetText(int ctl, string text)
+hand:ui controlGetText(int ctl): string
+hand:ui controlSetVisible(int ctl, boolean visible)
+hand:ui controlGetVisible(int ctl): boolean
+hand:ui controlSetEnabled(int ctl, boolean enabled)
+hand:ui controlGetEnabled(int ctl): boolean
+hand:ui controlSetChecked(int ctl, boolean checked)
+hand:ui controlGetChecked(int ctl): boolean
+hand:ui controlSetBounds(int ctl, int x, int y, int width, int height)
+hand:ui controlBounds(int ctl): string
+hand:ui nextEvent(int waitMs): string
+hand:ui simClick(int ctl)
+hand:ui simSetText(int ctl, string text)
+hand:ui simClose(int win)
+
+# Thin wrapper over the host functions (internal; programs use Window, Control and Application).
+public class UiHost {
+    public shared method Backend(): string { return backend() }
+    public shared method WindowCreate(string title, int w, int h): int { return windowCreate(title, w, h) }
+    public shared method WindowShow(int win) { windowShow(win) }
+    public shared method WindowClose(int win) { windowClose(win) }
+    public shared method WindowSetTitle(int win, string title) { windowSetTitle(win, title) }
+    public shared method WindowSetTheme(int win, int bg, int fg, int accent, string font, int size) { windowSetTheme(win, bg, fg, accent, font, size) }
+    public shared method WindowClientSize(int win): string { return windowClientSize(win) }
+    public shared method ControlCreate(int win, string kind, string text): int { return controlCreate(win, kind, text) }
+    public shared method ControlSetText(int c, string text) { controlSetText(c, text) }
+    public shared method ControlGetText(int c): string { return controlGetText(c) }
+    public shared method ControlSetVisible(int c, boolean v) { controlSetVisible(c, v) }
+    public shared method ControlGetVisible(int c): boolean { return controlGetVisible(c) }
+    public shared method ControlSetEnabled(int c, boolean v) { controlSetEnabled(c, v) }
+    public shared method ControlGetEnabled(int c): boolean { return controlGetEnabled(c) }
+    public shared method ControlSetChecked(int c, boolean v) { controlSetChecked(c, v) }
+    public shared method ControlGetChecked(int c): boolean { return controlGetChecked(c) }
+    public shared method ControlSetBounds(int c, int x, int y, int w, int h) { controlSetBounds(c, x, y, w, h) }
+    public shared method ControlBounds(int c): string { return controlBounds(c) }
+    public shared method NextEvent(int waitMs): string { return nextEvent(waitMs) }
+    public shared method SimClick(int c) { simClick(c) }
+    public shared method SimSetText(int c, string text) { simSetText(c, text) }
+    public shared method SimClose(int win) { simClose(win) }
+}

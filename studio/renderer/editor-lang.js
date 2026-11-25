@@ -4,8 +4,8 @@
 // (completion with automatic `use`, hover, signature help, go to definition, outline, quick fixes, formatting).
 (function () {
   const L = CoyoteLang;
-  const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return', 'try', 'catch', 'throw'];
-  const DECL = ['hand', 'method', 'class', 'model', 'interface', 'property', 'constructor', 'namespace', 'field', 'use', 'var', 'new', 'in', 'of', 'is', 'as', 'here', 'base', 'get', 'set'];
+  const CONTROL = ['if', 'else', 'while', 'for', 'break', 'continue', 'return', 'try', 'catch', 'throw', 'switch', 'case', 'default'];
+  const DECL = ['hand', 'mouth', 'method', 'class', 'model', 'enum', 'interface', 'property', 'constructor', 'namespace', 'field', 'use', 'var', 'new', 'in', 'of', 'is', 'as', 'here', 'base', 'get', 'set'];
   const MOD = ['public', 'hidden', 'protected', 'shared', 'override', 'locked', 'readonly'];
   const KW_SET = new Set(L.KEYWORDS.filter((k) => k !== 'get' && k !== 'set'));
   const TYPE_SET = new Set(L.TYPES);

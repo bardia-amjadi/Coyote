@@ -1,0 +1,102 @@
+# VisionUI: the view model of a window and the "$Model.Name" bindings.
+use "Standard"
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text charAt(string s, int index): char
+hand:text indexOf(string s, string part): int
+
+# Named values a window shows. Setting a value refreshes every control that mentions it ($Model.Name).
+public class ViewModel {
+    hidden field array<string> names = new array<string>(0)
+    hidden field array<obj> values = new array<obj>(0)
+    hidden field Window? owner = null
+
+    public method Attach(Window w) { owner = w }
+
+    hidden method IndexOf(string name): int {
+        int i = 0
+        while (i < names.length) {
+            if (names[i] == name) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    public method Has(string name): boolean { return IndexOf(name) >= 0 }
+    # The value, or null when it was never set.
+    public method Get(string name): obj {
+        int i = IndexOf(name)
+        if (i < 0) { return null }
+        return values[i]
+    }
+    # Stores a value (any type) and refreshes the window.
+    public method Set(string name, obj value) {
+        int i = IndexOf(name)
+        if (i < 0) {
+            names.push(name)
+            values.push(value)
+        } else {
+            values[i] = value
+        }
+        if (owner != null) { owner!.Refresh() }
+    }
+    # The value as text ("" when missing).
+    public method GetString(string name): string {
+        obj v = Get(name)
+        if (v == null) { return "" }
+        return string(v)
+    }
+    public method GetInt(string name): int {
+        obj v = Get(name)
+        if (v == null) { return 0 }
+        if (v is int) { return int(v) }
+        if (v is long) { return int(long(v)) }
+        if (v is double) { return int(double(v)) }
+        string s = string(v)
+        try { return int(s) } catch (e) { return 0 }
+        return 0
+    }
+    public method GetBool(string name): boolean {
+        obj v = Get(name)
+        if (v == null) { return false }
+        if (v is boolean) {
+            dyn d = v
+            return d
+        }
+        return string(v) == "true"
+    }
+}
+
+# Replaces $Model.Name in a text by the value (see ViewModel).
+public class Binding {
+    hidden shared method IsNameChar(char c): boolean {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+    }
+    # The text with every $Model.Name replaced.
+    public shared method Expand(string template, ViewModel m): string {
+        if (indexOf(template, "$Model.") < 0) { return template }
+        int n = length(template)
+        string r = ""
+        int i = 0
+        while (i < n) {
+            if (charAt(template, i) == '$' && substring(template, i, 7) == "$Model.") {
+                int j = i + 7
+                while (j < n && IsNameChar(charAt(template, j))) { j = j + 1 }
+                r = r + m.GetString(substring(template, i + 7, j - i - 7))
+                i = j
+            } else {
+                r = r + string(charAt(template, i))
+                i = i + 1
+            }
+        }
+        return r
+    }
+    # "Name" when the whole text is exactly "$Model.Name" (a two-way binding), otherwise "".
+    public shared method SingleName(string template): string {
+        int n = length(template)
+        if (n < 8 || substring(template, 0, 7) != "$Model.") { return "" }
+        int j = 7
+        while (j < n && IsNameChar(charAt(template, j))) { j = j + 1 }
+        if (j != n) { return "" }
+        return substring(template, 7, n - 7)
+    }
+}

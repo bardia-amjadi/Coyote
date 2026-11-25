@@ -1,0 +1,16 @@
+# VisionUI: event arguments and results.
+public enum EventResults { Handled, Unhandled, Cancel }
+
+public class EventArgs {
+    public field Control? Source = null          # the control that raised the event (null for window events)
+    public field Window? Sender = null           # the window that owns it
+    public field string Name = ""                # "click", "change", "closing"
+    public field string Value = ""               # the new text of a text box ("change")
+    public field array<Control> Attached = new array<Control>(0)   # the controls named in the attach="id1,id2" attribute of the source
+
+    # The control with this id in the window, or null.
+    public method Find(string id): Control? {
+        if (Sender == null) { return null }
+        return Sender!.Find(id)
+    }
+}
