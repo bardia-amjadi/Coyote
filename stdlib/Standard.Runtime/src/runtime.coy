@@ -1,0 +1,37 @@
+# Standard.Runtime: ask the running Coyote runtime about itself. Needs the "system" permission (granted by `coyote run` and Studio).
+hand:rt version(): string
+hand:rt arch(): string
+hand:rt cpuCount(): int
+hand:rt memoryBytes(): int
+hand:rt machine(): string
+hand:rt user(): string
+hand:rt gcCollections(): int
+hand:rt gcFreed(): int
+hand:rt heapObjects(): int
+hand:rt heapElements(): int
+hand:sys os(): string
+hand:proc pid(): int
+
+public class Runtime {
+    # The Coyote version that runs the program, for example "0.6.4".
+    public shared method Version(): string { return version() }
+    # "x64", "arm64" or "x86".
+    public shared method Architecture(): string { return arch() }
+    public shared method ProcessorCount(): int { return cpuCount() }
+    public shared method MachineName(): string { return machine() }
+    public shared method UserName(): string { return user() }
+    public shared method ProcessId(): int { return pid() }
+    # Memory the whole process uses, in bytes; -1 when the system does not tell.
+    public shared method MemoryBytes(): int { return memoryBytes() }
+    # How often the garbage collector ran so far.
+    public shared method GcCollections(): int { return gcCollections() }
+    # How many objects (arrays, class instances, ...) the garbage collector freed so far.
+    public shared method GcFreedObjects(): int { return gcFreed() }
+    # Objects alive now, and the array slots they hold (the heap limit counts slots).
+    public shared method HeapObjects(): int { return heapObjects() }
+    public shared method HeapElements(): int { return heapElements() }
+    # A one-line description: "Coyote 0.6.4 on linux/x64, 8 cpu(s)".
+    public shared method Describe(): string {
+        return "Coyote " + version() + " on " + os() + "/" + arch() + ", " + cpuCount() + " cpu(s)"
+    }
+}

@@ -1,0 +1,86 @@
+# Standard.Windows.InteropServices: call functions of Windows DLLs (kernel32.dll, user32.dll, your own .dll).
+# Windows only, 64-bit Coyote only; needs the "interop" permission (granted by `coyote run` and Studio).
+#
+#     var lib = NativeLibrary.Load("kernel32.dll")
+#     var call = lib.Function("GetEnvironmentVariableA")
+#     call.AddAnsi("PATH")
+#     int buffer = call.AddOutBuffer(1024)
+#     call.AddInt(1024)
+#     int length = call.InvokeInt()
+#     Shell.PrintLine(call.BufferAnsi(buffer))
+#
+# A wrong function name, wrong argument count or wrong argument types is NOT detected by Windows: the call may crash the program.
+# Only call functions whose signature you know. At most 8 arguments, each an integer/pointer-size value, a text or an output buffer.
+hand:win dllLoad(string name): boolean
+hand:win dllHasFunction(string name, string function): boolean
+hand:win dllCall(string name, string function, string types, string values, string ret): string
+hand:win dllBuffer(int index, boolean wide): string
+hand:text length(string s): int
+
+public class NativeLibrary {
+    public readonly field string Name = ""
+
+    constructor(string name) { Name = name }
+
+    # Loads a DLL by name or path; stops with a clear message when Windows cannot load it.
+    public shared method Load(string name): NativeLibrary {
+        if (!dllLoad(name)) { throw "NativeLibrary: Windows could not load '" + name + "'" }
+        return new NativeLibrary(name)
+    }
+    # true when the DLL can be loaded.
+    public shared method Exists(string name): boolean { return dllLoad(name) }
+    public method HasFunction(string function): boolean { return dllHasFunction(Name, function) }
+    # Starts describing a call to one exported function (the exact, case-sensitive export name, e.g. "MessageBoxW").
+    public method Function(string function): NativeCall {
+        if (!dllHasFunction(Name, function)) { throw "NativeLibrary: '" + Name + "' has no function '" + function + "'" }
+        return new NativeCall(Name, function)
+    }
+}
+
+public class NativeCall {
+    public readonly field string Library = ""
+    public readonly field string FunctionName = ""
+    hidden field string types = ""
+    hidden field string values = ""
+    hidden field int buffers = 0
+
+    constructor(string library, string function) {
+        Library = library
+        FunctionName = function
+    }
+
+    hidden method Add(string type, string value) {
+        types = types + type
+        values = values + length(value) + ":" + value
+    }
+    # An integer, pointer or handle value (64-bit).
+    public method AddInt(int value): NativeCall { Add("i", "" + value); return here }
+    public method AddBool(boolean value): NativeCall { Add("b", "" + value); return here }
+    # A text passed as a 'char*' (the UTF-8 bytes; right for ASCII names, A-suffixed functions).
+    public method AddAnsi(string value): NativeCall { Add("s", value); return here }
+    # A text passed as a 'wchar_t*' (UTF-16, for the W-suffixed functions).
+    public method AddWide(string value): NativeCall { Add("w", value); return here }
+    # A writable buffer of this many bytes that the function fills; returns its number for BufferAnsi / BufferWide.
+    public method AddOutBuffer(int bytes): int {
+        Add("o", "" + bytes)
+        buffers = buffers + 1
+        return buffers - 1
+    }
+
+    hidden method Do(string ret): string { return dllCall(Library, FunctionName, types, values, ret) }
+    # Calls a function without a result.
+    public method Invoke() { Do("v") }
+    # Result is a 32-bit signed int (int, BOOL, LONG).
+    public method InvokeInt(): int { return int(Do("i")) }
+    # Result is a 32-bit unsigned int (DWORD, UINT).
+    public method InvokeUInt(): int { return int(Do("u")) }
+    # Result is 64 bits wide (handles, pointers, size_t, HWND).
+    public method InvokeLong(): int { return int(Do("l")) }
+    public method InvokeBool(): boolean { return Do("b") == "true" }
+    # Result is a 'char*' / 'wchar_t*' that is copied into a text.
+    public method InvokeAnsi(): string { return Do("s") }
+    public method InvokeWide(): string { return Do("w") }
+    # The content of an output buffer after the call, read as 8-bit or 16-bit text up to the first zero.
+    public method BufferAnsi(int buffer): string { return dllBuffer(buffer, false) }
+    public method BufferWide(int buffer): string { return dllBuffer(buffer, true) }
+}

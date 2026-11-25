@@ -1,0 +1,82 @@
+# Standard.Process: run other programs and talk to them. Needs the "process" permission (granted by `coyote run` and Studio).
+# Arguments are passed one by one (no shell); an argument may not contain a line break.
+hand:proc run(string program, string args, string cwd, string input, int timeoutMs): int
+hand:proc stdout(): string
+hand:proc stderr(): string
+hand:proc timedOut(): boolean
+hand:proc start(string program, string args, string cwd): int
+hand:proc wait(int pid, int timeoutMs): int
+hand:proc isRunning(int pid): boolean
+hand:proc kill(int pid): boolean
+hand:proc pid(): int
+hand:proc which(string program): string
+hand:sys os(): string
+hand:text indexOf(string s, string part): int
+
+# What a finished program produced.
+public class ProcessResult {
+    public field int ExitCode = 0
+    public field string Output = ""
+    public field string Error = ""
+    public field boolean TimedOut = false
+    # true when the program exited with code 0 and did not time out.
+    public method Succeeded(): boolean { return ExitCode == 0 && !TimedOut }
+}
+
+# A program that was started and keeps running on its own.
+public class Process {
+    public readonly field int Id = 0
+
+    constructor(int id) { Id = id }
+
+    hidden shared method Pack(array<string> args): string {
+        string r = ""
+        int i = 0
+        while (i < args.length) {
+            if (indexOf(args[i], "\n") >= 0) { throw "Process: an argument may not contain a line break" }
+            if (i > 0) { r = r + "\n" }
+            r = r + args[i]
+            i = i + 1
+        }
+        return r
+    }
+    # Runs a program to the end and returns what it printed. Arguments are not interpreted by a shell.
+    public shared method Run(string program, array<string> args): ProcessResult {
+        return RunFull(program, args, "", "", 0)
+    }
+    # Like Run, with a working folder ("" = current), text for its standard input, and a time limit in milliseconds (0 = none).
+    # On a time limit the program is killed and the result has TimedOut = true and ExitCode = -1.
+    public shared method RunFull(string program, array<string> args, string folder, string input, int timeoutMs): ProcessResult {
+        var r = new ProcessResult()
+        r.ExitCode = run(program, Pack(args), folder, input, timeoutMs)
+        r.Output = stdout()
+        r.Error = stderr()
+        r.TimedOut = timedOut()
+        return r
+    }
+    # Runs a command line through the system shell (sh -c on Linux/macOS, cmd /c on Windows).
+    public shared method Shell(string command): ProcessResult {
+        if (os() == "windows") { return Run("cmd", ["/c", command]) }
+        return Run("sh", ["-c", command])
+    }
+    # Starts a program and returns at once. Its standard streams are not connected to anything.
+    public shared method Start(string program, array<string> args): Process {
+        return new Process(start(program, Pack(args), ""))
+    }
+    public shared method StartIn(string program, array<string> args, string folder): Process {
+        return new Process(start(program, Pack(args), folder))
+    }
+    public shared method CurrentId(): int { return pid() }
+    # A handle for any running process id (to ask IsRunning or Kill it).
+    public shared method FromId(int id): Process { return new Process(id) }
+    # The full path of a program found through PATH, or "" when there is none.
+    public shared method Which(string program): string { return which(program) }
+    public shared method Exists(string program): boolean { return which(program) != "" }
+
+    public method IsRunning(): boolean { return isRunning(Id) }
+    # Waits until the program ends and returns its exit code.
+    public method Wait(): int { return wait(Id, -1) }
+    # Waits at most this many milliseconds; returns the exit code, or -1 when it is still running.
+    public method WaitFor(int ms): int { return wait(Id, ms) }
+    public method Kill(): boolean { return kill(Id) }
+}

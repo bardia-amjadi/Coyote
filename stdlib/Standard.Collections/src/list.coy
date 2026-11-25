@@ -80,6 +80,8 @@ public class List<T> {
         items = result
     }
     # A copy of the elements as an array.
+    # Sorts the list in place with a comparer (stable): compare(a, b) is negative when a goes before b, 0 when equal, positive otherwise.
+    method Sort(fn(T, T) : int compare) { items = Sorted(items, compare) }
     method ToArray(): array<T> { return items.copy() }
 }
 

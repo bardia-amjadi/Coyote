@@ -70,4 +70,72 @@ public class Numbers {
     public shared method ToRadians(double degrees): double { return degrees * 3.141592653589793 / 180.0 }
     # Converts radians to degrees.
     public shared method ToDegrees(double radians): double { return radians * 180.0 / 3.141592653589793 }
+
+    # The digits of n in a base from 2 to 36 (lower case; a leading '-' for negative numbers): Numbers.ToBase(255, 16) is "ff".
+    public shared method ToBase(long n, int radix): string {
+        if (radix < 2 || radix > 36) { throw new Exception("radix must be between 2 and 36") }
+        if (n == 0) { return "0" }
+        string digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        string r = ""
+        long rest = n
+        boolean negative = n < 0
+        while (rest != 0) {
+            long d = rest % radix
+            if (d < 0) { d = 0 - d }
+            r = string(digits[int(d)]) + r
+            rest = rest / radix
+        }
+        if (negative) { r = "-" + r }
+        return r
+    }
+    # Hexadecimal digits: Numbers.Hex(255) is "ff".
+    public shared method Hex(long n): string { return ToBase(n, 16) }
+    # Binary digits: Numbers.Binary(5) is "101".
+    public shared method Binary(long n): string { return ToBase(n, 2) }
+    # Groups the digits of n in threes with a separator: Numbers.Thousands(1234567, ",") is "1,234,567".
+    public shared method Thousands(long n, string separator): string {
+        string digits = string(n)
+        string sign = ""
+        int first = 0
+        if (n < 0) {
+            sign = "-"
+            first = 1
+        }
+        string r = ""
+        int count = 0
+        int i = digits.length - 1
+        while (i >= first) {
+            if (count > 0 && count % 3 == 0) { r = separator + r }
+            r = string(digits[i]) + r
+            count = count + 1
+            i = i - 1
+        }
+        return sign + r
+    }
+    # x with exactly `decimals` digits after the point (0 to 15), rounded half away from zero: Numbers.Fixed(3.14159, 2) is "3.14".
+    public shared method Fixed(double x, int decimals): string {
+        if (decimals < 0 || decimals > 15) { throw new Exception("decimals must be between 0 and 15") }
+        if (x != x) { return "NaN" }
+        double scale = 1.0
+        int k = 0
+        while (k < decimals) {
+            scale = scale * 10.0
+            k = k + 1
+        }
+        double a = x
+        if (a < 0.0) { a = 0.0 - a }
+        double scaled = a * scale
+        if (scaled >= 9000000000000000.0) { return string(x) }
+        long r = long(Math.Round(scaled))
+        long whole = r / long(scale)
+        long frac = r % long(scale)
+        string text = string(whole)
+        if (decimals > 0) {
+            string f = string(frac)
+            while (f.length < decimals) { f = "0" + f }
+            text = text + "." + f
+        }
+        if (x < 0.0 && r != 0) { text = "-" + text }
+        return text
+    }
 }

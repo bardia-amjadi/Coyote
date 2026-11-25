@@ -79,3 +79,51 @@ public method IndexOfValue<T>(array<T> xs, T value): int {
 }
 # true when the array contains value.
 public method ContainsValue<T>(array<T> xs, T value): boolean { return IndexOfValue<T>(xs, value) >= 0 }
+
+# A new array sorted with a comparer (stable merge sort): compare(a, b) is negative when a goes before b, 0 when they are equal
+# and positive when a goes after b.  Sorted(words, (string a, string b) => a.length - b.length)
+public method Sorted<T>(array<T> xs, fn(T, T) : int compare): array<T> {
+    int n = xs.length
+    array<T> a = xs.copy()
+    if (n < 2) { return a }
+    array<T> b = xs.copy()
+    int width = 1
+    while (width < n) {
+        int lo = 0
+        while (lo < n) {
+            int mid = lo + width
+            if (mid > n) { mid = n }
+            int hi = lo + 2 * width
+            if (hi > n) { hi = n }
+            int i = lo
+            int j = mid
+            int k = lo
+            while (i < mid && j < hi) {
+                if (compare(a[j], a[i]) < 0) {
+                    b[k] = a[j]
+                    j = j + 1
+                } else {
+                    b[k] = a[i]
+                    i = i + 1
+                }
+                k = k + 1
+            }
+            while (i < mid) {
+                b[k] = a[i]
+                i = i + 1
+                k = k + 1
+            }
+            while (j < hi) {
+                b[k] = a[j]
+                j = j + 1
+                k = k + 1
+            }
+            lo = lo + 2 * width
+        }
+        array<T> t = a
+        a = b
+        b = t
+        width = width * 2
+    }
+    return a
+}

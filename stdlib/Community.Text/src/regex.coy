@@ -1,0 +1,894 @@
+# Community.Text.Regex: regular expressions.
+#
+#     var re = new Regex("(\\d+)-(\\d+)")
+#     var m = re.Match("tel 555-1234")
+#     if (m.Success) { Shell.PrintLine(m.Text(1) + " / " + m.Text(2)) }
+#     Shell.PrintLine(re.Replace("1-2 and 3-4", "$2-$1"))
+#
+# Supported: literals, . [set] [^set] ranges, \d \D \w \W \s \S, \b \B \A \z \Z ^ $, groups ( ), (?: ), named groups (?<name> ),
+# alternation |, quantifiers * + ? {n} {n,} {n,m} with lazy versions (*? +? ?? {n,m}?), back references \1 and \k<name>,
+# look-ahead (?= ) (?! ), escapes \n \r \t \f \v \0 \xHH \uHHHH, and flags (?i) (?m) (?s) or (?i: ... ).
+# Not supported: look-behind, atomic groups, possessive quantifiers, Unicode categories (\p{...}).
+# Case-insensitive matching folds ASCII, Latin-1, Greek and Cyrillic letters. Positions count characters (like Standard.Text).
+# The matcher backtracks with a step limit (Regex.StepLimit, default 20 million per search) so a pattern that explodes
+# stops with an error instead of hanging.
+use "Standard.Text"
+use "Standard.Encoding"
+
+# Syntax tree of a pattern (internal).
+#   Kind: 0 empty, 1 char, 2 any, 3 class, 4 sequence, 5 alternation, 6 repeat, 7 group, 8 start of line, 9 end of line,
+#         10 word boundary, 11 not word boundary, 12 back reference, 13 look-ahead, 14 start of text, 15 end of text
+class RNode {
+    public field int Kind = 0
+    public field int A = 0        # char code / class number / group number / repeat minimum / back reference group
+    public field int B = 0        # repeat maximum (-1 = unbounded)
+    public field int Flags = 0    # 1 = ignore case, 2 = multiline, 4 = dot matches line break
+    public field boolean Greedy = true
+    public field boolean Negate = false
+    public field RNode? Child = null
+    public field array<RNode> Kids = new array<RNode>(0)
+}
+
+public class RegexOptions {
+    public shared locked field int None = 0
+    public shared locked field int IgnoreCase = 1
+    public shared locked field int Multiline = 2
+    public shared locked field int DotAll = 4
+}
+
+public class Regex {
+    hidden field string pattern = ""
+    hidden field int options = 0
+    hidden field array<int> pat = new array<int>(0)
+    hidden field int pp = 0
+    hidden field int flags = 0
+    hidden field int groupCount = 0
+    hidden field array<string> groupNames = new array<string>(0)
+    # compiled program: 4 ints per instruction (op, a, b, c)
+    hidden field array<int> prog = new array<int>(0)
+    hidden field array<int> classStart = new array<int>(0)
+    hidden field array<int> classLen = new array<int>(0)
+    hidden field array<int> classFlags = new array<int>(0)   # 1 = negated, 2 = ignore case
+    hidden field array<int> ranges = new array<int>(0)
+    hidden field int loopRegs = 0
+    hidden field int firstChar = -1
+    hidden field array<int> regs = new array<int>(0)
+    hidden field array<int> st = new array<int>(0)
+    hidden field int sp = 0
+    hidden field int steps = 0
+    public field int StepLimit = 20000000
+
+    constructor(string patternText) { Build(patternText, 0) }
+
+    # A regular expression with options: new Regex("abc", RegexOptions.IgnoreCase + RegexOptions.Multiline).
+    constructor(string patternText, int optionFlags) { Build(patternText, optionFlags) }
+
+    public method Pattern(): string { return pattern }
+    public method Options(): int { return options }
+    # Number of capturing groups (not counting group 0, the whole match).
+    public method GroupCount(): int { return groupCount }
+    # The names of the groups; unnamed groups have "".
+    public method GroupNames(): array<string> { return groupNames }
+
+    # ---------------------------------------------------------------- building
+    hidden method Fail(string message) {
+        throw "Regex: " + message + " in pattern '" + pattern + "'"
+    }
+
+    hidden method Build(string patternText, int optionFlags) {
+        pattern = patternText
+        options = optionFlags
+        pat = Encoding.CodePoints(patternText)
+        pp = 0
+        flags = 0
+        if (optionFlags % 2 == 1) { flags = flags + 1 }
+        if ((optionFlags / 2) % 2 == 1) { flags = flags + 2 }
+        if ((optionFlags / 4) % 2 == 1) { flags = flags + 4 }
+        groupCount = 0
+        groupNames = new array<string>(0)
+        groupNames.push("")
+        prog = new array<int>(0)
+        classStart = new array<int>(0)
+        classLen = new array<int>(0)
+        classFlags = new array<int>(0)
+        ranges = new array<int>(0)
+        loopRegs = 0
+        RNode tree = ParseAlt()
+        if (pp < pat.length) { Fail("unbalanced ')' at position " + pp) }
+        Emit(tree)
+        Op(11, 0, 0, 0)
+        firstChar = FirstLiteral(tree)
+        regs = new array<int>(2 * (groupCount + 1) + loopRegs)
+    }
+
+    hidden method More(): boolean { return pp < pat.length }
+    hidden method Peek(): int { if (pp < pat.length) { return pat[pp] } return -1 }
+    hidden method Eat(int c): boolean {
+        if (pp < pat.length && pat[pp] == c) { pp = pp + 1; return true }
+        return false
+    }
+
+    hidden method NewNode(int kind): RNode {
+        var n = new RNode()
+        n.Kind = kind
+        n.Flags = flags
+        return n
+    }
+
+    hidden method ParseAlt(): RNode {
+        array<RNode> alts = new array<RNode>(0)
+        alts.push(ParseSeq())
+        while (Eat(124)) { alts.push(ParseSeq()) }
+        if (alts.length == 1) { return alts[0] }
+        var n = NewNode(5)
+        n.Kids = alts
+        return n
+    }
+
+    hidden method ParseSeq(): RNode {
+        var seq = NewNode(4)
+        while (More() && Peek() != 124 && Peek() != 41) {
+            RNode? atom = ParseAtom()
+            if (atom == null) { continue }
+            seq.Kids.push(ParseQuantifier(atom!))
+        }
+        if (seq.Kids.length == 1) { return seq.Kids[0] }
+        return seq
+    }
+
+    # Reads a number at the current position; -1 when there is none.
+    hidden method ReadNumber(): int {
+        int v = -1
+        while (More() && Peek() >= 48 && Peek() <= 57) {
+            if (v < 0) { v = 0 }
+            v = v * 10 + (Peek() - 48)
+            if (v > 100000) { Fail("a repeat count is too large") }
+            pp = pp + 1
+        }
+        return v
+    }
+
+    hidden method ParseQuantifier(RNode atom): RNode {
+        int min = -1
+        int max = -1
+        int c = Peek()
+        if (c == 42) { min = 0; max = -1; pp = pp + 1 }
+        else if (c == 43) { min = 1; max = -1; pp = pp + 1 }
+        else if (c == 63) { min = 0; max = 1; pp = pp + 1 }
+        else if (c == 123) {
+            int save = pp
+            pp = pp + 1
+            int lo = ReadNumber()
+            int hi = lo
+            boolean ok = lo >= 0
+            if (ok && Eat(44)) {
+                hi = ReadNumber()
+            }
+            if (ok && Eat(125)) { min = lo; max = hi }
+            else { pp = save; return atom }
+            if (max >= 0 && max < min) { Fail("a repeat has its maximum below its minimum") }
+            if (min > 1000 || max > 1000) { Fail("a repeat count may not exceed 1000") }
+        } else { return atom }
+        if (atom.Kind == 8 || atom.Kind == 9 || atom.Kind == 10 || atom.Kind == 11 || atom.Kind == 14 || atom.Kind == 15) {
+            Fail("a quantifier cannot follow an anchor at position " + pp)
+        }
+        var rep = NewNode(6)
+        rep.A = min
+        rep.B = max
+        rep.Child = atom
+        if (Eat(63)) { rep.Greedy = false }
+        return rep
+    }
+
+    hidden method HexValue(int count): int {
+        int v = 0
+        int i = 0
+        while (i < count) {
+            int d = Hex.Digit(Peek())
+            if (d < 0) { Fail("a hexadecimal escape needs " + count + " digits") }
+            v = v * 16 + d
+            pp = pp + 1
+            i = i + 1
+        }
+        return v
+    }
+
+    # Adds the ranges of a shorthand class (d, w, s, upper-case = negated) to a list of range pairs.
+    hidden method AddShorthand(array<int> r, int letter) {
+        int lower = letter
+        boolean neg = false
+        if (letter >= 65 && letter <= 90) { lower = letter + 32; neg = true }
+        array<int> t = new array<int>(0)
+        if (lower == 100) { t.push(48); t.push(57) }
+        else if (lower == 119) {
+            t.push(48); t.push(57); t.push(65); t.push(90); t.push(95); t.push(95); t.push(97); t.push(122)
+            t.push(192); t.push(214); t.push(216); t.push(246); t.push(248); t.push(1114111)
+        }
+        else { t.push(9); t.push(13); t.push(32); t.push(32); t.push(133); t.push(133); t.push(160); t.push(160); t.push(8232); t.push(8233) }
+        if (!neg) { in (var x of t) { r.push(x) } return }
+        int next = 0
+        int i = 0
+        while (i < t.length) {
+            if (t[i] > next) { r.push(next); r.push(t[i] - 1) }
+            next = t[i + 1] + 1
+            i = i + 2
+        }
+        if (next <= 1114111) { r.push(next); r.push(1114111) }
+    }
+
+    # Reads the character after a backslash that stands for a single code point; -1 when it is a shorthand class.
+    hidden method EscapeChar(int c): int {
+        if (c == 110) { return 10 }
+        if (c == 114) { return 13 }
+        if (c == 116) { return 9 }
+        if (c == 102) { return 12 }
+        if (c == 118) { return 11 }
+        if (c == 97) { return 7 }
+        if (c == 101) { return 27 }
+        if (c == 48) { return 0 }
+        if (c == 120) { return HexValue(2) }
+        if (c == 117) { return HexValue(4) }
+        return c
+    }
+
+    hidden method ParseClass(): RNode {
+        array<int> r = new array<int>(0)
+        boolean neg = Eat(94)
+        boolean first = true
+        boolean closed = false
+        while (More()) {
+            int c = Peek()
+            if (c == 93 && !first) { pp = pp + 1; closed = true; break }
+            first = false
+            pp = pp + 1
+            int lo = c
+            if (c == 92) {
+                if (!More()) { Fail("a pattern may not end with a backslash") }
+                int e = Peek()
+                pp = pp + 1
+                if (e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83) { AddShorthand(r, e); continue }
+                if (e == 98) { lo = 8 } else { lo = EscapeChar(e) }
+            }
+            int hi = lo
+            if (Peek() == 45 && pp + 1 < pat.length && pat[pp + 1] != 93) {
+                pp = pp + 1
+                int h = Peek()
+                pp = pp + 1
+                hi = h
+                if (h == 92) {
+                    if (!More()) { Fail("a pattern may not end with a backslash") }
+                    int e2 = Peek()
+                    pp = pp + 1
+                    if (e2 == 100 || e2 == 68 || e2 == 119 || e2 == 87 || e2 == 115 || e2 == 83) { Fail("a range cannot end with a shorthand class") }
+                    hi = EscapeChar(e2)
+                }
+                if (hi < lo) { Fail("a character range is reversed") }
+            }
+            r.push(lo)
+            r.push(hi)
+        }
+        if (!closed) { Fail("a [ set is not closed") }
+        var n = NewNode(3)
+        n.A = AddClass(r, neg, (flags % 2) == 1)
+        return n
+    }
+
+    hidden method AddClass(array<int> r, boolean neg, boolean icase): int {
+        classStart.push(ranges.length)
+        classLen.push(r.length / 2)
+        int f = 0
+        if (neg) { f = f + 1 }
+        if (icase) { f = f + 2 }
+        classFlags.push(f)
+        in (var x of r) { ranges.push(x) }
+        return classStart.length - 1
+    }
+
+    hidden method ParseGroupName(int close): string {
+        string name = ""
+        array<int> cps = new array<int>(0)
+        while (More() && Peek() != close) { cps.push(Peek()); pp = pp + 1 }
+        if (!Eat(close)) { Fail("a group name is not closed") }
+        if (cps.length == 0) { Fail("a group name is empty") }
+        return Encoding.FromCodePoints(cps)
+    }
+
+    hidden method GroupNumber(string name): int {
+        int i = 1
+        while (i < groupNames.length) { if (groupNames[i] == name) { return i } i = i + 1 }
+        return -1
+    }
+
+    hidden method ParseAtom(): RNode? {
+        int c = Peek()
+        pp = pp + 1
+        if (c == 46) { return NewNode(2) }
+        if (c == 94) { return NewNode(8) }
+        if (c == 36) { return NewNode(9) }
+        if (c == 91) { return ParseClass() }
+        if (c == 40) { return ParseGroup() }
+        if (c == 42 || c == 43 || c == 63) { Fail("a quantifier has nothing to repeat at position " + (pp - 1)) }
+        if (c == 92) {
+            if (!More()) { Fail("a pattern may not end with a backslash") }
+            int e = Peek()
+            pp = pp + 1
+            if (e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83) {
+                array<int> r = new array<int>(0)
+                AddShorthand(r, e)
+                var cn = NewNode(3)
+                cn.A = AddClass(r, false, false)
+                return cn
+            }
+            if (e == 98) { return NewNode(10) }
+            if (e == 66) { return NewNode(11) }
+            if (e == 65) { return NewNode(14) }
+            if (e == 122) { return NewNode(15) }
+            if (e == 90) { var z = NewNode(15); z.Negate = true; return z }
+            if (e >= 49 && e <= 57) {
+                int g = e - 48
+                while (More() && Peek() >= 48 && Peek() <= 57 && g * 10 + (Peek() - 48) <= groupCount) { g = g * 10 + (Peek() - 48); pp = pp + 1 }
+                var b = NewNode(12)
+                b.A = g
+                return b
+            }
+            if (e == 107) {
+                if (!Eat(60)) { Fail("\\k needs a group name in <>") }
+                string nm = ParseGroupName(62)
+                int gn = GroupNumber(nm)
+                if (gn < 0) { Fail("\\k<" + nm + "> names a group that does not exist (yet)") }
+                var kb = NewNode(12)
+                kb.A = gn
+                return kb
+            }
+            var lit = NewNode(1)
+            lit.A = EscapeChar(e)
+            return lit
+        }
+        var ch = NewNode(1)
+        ch.A = c
+        return ch
+    }
+
+    hidden method ParseGroup(): RNode? {
+        int saveFlags = flags
+        RNode inner = NewNode(0)
+        if (Eat(63)) {
+            int k = Peek()
+            if (k == 58) {                                   # (?:...)
+                pp = pp + 1
+                inner = ParseAlt()
+            } else if (k == 61 || k == 33) {                 # (?=...) (?!...)
+                pp = pp + 1
+                var look = NewNode(13)
+                look.Negate = (k == 33)
+                look.Child = ParseAlt()
+                inner = look
+            } else if (k == 60 && pp + 1 < pat.length && pat[pp + 1] != 61 && pat[pp + 1] != 33) {   # (?<name>...)
+                pp = pp + 1
+                string name = ParseGroupName(62)
+                inner = NamedGroup(name)
+            } else if (k == 80 && pp + 1 < pat.length && pat[pp + 1] == 60) {                         # (?P<name>...)
+                pp = pp + 2
+                string pname = ParseGroupName(62)
+                inner = NamedGroup(pname)
+            } else if (k == 60) {
+                Fail("look-behind is not supported")
+            } else {                                         # (?i) (?i:...) (?-i)
+                boolean on = true
+                int f = flags
+                while (More() && Peek() != 41 && Peek() != 58) {
+                    int fc = Peek()
+                    pp = pp + 1
+                    int bit = 0
+                    if (fc == 45) { on = false; continue }
+                    if (fc == 105) { bit = 1 } else if (fc == 109) { bit = 2 } else if (fc == 115) { bit = 4 }
+                    else { Fail("unknown group option '" + string(char(fc)) + "'") }
+                    boolean has = (f / bit) % 2 == 1
+                    if (on && !has) { f = f + bit }
+                    if (!on && has) { f = f - bit }
+                }
+                flags = f
+                if (Eat(58)) {
+                    inner = ParseAlt()
+                } else {
+                    # (?i) changes the flags for the rest of the enclosing group
+                    if (!Eat(41)) { Fail("a group is not closed") }
+                    return null
+                }
+            }
+        } else {
+            inner = NamedGroup("")
+        }
+        if (!Eat(41)) { Fail("a '(' is not closed") }
+        flags = saveFlags
+        return inner
+    }
+
+    # A capturing group; the group number is taken when its opening parenthesis is read.
+    hidden method NamedGroup(string name): RNode {
+        groupCount = groupCount + 1
+        int number = groupCount
+        groupNames.push(name)
+        var g = NewNode(7)
+        g.A = number
+        g.Child = ParseAlt()
+        return g
+    }
+
+    # ---------------------------------------------------------------- code generation
+    hidden method Op(int op, int a, int b, int c): int {
+        prog.push(op); prog.push(a); prog.push(b); prog.push(c)
+        if (prog.length > 400000) { Fail("the pattern is too large") }
+        return prog.length / 4 - 1
+    }
+    hidden method Here(): int { return prog.length / 4 }
+    hidden method Patch(int at, int slot, int value) { prog[at * 4 + slot] = value }
+
+    hidden method Nullable(RNode n): boolean {
+        if (n.Kind == 1 || n.Kind == 2 || n.Kind == 3) { return false }
+        if (n.Kind == 4) {
+            in (var k of n.Kids) { if (!Nullable(k)) { return false } }
+            return true
+        }
+        if (n.Kind == 5) {
+            in (var k2 of n.Kids) { if (Nullable(k2)) { return true } }
+            return false
+        }
+        if (n.Kind == 6) { return n.A == 0 || Nullable(n.Child!) }
+        if (n.Kind == 7) { return Nullable(n.Child!) }
+        return true
+    }
+
+    hidden method FirstLiteral(RNode n): int {
+        if (n.Kind == 1) { if (n.Flags % 2 == 0) { return n.A } return -1 }
+        if (n.Kind == 4) { if (n.Kids.length > 0) { return FirstLiteral(n.Kids[0]) } return -1 }
+        if (n.Kind == 7) { return FirstLiteral(n.Child!) }
+        if (n.Kind == 6 && n.A >= 1) { return FirstLiteral(n.Child!) }
+        return -1
+    }
+
+    # Ops: 0 char, 1 any, 2 class, 3 split(first, second), 4 jump, 5 save, 6 start of line, 7 end of line, 8 word boundary,
+    # 9 not word boundary, 10 back reference, 11 match, 12 look-ahead(sub, negate), 13 mark, 14 progress check, 15 start of text,
+    # 16 end of text (a = 1: also before a final line break), 17 fail
+    hidden method Emit(RNode n) {
+        int k = n.Kind
+        if (k == 0) { return }
+        if (k == 1) {
+            int ic = 0
+            int ch = n.A
+            if (n.Flags % 2 == 1) { ch = Fold(ch); ic = 1 }
+            Op(0, ch, ic, 0)
+        }
+        else if (k == 2) { Op(1, (n.Flags / 4) % 2, 0, 0) }
+        else if (k == 3) { Op(2, n.A, 0, 0) }
+        else if (k == 4) { in (var s of n.Kids) { Emit(s) } }
+        else if (k == 5) {
+            array<int> jumps = new array<int>(0)
+            int i = 0
+            while (i < n.Kids.length) {
+                if (i < n.Kids.length - 1) {
+                    int sp0 = Op(3, 0, 0, 0)
+                    Patch(sp0, 1, Here())
+                    Emit(n.Kids[i])
+                    jumps.push(Op(4, 0, 0, 0))
+                    Patch(sp0, 2, Here())
+                } else { Emit(n.Kids[i]) }
+                i = i + 1
+            }
+            in (var j of jumps) { Patch(j, 1, Here()) }
+        }
+        else if (k == 6) { EmitRepeat(n) }
+        else if (k == 7) {
+            Op(5, 2 * n.A, 0, 0)
+            Emit(n.Child!)
+            Op(5, 2 * n.A + 1, 0, 0)
+        }
+        else if (k == 8) { Op(6, (n.Flags / 2) % 2, 0, 0) }
+        else if (k == 9) { Op(7, (n.Flags / 2) % 2, 0, 0) }
+        else if (k == 10) { Op(8, 0, 0, 0) }
+        else if (k == 11) { Op(9, 0, 0, 0) }
+        else if (k == 12) { Op(10, n.A, n.Flags % 2, 0) }
+        else if (k == 13) {
+            int lk = Op(12, 0, 0, 0)
+            Patch(lk, 1, Here() + 0)
+            int skip = Op(4, 0, 0, 0)
+            Patch(lk, 1, Here())
+            Emit(n.Child!)
+            Op(11, 0, 0, 0)
+            Patch(skip, 1, Here())
+            if (n.Negate) { Patch(lk, 2, 1) }
+            Patch(lk, 3, Here())
+            # the look-ahead op continues after the sub-program: its c operand is that address
+        }
+        else if (k == 14) { Op(15, 0, 0, 0) }
+        else if (k == 15) { if (n.Negate) { Op(16, 1, 0, 0) } else { Op(16, 0, 0, 0) } }
+    }
+
+    hidden method EmitRepeat(RNode n) {
+        RNode child = n.Child!
+        int i = 0
+        while (i < n.A) { Emit(child); i = i + 1 }
+        if (n.B < 0) {
+            # child* : L1: split L2, L3 ; L2: child ; jump L1 ; L3:
+            boolean empty = Nullable(child)
+            int reg = 0
+            int l1 = Op(3, 0, 0, 0)
+            if (empty) { reg = 2 * (groupCount + 1) + loopRegs; loopRegs = loopRegs + 1; Op(13, reg, 0, 0) }
+            int body = l1 + 1
+            Emit(child)
+            if (empty) { Op(14, reg, 0, 0) }
+            Op(4, l1, 0, 0)
+            int l3 = Here()
+            if (n.Greedy) { Patch(l1, 1, body); Patch(l1, 2, l3) } else { Patch(l1, 1, l3); Patch(l1, 2, body) }
+        } else {
+            array<int> splits = new array<int>(0)
+            int extra = n.B - n.A
+            int j = 0
+            while (j < extra) {
+                splits.push(Op(3, 0, 0, 0))
+                Emit(child)
+                j = j + 1
+            }
+            int end = Here()
+            in (var sidx of splits) {
+                if (n.Greedy) { Patch(sidx, 1, sidx + 1); Patch(sidx, 2, end) } else { Patch(sidx, 1, end); Patch(sidx, 2, sidx + 1) }
+            }
+        }
+    }
+
+    # ---------------------------------------------------------------- matching
+    hidden shared method Fold(int c): int {
+        if (c >= 65 && c <= 90) { return c + 32 }
+        if (c < 128) { return c }
+        if (c >= 192 && c <= 222 && c != 215) { return c + 32 }
+        if (c >= 913 && c <= 937) { return c + 32 }
+        if (c >= 1040 && c <= 1071) { return c + 32 }
+        if (c >= 1024 && c <= 1039) { return c + 80 }
+        return c
+    }
+    hidden shared method IsWord(int c): boolean {
+        if (c >= 48 && c <= 57) { return true }
+        if (c >= 65 && c <= 90) { return true }
+        if (c >= 97 && c <= 122) { return true }
+        if (c == 95) { return true }
+        return c >= 192 && c != 215 && c != 247
+    }
+
+    hidden method InClass(int cls, int c): boolean {
+        int start = classStart[cls]
+        int count = classLen[cls]
+        int f = classFlags[cls]
+        boolean hit = false
+        int i = 0
+        while (i < count && !hit) {
+            int lo = ranges[start + 2 * i]
+            int hi = ranges[start + 2 * i + 1]
+            if (c >= lo && c <= hi) { hit = true }
+            i = i + 1
+        }
+        if (!hit && f >= 2) {
+            int fc = Fold(c)
+            int alt = c
+            if (fc != c) { alt = fc }
+            else if (c >= 97 && c <= 122) { alt = c - 32 }
+            else if (c >= 224 && c <= 254 && c != 247) { alt = c - 32 }
+            else if (c >= 945 && c <= 969) { alt = c - 32 }
+            else if (c >= 1072 && c <= 1103) { alt = c - 32 }
+            else if (c >= 1104 && c <= 1119) { alt = c - 80 }
+            i = 0
+            while (i < count && !hit) {
+                if (alt >= ranges[start + 2 * i] && alt <= ranges[start + 2 * i + 1]) { hit = true }
+                i = i + 1
+            }
+        }
+        if (f % 2 == 1) { return !hit }
+        return hit
+    }
+
+    hidden method Push(int type, int x, int y) {
+        if (sp + 3 > st.length) { st.push(0); st.push(0); st.push(0) }
+        st[sp] = type
+        st[sp + 1] = x
+        st[sp + 2] = y
+        sp = sp + 3
+    }
+
+    hidden method Unwind(int to) {
+        while (sp > to) {
+            sp = sp - 3
+            if (st[sp] == 1) { regs[st[sp + 1]] = st[sp + 2] }
+        }
+    }
+
+    # Runs the program from instruction pc at text position pos; returns the end position or -1.
+    hidden method Run(array<int> inp, int n, int pc0, int pos0): int {
+        int baseSp = sp
+        int pc = pc0
+        int pos = pos0
+        while (true) {
+            steps = steps + 1
+            if (steps > StepLimit) { throw "Regex: the search took more than " + StepLimit + " steps (a pattern that backtracks too much?)" }
+            int at = pc * 4
+            int op = prog[at]
+            int a = prog[at + 1]
+            boolean ok = true
+            if (op == 0) {
+                if (pos < n && (inp[pos] == a || (prog[at + 2] == 1 && Fold(inp[pos]) == a))) { pos = pos + 1; pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 1) {
+                if (pos < n && (a == 1 || inp[pos] != 10)) { pos = pos + 1; pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 2) {
+                if (pos < n && InClass(a, inp[pos])) { pos = pos + 1; pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 3) { Push(0, prog[at + 2], pos); pc = a }
+            else if (op == 4) { pc = a }
+            else if (op == 5) { Push(1, a, regs[a]); regs[a] = pos; pc = pc + 1 }
+            else if (op == 6) {
+                if (pos == 0 || (a == 1 && inp[pos - 1] == 10)) { pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 7) {
+                if (pos == n || (a == 1 && inp[pos] == 10) || (a == 0 && pos == n - 1 && inp[pos] == 10)) { pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 8 || op == 9) {
+                boolean before = pos > 0 && IsWord(inp[pos - 1])
+                boolean after = pos < n && IsWord(inp[pos])
+                boolean boundary = before != after
+                if ((op == 8 && boundary) || (op == 9 && !boundary)) { pc = pc + 1 } else { ok = false }
+            }
+            else if (op == 10) {
+                int s = regs[2 * a]
+                int e = regs[2 * a + 1]
+                if (s < 0 || e < 0) { ok = false }
+                else {
+                    int len = e - s
+                    if (pos + len > n) { ok = false }
+                    else {
+                        int i = 0
+                        while (i < len && ok) {
+                            int x = inp[s + i]
+                            int y = inp[pos + i]
+                            if (x != y && !(prog[at + 2] == 1 && Fold(x) == Fold(y))) { ok = false }
+                            i = i + 1
+                        }
+                        if (ok) { pos = pos + len; pc = pc + 1 }
+                    }
+                }
+            }
+            else if (op == 11) { return pos }
+            else if (op == 12) {
+                int mark = sp
+                int e = Run(inp, n, pc + 2, pos)
+                if (prog[at + 2] == 1) {                       # negative look-ahead
+                    if (e >= 0) { Unwind(mark); ok = false } else { pc = prog[at + 3] }
+                } else {
+                    if (e < 0) { ok = false }
+                    else {
+                        # keep the group captures made inside, drop the alternatives that were left over
+                        int w = mark
+                        int r = mark
+                        while (r < sp) {
+                            if (st[r] == 1) { st[w] = 1; st[w + 1] = st[r + 1]; st[w + 2] = st[r + 2]; w = w + 3 }
+                            r = r + 3
+                        }
+                        sp = w
+                        pc = prog[at + 3]
+                    }
+                }
+            }
+            else if (op == 13) { Push(1, a, regs[a]); regs[a] = pos; pc = pc + 1 }
+            else if (op == 14) { if (regs[a] == pos) { ok = false } else { pc = pc + 1 } }
+            else if (op == 15) { if (pos == 0) { pc = pc + 1 } else { ok = false } }
+            else if (op == 16) {
+                if (pos == n || (a == 1 && pos == n - 1 && inp[pos] == 10)) { pc = pc + 1 } else { ok = false }
+            }
+            else { ok = false }
+
+            if (!ok) {
+                boolean resumed = false
+                while (sp > baseSp) {
+                    sp = sp - 3
+                    if (st[sp] == 1) { regs[st[sp + 1]] = st[sp + 2] }
+                    else { pc = st[sp + 1]; pos = st[sp + 2]; resumed = true; break }
+                }
+                if (!resumed) { return -1 }
+            }
+        }
+        return -1
+    }
+
+    # Tries to match starting at each position from `from` on. On success `regs` holds the groups; returns false otherwise.
+    hidden method Exec(array<int> inp, int from): boolean {
+        int n = inp.length
+        steps = 0
+        int s = from
+        while (s <= n) {
+            if (firstChar >= 0) {
+                while (s < n && inp[s] != firstChar) { s = s + 1 }
+                if (s >= n) { return false }
+            }
+            int i = 0
+            while (i < regs.length) { regs[i] = -1; i = i + 1 }
+            sp = 0
+            regs[0] = s
+            int e = Run(inp, n, 0, s)
+            if (e >= 0) { regs[1] = e; return true }
+            s = s + 1
+        }
+        return false
+    }
+
+    hidden method Build_Match(string input, int base): Match {
+        var m = new Match()
+        m.Success = true
+        int g = 0
+        while (g <= groupCount) {
+            var grp = new Group()
+            grp.Name = groupNames[g]
+            int s = regs[2 * g]
+            int e = regs[2 * g + 1]
+            if (g == 0) { s = regs[0]; e = regs[1] }
+            if (s >= 0 && e >= s) {
+                grp.Success = true
+                grp.Index = s
+                grp.Length = e - s
+                grp.Value = input.Substring(s, e - s)
+            }
+            m.Groups.push(grp)
+            g = g + 1
+        }
+        m.Index = m.Groups[0].Index
+        m.Length = m.Groups[0].Length
+        m.Value = m.Groups[0].Value
+        return m
+    }
+
+    # ---------------------------------------------------------------- public API
+    # true when the pattern matches anywhere in the text.
+    public method IsMatch(string input): boolean { return Exec(Encoding.CodePoints(input), 0) }
+
+    # The first match; its Success is false when there is none.
+    public method Match(string input): Match { return MatchFrom(input, 0) }
+
+    # The first match that starts at or after this position (in characters).
+    public method MatchFrom(string input, int start): Match {
+        array<int> inp = Encoding.CodePoints(input)
+        if (start < 0 || start > inp.length) { throw "Regex: the start position " + start + " is outside the text" }
+        if (!Exec(inp, start)) { return new Match() }
+        return Build_Match(input, 0)
+    }
+
+    # Every non-overlapping match, left to right.
+    public method Matches(string input): array<Match> {
+        array<Match> all = new array<Match>(0)
+        array<int> inp = Encoding.CodePoints(input)
+        int at = 0
+        while (at <= inp.length) {
+            if (!Exec(inp, at)) { break }
+            var m = Build_Match(input, 0)
+            all.push(m)
+            if (m.Length == 0) { at = m.Index + 1 } else { at = m.Index + m.Length }
+        }
+        return all
+    }
+
+    # Replaces every match. In the replacement $1 ... $99 and ${name} insert groups, $0 or $& the whole match, $$ is a dollar sign.
+    public method Replace(string input, string replacement): string { return ReplaceCount(input, replacement, -1) }
+    public method ReplaceFirst(string input, string replacement): string { return ReplaceCount(input, replacement, 1) }
+
+    hidden method Expand(Match m, string replacement): string {
+        array<int> r = Encoding.CodePoints(replacement)
+        array<int> out = new array<int>(0)
+        int i = 0
+        while (i < r.length) {
+            int c = r[i]
+            if (c == 36 && i + 1 < r.length) {
+                int d = r[i + 1]
+                if (d == 36) { out.push(36); i = i + 2; continue }
+                if (d == 38) { AppendText(out, m.Value); i = i + 2; continue }
+                if (d >= 48 && d <= 57) {
+                    int num = d - 48
+                    int used = 2
+                    if (i + 2 < r.length && r[i + 2] >= 48 && r[i + 2] <= 57 && num * 10 + (r[i + 2] - 48) <= groupCount) {
+                        num = num * 10 + (r[i + 2] - 48)
+                        used = 3
+                    }
+                    if (num <= groupCount) { AppendText(out, m.Text(num)); i = i + used; continue }
+                }
+                if (d == 123) {
+                    int close = i + 2
+                    while (close < r.length && r[close] != 125) { close = close + 1 }
+                    if (close < r.length) {
+                        array<int> nm = new array<int>(0)
+                        int q = i + 2
+                        while (q < close) { nm.push(r[q]); q = q + 1 }
+                        string name = Encoding.FromCodePoints(nm)
+                        int gn = GroupNumber(name)
+                        if (gn < 0 && name != "") {
+                            int d0 = int(name.CharAt(0))
+                            if (d0 >= 48 && d0 <= 57) { gn = int(name) }
+                        }
+                        if (gn < 0 || gn > groupCount) { throw "Regex: the replacement refers to the group '" + name + "', which does not exist" }
+                        AppendText(out, m.Text(gn))
+                        i = close + 1
+                        continue
+                    }
+                }
+            }
+            out.push(c)
+            i = i + 1
+        }
+        return Encoding.FromCodePoints(out)
+    }
+    hidden method AppendText(array<int> out, string text) {
+        in (var c of Encoding.CodePoints(text)) { out.push(c) }
+    }
+
+    hidden method ReplaceCount(string input, string replacement, int limit): string {
+        array<int> inp = Encoding.CodePoints(input)
+        array<string> pieces = new array<string>(0)
+        int at = 0
+        int copied = 0
+        int done = 0
+        while (at <= inp.length && (limit < 0 || done < limit)) {
+            if (!Exec(inp, at)) { break }
+            var m = Build_Match(input, 0)
+            pieces.push(input.Substring(copied, m.Index - copied))
+            pieces.push(Expand(m, replacement))
+            copied = m.Index + m.Length
+            done = done + 1
+            if (m.Length == 0) { at = m.Index + 1 } else { at = copied }
+        }
+        pieces.push(input.Substring(copied, inp.length - copied))
+        return Join(pieces)
+    }
+
+    # Cuts the text at every match (the matches themselves are dropped).
+    public method Split(string input): array<string> {
+        array<int> inp = Encoding.CodePoints(input)
+        array<string> parts = new array<string>(0)
+        int at = 0
+        int copied = 0
+        while (at <= inp.length) {
+            if (!Exec(inp, at)) { break }
+            var m = Build_Match(input, 0)
+            if (m.Length == 0) {
+                if (m.Index >= inp.length) { break }
+                at = m.Index + 1
+                if (m.Index == 0) { continue }
+            } else { at = m.Index + m.Length }
+            parts.push(input.Substring(copied, m.Index - copied))
+            copied = m.Index + m.Length
+        }
+        parts.push(input.Substring(copied, inp.length - copied))
+        return parts
+    }
+
+    hidden shared method Join(array<string> pieces): string {
+        array<string> level = pieces
+        while (level.length > 1) {
+            array<string> next = new array<string>(0)
+            int i = 0
+            while (i < level.length) {
+                if (i + 1 < level.length) { next.push(level[i] + level[i + 1]) } else { next.push(level[i]) }
+                i = i + 2
+            }
+            level = next
+        }
+        if (level.length == 0) { return "" }
+        return level[0]
+    }
+
+    # ---------------------------------------------------------------- shortcuts
+    public shared method IsMatchText(string input, string patternText): boolean { return new Regex(patternText).IsMatch(input) }
+    public shared method ReplaceText(string input, string patternText, string replacement): string { return new Regex(patternText).Replace(input, replacement) }
+    # Puts a backslash before every character that has a meaning in a pattern, so the text matches itself literally.
+    public shared method Escape(string text): string {
+        array<int> out = new array<int>(0)
+        in (var c of Encoding.CodePoints(text)) {
+            if (c == 92 || c == 42 || c == 43 || c == 63 || c == 46 || c == 40 || c == 41 || c == 91 || c == 93 || c == 123 || c == 125 || c == 124 || c == 94 || c == 36) { out.push(92) }
+            out.push(c)
+        }
+        return Encoding.FromCodePoints(out)
+    }
+}

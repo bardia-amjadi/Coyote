@@ -1,40 +1,107 @@
-# Standard.Text extension methods: every Text function can also be called on the string itself, for example "hi".Upper() or "a,b".Split(",").
-# Extension names are plain global names; if one clashes with your own method, call the Text class form (Text.Upper(s)) and rename yours.
+# Standard.Text: string functions as extension methods, for example "hi".Upper(), "a,b".Split(",") or parts.Join(", ").
+# Positions and lengths count characters (code points), not bytes.
+# Extension names are plain global names; if one clashes with your own method, rename yours.
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text charAt(string s, int index): char
+hand:text indexOf(string s, string part): int
+hand:text upper(string s): string
+hand:text lower(string s): string
+hand:text trim(string s): string
+hand:text replace(string s, string find, string with): string
 
 # Number of characters.
-public method Length(here string s): int { return Text.Length(s) }
+public method Length(here string s): int { return length(s) }
 # true for "".
-public method IsEmpty(here string s): boolean { return Text.IsEmpty(s) }
+public method IsEmpty(here string s): boolean { return length(s) == 0 }
 # true for "" or only spaces, tabs and line breaks.
-public method IsBlank(here string s): boolean { return Text.IsBlank(s) }
+public method IsBlank(here string s): boolean { return length(trim(s)) == 0 }
 # count characters from start; a runtime error when start is outside the text.
-public method Substring(here string s, int start, int count): string { return Text.Substring(s, start, count) }
+public method Substring(here string s, int start, int count): string { return substring(s, start, count) }
 # The character at an index.
-public method CharAt(here string s, int index): char { return Text.CharAt(s, index) }
+public method CharAt(here string s, int index): char { return charAt(s, index) }
 # Index of the first occurrence of part, or -1.
-public method IndexOf(here string s, string part): int { return Text.IndexOf(s, part) }
+public method IndexOf(here string s, string part): int { return indexOf(s, part) }
 # true when part occurs in s.
-public method Contains(here string s, string part): boolean { return Text.Contains(s, part) }
-public method StartsWith(here string s, string prefix): boolean { return Text.StartsWith(s, prefix) }
-public method EndsWith(here string s, string suffix): boolean { return Text.EndsWith(s, suffix) }
+public method Contains(here string s, string part): boolean { return indexOf(s, part) >= 0 }
+public method StartsWith(here string s, string prefix): boolean {
+    int n = length(prefix)
+    if (n > length(s)) { return false }
+    return substring(s, 0, n) == prefix
+}
+public method EndsWith(here string s, string suffix): boolean {
+    int n = length(suffix)
+    int total = length(s)
+    if (n > total) { return false }
+    return substring(s, total - n, n) == suffix
+}
 # ASCII letters only.
-public method Upper(here string s): string { return Text.Upper(s) }
-public method Lower(here string s): string { return Text.Lower(s) }
+public method Upper(here string s): string { return upper(s) }
+public method Lower(here string s): string { return lower(s) }
 # Removes spaces, tabs and line breaks at both ends.
-public method Trim(here string s): string { return Text.Trim(s) }
+public method Trim(here string s): string { return trim(s) }
 # Replaces every occurrence of find (not empty) with with.
-public method Replace(here string s, string find, string with): string { return Text.Replace(s, find, with) }
+public method Replace(here string s, string find, string with): string { return replace(s, find, with) }
 # s repeated times times.
-public method Repeat(here string s, int times): string { return Text.Repeat(s, times) }
+public method Repeat(here string s, int times): string {
+    string r = ""
+    int i = 0
+    while (i < times) {
+        r = r + s
+        i = i + 1
+    }
+    return r
+}
 # Pads on the left with pad (one or more characters) until the text is at least width characters.
-public method PadLeft(here string s, int width, string pad): string { return Text.PadLeft(s, width, pad) }
-public method PadRight(here string s, int width, string pad): string { return Text.PadRight(s, width, pad) }
+public method PadLeft(here string s, int width, string pad): string {
+    string r = s
+    while (length(r) < width) { r = pad + r }
+    return r
+}
+public method PadRight(here string s, int width, string pad): string {
+    string r = s
+    while (length(r) < width) { r = r + pad }
+    return r
+}
 # The characters in reverse order.
-public method Reverse(here string s): string { return Text.Reverse(s) }
+public method Reverse(here string s): string {
+    string r = ""
+    int i = length(s)
+    while (i > 0) {
+        r = r + substring(s, i - 1, 1)
+        i = i - 1
+    }
+    return r
+}
 # Cuts s at every occurrence of sep (not empty). "a,b,,c" split at "," -> ["a", "b", "", "c"].
-public method Split(here string s, string sep): array<string> { return Text.Split(s, sep) }
+public method Split(here string s, string sep): array<string> {
+    array<string> parts = new array<string>(0)
+    int sl = length(sep)
+    if (sl == 0) {
+        parts.push(s)
+        return parts
+    }
+    string rest = s
+    int at = indexOf(rest, sep)
+    while (at >= 0) {
+        parts.push(substring(rest, 0, at))
+        rest = substring(rest, at + sl, length(rest) - at - sl)
+        at = indexOf(rest, sep)
+    }
+    parts.push(rest)
+    return parts
+}
 # The parts joined with sep between them.
-public method Join(here array<string> parts, string sep): string { return Text.Join(parts, sep) }
+public method Join(here array<string> parts, string sep): string {
+    string r = ""
+    int i = 0
+    while (i < parts.length) {
+        if (i > 0) { r = r + sep }
+        r = r + parts[i]
+        i = i + 1
+    }
+    return r
+}
 # The text parsed as an int (a runtime error when it is not a number).
 public method ToInt(here string s): int { return int(s) }
 # The text parsed as a double.

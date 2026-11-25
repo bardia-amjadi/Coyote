@@ -6,8 +6,11 @@ hand:file exists(string path): boolean
 hand:file delete(string path): boolean
 hand:file copy(string from, string to)
 hand:file move(string from, string to)
-hand:file size(string path): int
-hand:file modified(string path): int
+hand:file size(string path): long
+hand:file modified(string path): long
+hand:file readBytes(string path): array<byte>
+hand:file writeBytes(string path, array<byte> data)
+hand:file appendBytes(string path, array<byte> data)
 hand:file fullPath(string path): string
 hand:text length(string s): int
 hand:text substring(string s, int start, int count): string
@@ -53,6 +56,12 @@ public class File {
     public shared method AppendAllText(string path, string text) { append(path, text) }
     # Adds one line (with a line break) at the end of the file.
     public shared method AppendLine(string path, string line) { append(path, line + "\n") }
+    # The whole file as bytes (up to the read limit).
+    public shared method ReadAllBytes(string path): array<byte> { return readBytes(path) }
+    # Replaces the file with these bytes.
+    public shared method WriteAllBytes(string path, array<byte> data) { writeBytes(path, data) }
+    # Adds these bytes to the end of the file.
+    public shared method AppendBytes(string path, array<byte> data) { appendBytes(path, data) }
     # true when the path is an existing file.
     public shared method Exists(string path): boolean { return exists(path) }
     # Deletes a file; false when it did not exist.
@@ -61,10 +70,10 @@ public class File {
     public shared method Copy(string from, string to) { copy(from, to) }
     # Moves or renames a file.
     public shared method Move(string from, string to) { move(from, to) }
-    # Size in bytes (files up to 2 GiB).
-    public shared method Size(string path): int { return size(path) }
+    # Size in bytes.
+    public shared method Size(string path): long { return size(path) }
     # Last change as Unix seconds.
-    public shared method ModifiedUnix(string path): int { return modified(path) }
+    public shared method ModifiedUnix(string path): long { return modified(path) }
     # The absolute form of a path.
     public shared method FullPath(string path): string { return fullPath(path) }
 }

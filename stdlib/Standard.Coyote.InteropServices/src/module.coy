@@ -1,0 +1,106 @@
+# Standard.Coyote.InteropServices: load another compiled Coyote program (a ".ml" file) while this one runs, run it, or call
+# its functions by name with text, number or boolean arguments. Needs the "interop" permission (granted by `coyote run` and Studio).
+# The loaded program runs inside this runtime with its own memory; every Run or Call starts with fresh global variables, and
+# what it prints is captured (see Output) instead of appearing on the console.
+# The compiler removes methods that nothing calls: build plugins with `coyote build --keep-unused` (CoyoteProgram.FromSource does).
+hand:coy load(string path): int
+hand:coy unload(int handle)
+hand:coy run(int handle): int
+hand:coy output(): string
+hand:coy error(): string
+hand:coy funcCount(int handle): int
+hand:coy funcName(int handle, int index): string
+hand:coy funcSig(int handle, int index): string
+hand:coy call(int handle, string name, string args): string
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+
+# What a whole program run produced.
+public class ProgramResult {
+    public field int ExitCode = 0
+    public field string Output = ""
+    # The runtime error that stopped it, "" when it ended normally.
+    public field string Error = ""
+    public method Succeeded(): boolean { return ExitCode == 0 && Error == "" }
+}
+
+public class CoyoteModule {
+    public readonly field int Handle = -1
+    public readonly field string Path = ""
+    hidden field string lastOutput = ""
+
+    constructor(int handle, string path) {
+        Handle = handle
+        Path = path
+    }
+
+    # Loads and verifies an ML file. A file that is not valid ML stops with the loader's message.
+    public shared method Load(string path): CoyoteModule { return new CoyoteModule(load(path), path) }
+
+    # Runs the program from its start; what it printed is in Output.
+    public method Run(): ProgramResult {
+        var r = new ProgramResult()
+        r.ExitCode = run(Handle)
+        r.Output = output()
+        r.Error = error()
+        lastOutput = r.Output
+        return r
+    }
+
+    # Every function of the program as "name(type, type): result" (class methods and compiler helpers included).
+    public method Functions(): array<string> {
+        array<string> r = new array<string>(0)
+        int n = funcCount(Handle)
+        int i = 0
+        while (i < n) {
+            string sig = funcSig(Handle, i)
+            r.push(funcName(Handle, i) + "(" + Params(sig) + "): " + Result(sig))
+            i = i + 1
+        }
+        return r
+    }
+    hidden shared method Params(string sig): string { return Cut(sig, true) }
+    hidden shared method Result(string sig): string { return Cut(sig, false) }
+    hidden shared method Cut(string sig, boolean first): string {
+        # the signature text is "p1,p2:ret"; a function type inside may contain ':' too, so cut at the last one
+        int at = -1
+        int i = 0
+        int n = length(sig)
+        while (i < n) { if (Sub(sig, i, 1) == ":") { at = i } i = i + 1 }
+        if (at < 0) { return sig }
+        if (first) { return Sub(sig, 0, at) }
+        return Sub(sig, at + 1, n - at - 1)
+    }
+    hidden shared method Sub(string s, int a, int n): string { return substring(s, a, n) }
+
+    public method Has(string name): boolean {
+        int n = funcCount(Handle)
+        int i = 0
+        while (i < n) { if (funcName(Handle, i) == name) { return true } i = i + 1 }
+        return false
+    }
+
+    hidden shared method Pack(array<string> args): string {
+        string r = ""
+        in (var a of args) { r = r + length(a) + ":" + a }
+        return r
+    }
+
+    # Calls a function with its arguments written as text (int: "42", boolean: "true", double: "1.5", string: as is) and
+    # returns the result as text ("" for a function without a result). Only int, boolean, double and string parameters
+    # and results can cross. A runtime error inside the function becomes an error here that can be caught.
+    public method Call(string name, array<string> args): string {
+        string r = call(Handle, name, Pack(args))
+        lastOutput = output()
+        return r
+    }
+    public method CallInt(string name, array<string> args): int { return int(Call(name, args)) }
+    public method CallBool(string name, array<string> args): boolean { return Call(name, args) == "true" }
+    public method CallDouble(string name, array<string> args): double { return double(Call(name, args)) }
+
+    # What the last Run or Call printed.
+    public method Output(): string { return lastOutput }
+
+    # Frees the loaded program; the module cannot be used afterwards.
+    public method Unload() { unload(Handle) }
+}

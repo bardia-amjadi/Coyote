@@ -1,0 +1,170 @@
+# Standard.Configuration: settings files. The format is the common INI style:
+#     # a comment (also ';')
+#     name = Coyote            <- a setting without a section
+#     [server]                 <- starts section "server"
+#     port = 8080              <- setting "server.port"
+# Needs the "file" permission to Load and Save, and the "system" permission for WithEnvironment.
+hand:file readAll(string path): string
+hand:file writeAll(string path, string text)
+hand:file exists(string path): boolean
+hand:env get(string name): string
+hand:env has(string name): boolean
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text indexOf(string s, string part): int
+hand:text trim(string s): string
+hand:text lower(string s): string
+hand:text upper(string s): string
+hand:text replace(string s, string find, string with): string
+
+public class Configuration {
+    hidden field array<string> keys = new array<string>(0)
+    hidden field array<string> values = new array<string>(0)
+    hidden field string envPrefix = ""
+    hidden field boolean useEnv = false
+
+    # Reads a settings file; a missing file stops with a clear message (see LoadOrEmpty).
+    public shared method Load(string path): Configuration {
+        if (!exists(path)) { throw "Configuration: the file '" + path + "' does not exist" }
+        return Parse(readAll(path))
+    }
+    # Reads a settings file, or returns an empty configuration when it does not exist.
+    public shared method LoadOrEmpty(string path): Configuration {
+        if (!exists(path)) { return new Configuration() }
+        return Parse(readAll(path))
+    }
+    public shared method Parse(string text): Configuration {
+        var c = new Configuration()
+        string section = ""
+        int n = length(text)
+        int start = 0
+        int lineNo = 0
+        while (start < n) {
+            int at = indexOf(substring(text, start, n - start), "\n")
+            string line = ""
+            if (at < 0) { line = substring(text, start, n - start); start = n }
+            else { line = substring(text, start, at); start = start + at + 1 }
+            lineNo = lineNo + 1
+            line = trim(replace(line, "\r", ""))
+            if (length(line) == 0) { continue }
+            string first = substring(line, 0, 1)
+            if (first == "#" || first == ";") { continue }
+            if (first == "[") {
+                if (substring(line, length(line) - 1, 1) != "]") { throw "Configuration: line " + lineNo + ": a section needs a closing ]" }
+                section = trim(substring(line, 1, length(line) - 2))
+                continue
+            }
+            int eq = indexOf(line, "=")
+            if (eq <= 0) { throw "Configuration: line " + lineNo + ": expected 'name = value'" }
+            string name = trim(substring(line, 0, eq))
+            string value = trim(substring(line, eq + 1, length(line) - eq - 1))
+            if (length(value) >= 2 && substring(value, 0, 1) == "\"" && substring(value, length(value) - 1, 1) == "\"") {
+                value = substring(value, 1, length(value) - 2)
+            }
+            if (section != "") { name = section + "." + name }
+            c.Set(name, value)
+        }
+        return c
+    }
+
+    # Lets environment variables override settings: setting "server.port" is read from PREFIXSERVER_PORT
+    # (upper case, '.' and '-' become '_').
+    public method WithEnvironment(string prefix): Configuration {
+        envPrefix = prefix
+        useEnv = true
+        return here
+    }
+    hidden method EnvName(string key): string {
+        return envPrefix + replace(replace(upper(key), ".", "_"), "-", "_")
+    }
+    hidden method IndexOf(string key): int {
+        int i = 0
+        while (i < keys.length) { if (keys[i] == key) { return i } i = i + 1 }
+        return -1
+    }
+    public method Has(string key): boolean {
+        if (useEnv && has(EnvName(key))) { return true }
+        return IndexOf(key) >= 0
+    }
+    public method Get(string key): string {
+        if (useEnv && has(EnvName(key))) { return get(EnvName(key)) }
+        int i = IndexOf(key)
+        if (i < 0) { throw "Configuration: there is no setting '" + key + "'" }
+        return values[i]
+    }
+    public method GetOr(string key, string fallback): string { if (Has(key)) { return Get(key) } return fallback }
+    public method GetInt(string key, int fallback): int {
+        if (!Has(key)) { return fallback }
+        string v = Get(key)
+        try { return int(v) } catch (e) { throw "Configuration: setting '" + key + "' is '" + v + "', not a whole number" }
+    }
+    public method GetDouble(string key, double fallback): double {
+        if (!Has(key)) { return fallback }
+        string v = Get(key)
+        try { return double(v) } catch (e) { throw "Configuration: setting '" + key + "' is '" + v + "', not a number" }
+    }
+    # true/yes/on/1 and false/no/off/0 (any case).
+    public method GetBool(string key, boolean fallback): boolean {
+        if (!Has(key)) { return fallback }
+        string v = lower(Get(key))
+        if (v == "true" || v == "yes" || v == "on" || v == "1") { return true }
+        if (v == "false" || v == "no" || v == "off" || v == "0") { return false }
+        throw "Configuration: setting '" + key + "' is '" + v + "', not true or false"
+    }
+    public method Set(string key, string value) {
+        int i = IndexOf(key)
+        if (i >= 0) { values[i] = value } else { keys.push(key); values.push(value) }
+    }
+    public method Remove(string key): boolean {
+        int i = IndexOf(key)
+        if (i < 0) { return false }
+        array<string> nk = new array<string>(0)
+        array<string> nv = new array<string>(0)
+        int j = 0
+        while (j < keys.length) { if (j != i) { nk.push(keys[j]); nv.push(values[j]) } j = j + 1 }
+        keys = nk
+        values = nv
+        return true
+    }
+    # All setting names, in file order.
+    public method Keys(): array<string> {
+        array<string> r = new array<string>(0)
+        in (var k of keys) { r.push(k) }
+        return r
+    }
+    public method Count(): int { return keys.length }
+    # The settings as file text: settings without a dot first, then one [section] per prefix.
+    public method ToText(): string {
+        string text = ""
+        array<string> done = new array<string>(0)
+        int i = 0
+        while (i < keys.length) {
+            if (indexOf(keys[i], ".") < 0) { text = text + keys[i] + " = " + values[i] + "\n" }
+            i = i + 1
+        }
+        i = 0
+        while (i < keys.length) {
+            int dot = indexOf(keys[i], ".")
+            if (dot >= 0) {
+                string sec = substring(keys[i], 0, dot)
+                boolean seen = false
+                in (var d of done) { if (d == sec) { seen = true } }
+                if (!seen) {
+                    done.push(sec)
+                    text = text + "\n[" + sec + "]\n"
+                    int j = 0
+                    while (j < keys.length) {
+                        int dj = indexOf(keys[j], ".")
+                        if (dj >= 0 && substring(keys[j], 0, dj) == sec) {
+                            text = text + substring(keys[j], dj + 1, length(keys[j]) - dj - 1) + " = " + values[j] + "\n"
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+        return text
+    }
+    public method Save(string path) { writeAll(path, ToText()) }
+}

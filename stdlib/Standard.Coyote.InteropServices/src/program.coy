@@ -1,0 +1,21 @@
+# Standard.Coyote.InteropServices, part 3: compile and load in one step.
+hand:file exists(string path): boolean
+hand:sys os(): string
+hand:env get(string name): string
+hand:env has(string name): boolean
+hand:time uptimeMs(): long
+hand:proc pid(): int
+
+public class CoyoteProgram {
+    # Compiles a .coy file next to the temporary folder and loads the result: CoyoteProgram.FromSource("plugin.coy").Call("Add", ["1", "2"]).
+    public shared method FromSource(string source): CoyoteModule {
+        string tmp = "."
+        if (has("TEMP") && get("TEMP") != "") { tmp = get("TEMP") }
+        else if (has("TMPDIR") && get("TMPDIR") != "") { tmp = get("TMPDIR") }
+        else if (os() != "windows") { tmp = "/tmp" }
+        string ml = tmp + "/coyote-interop-" + pid() + "-" + uptimeMs() + ".ml"
+        string errors = CoyoteCompiler.Build(source, ml)
+        if (errors != "") { throw "CoyoteProgram: cannot compile '" + source + "':\n" + errors }
+        return CoyoteModule.Load(ml)
+    }
+}

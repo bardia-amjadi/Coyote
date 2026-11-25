@@ -8,11 +8,6 @@ hand:win regDeleteKey(string key)
 hand:win regSubKeys(string key): string
 hand:win regValues(string key): string
 hand:win processList(): string
-hand:win processStart(string program, string arguments): int
-hand:win processRun(string program, string arguments, int timeoutMillis): int
-hand:win processIsRunning(int id): boolean
-hand:win processKill(int id): boolean
-hand:win processId(): int
 hand:win shellOpen(string target): boolean
 hand:win windowList(): string
 hand:win windowFind(string title): int
@@ -85,17 +80,6 @@ model ProcessInfo {
 }
 
 public class Processes {
-    # The id of this program's own process.
-    public shared method CurrentId(): int { return processId() }
-    # Starts a program and returns at once with its process id.
-    public shared method Start(string program, string arguments): int { return processStart(program, arguments) }
-    # Starts a program, waits for it and returns its exit code. `timeoutMillis` 0 waits for ever; after the timeout
-    # the call is a runtime error and the program keeps running.
-    public shared method Run(string program, string arguments, int timeoutMillis): int { return processRun(program, arguments, timeoutMillis) }
-    public shared method Run(string program, string arguments): int { return processRun(program, arguments, 0) }
-    public shared method IsRunning(int id): boolean { return processIsRunning(id) }
-    # Ends a process immediately (not possible for this program itself).
-    public shared method Kill(int id): boolean { return processKill(id) }
     # Opens a file, folder or web address with its default program.
     public shared method Open(string target): boolean { return shellOpen(target) }
     # Every running process.

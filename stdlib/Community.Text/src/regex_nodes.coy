@@ -1,0 +1,36 @@
+# Community.Text: the regular expression engine. Written in Coyote on top of Standard.Text and Standard.Encoding only
+# (no host functions), so it is compiled into every program that uses it.
+use "Standard.Text"
+use "Standard.Encoding"
+
+# The result of one group in a match.
+public class Group {
+    public field boolean Success = false
+    public field string Name = ""
+    public field string Value = ""
+    # Position (in characters) where the group starts, -1 when it did not take part in the match.
+    public field int Index = -1
+    public field int Length = 0
+}
+
+# One match of a pattern in a text.
+public class Match {
+    public field boolean Success = false
+    public field string Value = ""
+    public field int Index = -1
+    public field int Length = 0
+    # Group 0 is the whole match, then the capturing groups in the order of their opening parentheses.
+    public field array<Group> Groups = new array<Group>(0)
+
+    public method GetGroup(int number): Group {
+        if (number < 0 || number >= Groups.length) { return new Group() }
+        return Groups[number]
+    }
+    # The group with this name ((?<name>...)); an unknown name gives a group that did not succeed.
+    public method GetNamed(string name): Group {
+        in (var g of Groups) { if (g.Name == name) { return g } }
+        return new Group()
+    }
+    # The text of group number (empty when it did not take part).
+    public method Text(int number): string { return GetGroup(number).Value }
+}

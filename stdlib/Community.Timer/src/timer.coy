@@ -1,0 +1,176 @@
+# Community.Timer: stopwatches and timers. Written in Coyote on top of Standard.Time (no host functions).
+# Coyote programs run on one thread, so timers are cooperative: they fire while the program runs a timer loop
+# (Timers.Run, Timer.RunAll ...), never in the background.
+#
+#     Timer.Every(500, () => Shell.PrintLine("tick"))
+#     Timer.After(2000, () => Shell.PrintLine("done"))
+#     Timer.RunAll()            # runs until no timer is left; Every timers need Timer.StopAll() from a callback
+use "Standard.Time"
+
+# Measures elapsed time.
+public class Stopwatch {
+    hidden field long startedAt = 0
+    hidden field long accumulated = 0
+    hidden field boolean running = false
+
+    public shared method StartNew(): Stopwatch {
+        var s = new Stopwatch()
+        s.Start()
+        return s
+    }
+    public method Start() {
+        if (running) { return }
+        startedAt = Time.UptimeMs()
+        running = true
+    }
+    public method Stop() {
+        if (!running) { return }
+        accumulated = accumulated + (Time.UptimeMs() - startedAt)
+        running = false
+    }
+    public method Reset() {
+        accumulated = 0
+        running = false
+    }
+    public method Restart() {
+        Reset()
+        Start()
+    }
+    public method IsRunning(): boolean { return running }
+    # Milliseconds measured so far.
+    public method ElapsedMs(): long {
+        if (running) { return accumulated + (Time.UptimeMs() - startedAt) }
+        return accumulated
+    }
+    public method ElapsedSeconds(): double { return double(ElapsedMs()) / 1000.0 }
+}
+
+# Calls a function once or again and again. A timer belongs to a Timers loop (the default one, Timers.Default(), unless you
+# add it to your own).
+public class Timer {
+    public field string Name = ""
+    # Milliseconds between two calls (or until the one call).
+    public field int Interval = 1000
+    public field boolean Repeat = false
+    hidden field fn() callback = () => { }
+    hidden field long dueAt = 0
+    hidden field boolean active = false
+    hidden field int fired = 0
+
+    constructor(int intervalMs, fn() action) {
+        Interval = intervalMs
+        callback = action
+    }
+
+    # A timer that calls the function once after this many milliseconds. It is started and added to the default loop.
+    public shared method After(int ms, fn() action): Timer {
+        var t = new Timer(ms, action)
+        Timers.Default().Add(t)
+        return t
+    }
+    # A timer that calls the function every this many milliseconds until it is stopped.
+    public shared method Every(int ms, fn() action): Timer {
+        var t = new Timer(ms, action)
+        t.Repeat = true
+        Timers.Default().Add(t)
+        return t
+    }
+    # Runs the default loop until no active timer is left.
+    public shared method RunAll() { Timers.Default().Run() }
+    # Stops every timer of the default loop.
+    public shared method StopAll() { Timers.Default().StopAll() }
+
+    public method IsActive(): boolean { return active }
+    # How often the function was called.
+    public method FiredCount(): int { return fired }
+    public method Stop() { active = false }
+    # (Re)starts the timer: it is due Interval milliseconds from now. It must belong to a loop (Timers.Add) to be called.
+    public method Start() {
+        dueAt = Time.UptimeMs() + Interval
+        active = true
+    }
+    public method DueIn(): long { return dueAt - Time.UptimeMs() }
+    public method Fire() {
+        fired = fired + 1
+        if (Repeat) { dueAt = dueAt + Interval } else { active = false }
+        here.callback()
+    }
+}
+
+# A set of timers and the loop that calls them.
+public class Timers {
+    hidden shared field Timers? defaultLoop = null
+    hidden field array<Timer> items = new array<Timer>(0)
+    hidden field boolean stopRequested = false
+
+    # The loop that Timer.After / Timer.Every use.
+    public shared method Default(): Timers {
+        if (defaultLoop == null) { defaultLoop = new Timers() }
+        return defaultLoop!
+    }
+    # Adds a timer to this loop and starts it.
+    public method Add(Timer t): Timer {
+        items.push(t)
+        t.Start()
+        return t
+    }
+    public method Count(): int {
+        int n = 0
+        in (var t of items) { if (t.IsActive()) { n = n + 1 } }
+        return n
+    }
+    public method StopAll() {
+        in (var t of items) { t.Stop() }
+    }
+    # Ends Run / RunFor after the callback that is running now.
+    public method RequestStop() { stopRequested = true }
+
+    hidden method Prune() {
+        array<Timer> keep = new array<Timer>(0)
+        in (var t of items) { if (t.IsActive()) { keep.push(t) } }
+        items = keep
+    }
+
+    # Calls every timer that is due; returns the milliseconds until the next one is due, or -1 when no timer is active.
+    public method RunOnce(): int {
+        array<Timer> due = new array<Timer>(0)
+        in (var t of items) { if (t.IsActive() && t.DueIn() <= 0) { due.push(t) } }
+        in (var d of due) { if (d.IsActive()) { d.Fire() } }
+        Prune()
+        int next = -1
+        in (var t2 of items) {
+            if (t2.IsActive()) {
+                int w = int(t2.DueIn())
+                if (w < 0) { w = 0 }
+                if (next < 0 || w < next) { next = w }
+            }
+        }
+        return next
+    }
+
+    # Runs the loop until no timer is active (or RequestStop was called).
+    public method Run() {
+        stopRequested = false
+        while (!stopRequested) {
+            int wait = RunOnce()
+            if (wait < 0) { break }
+            if (wait > 0 && !stopRequested) {
+                if (wait > 50) { wait = 50 }
+                Time.Sleep(wait)
+            }
+        }
+    }
+    # Runs the loop for at most this many milliseconds.
+    public method RunFor(int ms) {
+        stopRequested = false
+        var watch = Stopwatch.StartNew()
+        while (!stopRequested && watch.ElapsedMs() < ms) {
+            int wait = RunOnce()
+            int left = ms - int(watch.ElapsedMs())
+            if (left <= 0) { break }
+            if (wait < 0 || wait > left) { wait = left }
+            if (wait > 50) { wait = 50 }
+            if (wait > 0) { Time.Sleep(wait) }
+        }
+    }
+}

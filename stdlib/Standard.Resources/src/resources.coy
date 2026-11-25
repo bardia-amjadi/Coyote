@@ -1,0 +1,109 @@
+# Standard.Resources: files that ship with your program (texts, templates, translations) and string tables.
+# Resources live in a folder, "resources" next to where the program runs by default; change it with Resources.SetRoot.
+# Needs the "file" permission.
+hand:file readAll(string path): string
+hand:file exists(string path): boolean
+hand:dir list(string path): string
+hand:text length(string s): int
+hand:text substring(string s, int start, int count): string
+hand:text indexOf(string s, string part): int
+hand:text trim(string s): string
+hand:text replace(string s, string find, string with): string
+
+method lines(string text): array<string> {
+    array<string> parts = new array<string>(0)
+    int start = 0
+    int n = length(text)
+    while (start < n) {
+        int at = indexOf(substring(text, start, n - start), "\n")
+        string line = ""
+        if (at < 0) { line = substring(text, start, n - start); start = n }
+        else { line = substring(text, start, at); start = start + at + 1 }
+        parts.push(replace(line, "\r", ""))
+    }
+    return parts
+}
+
+public class Resources {
+    hidden shared field string root = "resources"
+
+    # The folder the resources are read from.
+    public shared method Root(): string { return root }
+    public shared method SetRoot(string folder) { root = folder }
+    public shared method PathOf(string name): string {
+        if (length(root) == 0) { return name }
+        string last = substring(root, length(root) - 1, 1)
+        if (last == "/" || last == "\\") { return root + name }
+        return root + "/" + name
+    }
+    public shared method Exists(string name): boolean { return exists(PathOf(name)) }
+    # The text of a resource; a missing resource stops with a clear message (test with Exists first).
+    public shared method Text(string name): string {
+        if (!exists(PathOf(name))) { throw "Resources: there is no resource '" + name + "' in '" + root + "'" }
+        return readAll(PathOf(name))
+    }
+    public shared method Lines(string name): array<string> { return lines(Text(name)) }
+    # The names of all resources in the folder.
+    public shared method Names(): array<string> { return NamesIn(root) }
+    # The entry names of any folder, one per item; an empty list when the folder does not exist.
+    public shared method NamesIn(string folder): array<string> {
+        array<string> r = new array<string>(0)
+        string all = ""
+        try { all = list(folder) } catch (e) { return r }
+        int n = length(all)
+        int start = 0
+        while (start < n) {
+            int at = indexOf(substring(all, start, n - start), "\n")
+            string line = ""
+            if (at < 0) { line = substring(all, start, n - start); start = n }
+            else { line = substring(all, start, at); start = start + at + 1 }
+            line = replace(line, "\r", "")
+            if (line != "") { r.push(line) }
+        }
+        return r
+    }
+}
+
+# A table of texts read from "name.properties" (lines "key = value", '#' starts a comment) with an optional language:
+# ResourceBundle.Load("messages", "fa") reads messages.fa.properties first and falls back to messages.properties.
+public class ResourceBundle {
+    hidden field array<string> keys = new array<string>(0)
+    hidden field array<string> values = new array<string>(0)
+
+    public shared method Load(string name, string language): ResourceBundle {
+        var b = new ResourceBundle()
+        if (language != "") { b.Read(name + "." + language + ".properties") }
+        b.Read(name + ".properties")
+        return b
+    }
+    hidden method Read(string file) {
+        if (!Resources.Exists(file)) { return }
+        in (var raw of Resources.Lines(file)) {
+            string line = trim(raw)
+            if (length(line) == 0 || substring(line, 0, 1) == "#") { continue }
+            int eq = indexOf(line, "=")
+            if (eq <= 0) { continue }
+            string key = trim(substring(line, 0, eq))
+            if (!Has(key)) { keys.push(key); values.push(trim(substring(line, eq + 1, length(line) - eq - 1))) }
+        }
+    }
+    public method Has(string key): boolean {
+        int i = 0
+        while (i < keys.length) { if (keys[i] == key) { return true } i = i + 1 }
+        return false
+    }
+    public method Get(string key): string {
+        int i = 0
+        while (i < keys.length) { if (keys[i] == key) { return values[i] } i = i + 1 }
+        throw "ResourceBundle: there is no text '" + key + "'"
+    }
+    public method GetOr(string key, string fallback): string { if (Has(key)) { return Get(key) } return fallback }
+    # The text with {0}, {1}, ... replaced by the arguments.
+    public method Format(string key, array<string> args): string {
+        string t = Get(key)
+        int i = 0
+        while (i < args.length) { t = replace(t, "{" + i + "}", args[i]); i = i + 1 }
+        return t
+    }
+    public method Count(): int { return keys.length }
+}

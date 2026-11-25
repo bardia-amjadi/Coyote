@@ -1,0 +1,36 @@
+# Standard.Coyote.InteropServices, part 2: compile Coyote source with the `coyote` compiler that is installed with Coyote.
+# Needs the "process" and "interop" permissions.
+hand:proc run(string program, string args, string cwd, string input, int timeoutMs): int
+hand:proc stdout(): string
+hand:proc stderr(): string
+hand:proc which(string program): string
+hand:env get(string name): string
+hand:env has(string name): boolean
+hand:file exists(string path): boolean
+hand:sys os(): string
+
+public class CoyoteCompiler {
+    hidden shared field string customPath = ""
+
+    # Tells the class where the compiler is (default: environment variable COYOTE_COMPILER, then 'coyote' on PATH).
+    public shared method SetPath(string path) { customPath = path }
+
+    public shared method Find(): string {
+        if (customPath != "") { return customPath }
+        if (has("COYOTE_COMPILER") && get("COYOTE_COMPILER") != "") { return get("COYOTE_COMPILER") }
+        return which("coyote")
+    }
+
+    # Compiles a .coy file to an ML file (`coyote build --keep-unused`, so every method stays callable by name even when nothing
+    # in the program calls it). Returns "" on success or the compiler's messages.
+    public shared method Build(string source, string outputMl): string {
+        string exe = Find()
+        if (exe == "") { throw "CoyoteCompiler: the 'coyote' compiler was not found (put it on PATH or call CoyoteCompiler.SetPath)" }
+        int code = run(exe, "build\n--keep-unused\n" + source + "\n-o\n" + outputMl, "", "", 120000)
+        if (code == 0) { return "" }
+        string text = stderr()
+        if (text == "") { text = stdout() }
+        if (text == "") { text = "coyote exited with code " + code }
+        return text
+    }
+}
