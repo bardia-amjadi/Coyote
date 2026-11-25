@@ -18,6 +18,8 @@ endif()
 # Windows: link the C/C++ runtime statically so the tools run without the Visual C++ redistributable.
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  # We embed our own manifest through coyote.rc; without this MSVC's linker also generates one -> CVT1100 "duplicate resource MANIFEST".
+  add_link_options(/MANIFEST:NO)
 elseif(MINGW)
   add_link_options(-static)
 endif()
