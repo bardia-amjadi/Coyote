@@ -1,10 +1,10 @@
-# ML (Middle Language) specification — version 6
+# ML (Middle Language) specification — versions 1 to 12
 
 ML is the textual, versioned interface between the Coyote compiler and execution backends. The
 compiler (`coyote`) emits it; the PVM (`pvm`) loads, verifies and executes it. The two programs
 share **no code**, only this document.
 
-Versions: the compiler emits **version 5**, **6** when the program uses function values (lambdas, `fn` types), **7** for class hierarchies and **8** when it uses `try`/`throw` (the highest needed). The PVM accepts versions **1 to 8**. Each version is a
+Versions: the compiler emits **version 5**, **6** when the program uses function values (lambdas, `fn` types), **7** for class hierarchies and **8** when it uses `try`/`throw` **9** when it uses `(copy)` on an object or a map **10** when it uses mouths and **11** when it uses `long`, `byte`, bitwise/shift operators, string indexing or string ordering (the highest needed). The PVM accepts versions **1 to 11**. Each version is a
 strict superset of the previous one; a file that uses a construct newer than its declared version
 is rejected with a message naming the construct. Any future change that breaks existing ML bumps the version.
 
@@ -34,10 +34,12 @@ Coyote method name.
 | `string`  | immutable byte string (UTF-8 by convention)   | 1 |
 | `boolean` | `true` or `false`                             | 2 |
 | `array<T>`| dynamic array of `T` (any non-void type, including arrays); a reference to a garbage-collected heap object | 3 |
+| `long`    | 64-bit signed integer                         | 11 |
+| `byte`    | unsigned 8-bit integer 0..255 (an `array<byte>` stores one byte per item, compactly) | 11 |
 | `double`  | IEEE-754 binary64                             | 4 |
 | `char`    | one Unicode code point (not a surrogate)      | 4 |
 | `Guid`    | UUID, stored as canonical lowercase text `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | 4 |
-| `map<K,V>`| insertion-ordered map; `K` is `int`, `string`, `char`, `boolean` or `Guid`; `V` is any non-void type; a heap object | 4 |
+| `map<K,V>`| insertion-ordered map; `K` is `int`, `long`, `byte`, `string`, `char`, `boolean` or `Guid`; `V` is any non-void type; a heap object | 4 |
 | `T?`      | nullable `T` (one level only; `T` is not void, nullable or `obj`); a value that may be null | 4 |
 | `obj`     | holds a value of any non-void type, chosen at run time (replaced on each store); may be null | 4 |
 | `fn(T,U)->R` | function value (a closure): a function plus captured values; a heap object, may be a null reference. Written without spaces; `R` may be `void` or any type, parameters are not void. Function types are never nullable (`fn(int)->int?` returns `int?`) and cannot be boxed into `obj` or used in host signatures | 6 |
@@ -69,6 +71,7 @@ entry <name>
 ```
 
 * `host` declares a host intrinsic (see "Host calls and permissions"). Declaring grants nothing.
+* `mouth <module>.<name> [get] [set]` (version 10) declares a host **variable** of type `obj` (see "Mouths"). At least one accessor is required.
 * **Locals.** A function's variable slots are numbered from 0: its parameters first, in order,
   then each `local` in declaration order. Slots hold a value of their declared type for the whole
   call. Declared locals start as `0`, `""` or `false`; parameters start as the passed arguments.
@@ -215,7 +218,7 @@ stack. Recursion is allowed. Nesting deeper than **5000 frames** is a runtime er
    the call**: a program may declare host functions it never reaches (a library bundles many)
    without being granted all of them, and a call without the permission is a runtime error that
    happens before the function does anything. The `pvm` CLI grants `console`, `time` and `random`
-   by default; more with `--allow <permission>` (`file`, `system`, `net`, `windows`) or `--allow-all`.
+   by default; more with `--allow <permission>` (`file`, `system`, `net`, `windows`, `process`, `interop`) or `--allow-all`.
    Functions with no permission (`math.*`, `text.*`) are always allowed.
 
 Built-in host functions (the full list with signatures is in [libraries.md](libraries.md)):
@@ -229,7 +232,11 @@ Built-in host functions (the full list with signatures is in [libraries.md](libr
 | `file`, `dir` | `file` | read/write/copy/move/delete files, list/create/delete folders |
 | `env`, `sys` | `system` | environment variables, program arguments, `exit`, working directory |
 | `http` | `net` | `request`, `body`, `headers`, `header`, `error` |
-| `win` | `windows` | (0.6.3) `messageBox`, `openFileDialog`, `saveFileDialog`, `folderDialog`, `clipboard*`, `reg*`, `process*`, `shellOpen`, `window*`, `notify`; real on Windows, a catchable runtime error elsewhere. Signatures: `stdlib/Standard.Windows/src/*.coy`. |
+| `proc` | `process` | (0.6.4) `run` (captures output, input text, time limit), `stdout`, `stderr`, `timedOut`, `start`, `wait`, `isRunning`, `kill`, `pid`, `which` |
+| `rt` | `system` | (0.6.4) `version`, `arch`, `cpuCount`, `memoryBytes`, `machine`, `user`, `gcCollections`, `gcFreed`, `heapObjects`, `heapElements` |
+| `coy` | `interop` | (0.6.4) `load`, `unload`, `run`, `output`, `error`, `funcCount`, `funcName`, `funcSig`, `call`: load, verify and run another ML module inside the running VM (own heap; arguments cross as `<characters>:<text>` items) |
+| `win` (native calls) | `interop` | (0.6.4, 64-bit Windows only) `dllLoad`, `dllHasFunction`, `dllCall`, `dllBuffer` |
+| `win` | `windows` | (0.6.3)  `messageBox`, `openFileDialog`, `saveFileDialog`, `folderDialog`, `clipboard*`, `reg*`, `process*`, `shellOpen`, `window*`, `notify`; real on Windows, a catchable runtime error elsewhere. Signatures: `stdlib/Standard.Windows/src/*.coy`. |
 
 ## Verification
 
@@ -296,6 +303,67 @@ When an error is raised, the PVM looks for the innermost active handler, startin
 above are abandoned; a function's handlers die with it). The handler's function resumes at the label with its operand stack cleared
 and the error message (`string`) pushed. A handler is removed when it is used. The verifier checks that the label exists, that the stack is empty at `try`, and
 treats the label as reachable with a one-element stack `[string]`. Locals keep their values. Out-of-memory (heap) errors cannot be handled.
+
+## Exception objects (version 12)
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `throwx` | `obj, string, string ->` | raises an error carrying an object payload, a message and a stack trace (empty trace: the PVM fills it from the call stack when the error is caught) |
+
+`throw` (version 8) still exists. Handlers receive the message string as before; the payload and the trace are available through the mouths
+`sys.exceptionObject` and `sys.stackTrace`. The compiler emits ML 12 only for programs that contain `throwx`.
+An uncaught error prints the message and one `  at <function> (<file>:<line>)` line per frame.
+
+## Mouths (version 10)
+
+A mouth is a variable the host provides. The declaration `mouth sys.exception get` (and/or `set`) must come before the first function; the verifier requires every declared mouth to be registered with the PVM
+and the declared accessors to exist there (a read-only host mouth cannot be declared `set`).
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `getmouth <module>.<name>` | `-> obj` | reads the mouth (declared `get`); the host's value is boxed to `obj` (null mouths give a null obj) |
+| `setmouth <module>.<name>` | `obj ->` | writes the mouth (declared `set`) |
+
+The permission of the mouth (if any) is checked at each access like a host call's. Built-in mouths: `sys.exception` (get; the message the last `catch` received, or null), `sys.exitCode` (get/set int; the PVM exits with it
+when the program ends normally), `sys.os`, `sys.version` (get), `sys.pid` (get, `system`). The compiler writes `ml 10` and the `mouth` lines only when the program uses a mouth.
+
+## Long, byte, bitwise operators and strings (version 11)
+
+`long` and `byte` are new types (see the table above); `byte` is only a storage/interchange type: it is loaded and stored, but all arithmetic happens in `int` after `b2i`.
+Every operation is checked: arithmetic overflow, division by zero, and out-of-range conversions are runtime errors.
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `push.lng <n>` | `-> long` | `n` fits in 64 bits |
+| `add.lng` `sub.lng` `mul.lng` `div.lng` `rem.lng` | `long long -> long` | like the `int` forms, 64-bit; overflow, zero divisor and `LLONG_MIN / -1` are runtime errors |
+| `neg.lng` | `long -> long` | `-LLONG_MIN` is a runtime error |
+| `eq.lng` `ne.lng` `lt.lng` `le.lng` `gt.lng` `ge.lng` | `long long -> boolean` | |
+| `i2l` | `int -> long` | widening |
+| `l2i` | `long -> int` | runtime error when the value does not fit |
+| `l2d` / `d2l` | `long -> double` / `double -> long` | `d2l` truncates; NaN and out-of-range values are runtime errors |
+| `str.lng` / `parse.lng` | `long -> string` / `string -> long` | decimal text; `parse.lng` fails with a message on bad input |
+| `and.int` `or.int` `xor.int` | `int int -> int` | bitwise |
+| `shl.int` `shr.int` | `int int -> int` | the count is taken modulo 32; `shr` is an arithmetic shift |
+| `bnot.int` | `int -> int` | bitwise complement |
+| `and.lng` `or.lng` `xor.lng` | `long long -> long` | bitwise |
+| `shl.lng` `shr.lng` | `long int -> long` | the count (an `int`) is taken modulo 64; `shr` is arithmetic |
+| `bnot.lng` | `long -> long` | |
+| `i2b` | `int -> byte` | runtime error outside 0..255 |
+| `b2i` | `byte -> int` | |
+| `str.at` | `string int -> char` | the code point at that index (code points, not bytes); out of range is a runtime error |
+| `str.len` | `string -> int` | the number of code points |
+| `lt.str` `le.str` `gt.str` `ge.str` | `string string -> boolean` | ordering by code point (equal to the byte order of UTF-8) |
+
+`newarray byte`, `arraylit`, `aload`, `astore`, `alen`, `apush` and `acopy` work on `array<byte>` (items are `byte`). `dyn.*` operations and `box` do not accept an `array<byte>`
+as an element source. Host signatures may use `long`, `byte` and `array<byte>`. The compiler writes `ml 11` only when the program contains one of these.
+
+## Copy (version 9)
+
+| Instruction | Stack | Meaning |
+|---|---|---|
+| `ocopy` | `C -> C` | shallow clone of a class instance or a map: a new heap object of the same class/type with the same field/element values (nested objects, arrays and maps are shared, not cloned). A null reference is a runtime error (`null reference: cannot copy a null value`). The verifier requires a class or map on top of the stack; its type is unchanged |
+
+`acopy` (version 3) already cloned arrays. The compiler emits `ml 9` only when a program contains `ocopy`.
 
 ## Example
 

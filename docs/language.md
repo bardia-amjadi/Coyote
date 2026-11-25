@@ -1,4 +1,4 @@
-# Coyote language — what is implemented today (0.6.3)
+# Coyote language — what is implemented today (0.7.0)
 
 This page describes only what the current compiler accepts. Everything else in the language
 design is **rejected with an error**, never silently ignored. Syntax marked *provisional* is a
@@ -32,28 +32,32 @@ greet("Coyote")
 | Type      | Values |
 |-----------|--------|
 | `int`     | 32-bit signed integer. Arithmetic that leaves the range is a **runtime error** (`integer overflow`), never silent wraparound. |
+| `long`    | 64-bit signed integer (0.7). Literals: `5L`, or any decimal/hex/binary literal that does not fit an `int`. Overflow is a runtime error. |
+| `byte`    | unsigned 8-bit integer 0..255 (0.7). Meant for storage and files: `array<byte>` keeps **one byte per item**. Arithmetic on bytes is done in `int`. |
 | `string`  | immutable text |
 | `boolean` | `true`, `false` |
 | `double`  | IEEE-754 binary64: `1.5`, `2.0e3` (a digit must follow the `.`) |
 | `char`    | one Unicode code point: `'a'`, `'\n'`, `'é'`; escapes `\n \t \r \0 \\ \' \"` |
 | `Guid`    | UUID; created with `Guid("...")`, printed as lowercase `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 | `array<T>` | dynamic array of `T` (any of these types, including `array<array<int>>`); reference semantics |
-| `map<K,V>` | insertion-ordered map; `K` is `int`, `string`, `char`, `boolean` or `Guid` |
+| `map<K,V>` | insertion-ordered map; `K` is `int`, `long`, `byte`, `string`, `char`, `boolean` or `Guid` |
 | `T?`      | `T` or `null` (e.g. `int?`, `string?`, `array<int>?`) |
 | `obj`     | holds a value of any type; the held type may change on each assignment (like C# `object`) |
 | `dyn`     | like `obj`, but operators, indexing, members and method calls are validated at run time |
 
 ### Conversions
 
-Implicit (the compiler inserts them): `int` → `double`; `T` → `T?`; `null` → `T?`/`obj`/`dyn`;
+Implicit (the compiler inserts them): the widening chain `byte` → `int` → `long` → `double` (an `int` literal 0..255 also converts to `byte`); `T` → `T?`; `null` → `T?`/`obj`/`dyn`;
 anything → `obj`/`dyn` (boxing); `dyn` → any type (checked at run time); `obj` ↔ `dyn`.
 Everything else is explicit and errors tell you which one is missing:
 
 | Written | Meaning |
 |---------|---------|
-| `int(x)` | from `double` (truncates; out of range is a runtime error), `char` (code point), `string` (strict parse), `obj`/`dyn` |
-| `double(x)` | from `int`, `char`, `string`, `obj`/`dyn` |
-| `string(x)` | from `int`, `boolean`, `double`, `char`, `Guid`, `obj`/`dyn` |
+| `int(x)` | from `double` (truncates; out of range is a runtime error), `long` (error when it does not fit), `byte`, `char` (code point), `string` (strict parse), `obj`/`dyn` |
+| `long(x)` | from `int`, `byte`, `double` (truncates; range checked), `char`, `string` (strict parse), `obj`/`dyn` |
+| `byte(x)` | from `int`, `long`, `char`; a value outside 0..255 is a runtime error |
+| `double(x)` | from `int`, `long`, `byte`, `char`, `string`, `obj`/`dyn` |
+| `string(x)` | from `int`, `long`, `byte`, `boolean`, `double`, `char`, `Guid`, `obj`/`dyn` |
 | `char(x)` | from `int` (must be a valid code point), `obj`/`dyn` |
 | `Guid(x)` | from `string` (strict parse, any case), `obj`/`dyn` |
 
@@ -91,11 +95,19 @@ Precedence, lowest to highest (all binary operators are left-associative):
 |-------|-----------|------------------------|
 | 1 | `\|\|` | boolean, boolean → boolean (short-circuit) |
 | 2 | `&&` | boolean, boolean → boolean (short-circuit) |
-| 3 | `==` `!=` | two operands of the same type → boolean; with `null`; `obj` vs anything (boxed) |
-| 4 | `<` `<=` `>` `>=`, `is` | int/double (mixed promotes to double), char; `v is T` → boolean |
-| 5 | `+` `-` | numbers (int,int → int; otherwise double); for `+`, if either side is a string the result is a string |
-| 6 | `*` `/` `%` | numbers; `%` on doubles is `fmod` |
-| 7 | unary `-` `!`, postfix `!` | number → same; boolean → boolean; `T?` → `T` (postfix) |
+| 3 | `\|` | int/long (bitwise or) |
+| 4 | `^` | int/long (bitwise xor) |
+| 5 | `&` | int/long (bitwise and) |
+| 6 | `==` `!=` | two operands of the same type → boolean; with `null`; `obj` vs anything (boxed) |
+| 7 | `<` `<=` `>` `>=`, `is` | numbers (the smaller type widens), char, **string** (by code point); `v is T` → boolean |
+| 8 | `<<` `>>` | int/long shifted by an `int` count (taken modulo 32 / 64); `>>` is arithmetic |
+| 9 | `+` `-` | numbers (the result has the widest operand type, at least `int`; `byte` computes as `int`); for `+`, if either side is a string the result is a string |
+| 10 | `*` `/` `%` | numbers; `%` on doubles is `fmod` |
+| 11 | unary `-` `!` `~`, postfix `!` | number → same (`byte` → `int`); boolean → boolean; `~` int/long; `T?` → `T` (postfix) |
+
+Bitwise and shift operators need integral operands (`int`, `long`, `byte`); `a & b` of two `byte` values is an `int` (convert back with `byte(x)`). `>>` is written as two adjacent `>` so that
+`List<List<int>>` still parses; `>>=` works the same way. Compound forms: `&= |= ^= <<= >>=`. Integer literals: `42`, `5L`, `0xFF`, `0b1010` (an `int` when it fits 31 bits, else a `long`; the smallest values cannot be written as a literal, write
+`-2147483647 - 1` or `-9223372036854775807L - 1`).
 
 `??` has the lowest precedence (below `\|\|`). If either operand of an arithmetic, comparison or
 equality operator is `dyn`, the operation runs at run time and the result is `dyn`; `dyn` is
@@ -175,11 +187,11 @@ var p = new Point(3, 4)
 * **The entry file may declare classes, models, interfaces and methods itself** and use other namespaces at once (`use "MyApp.Models"`), see
   *Classes in the entry file* below.
 * `use` and `namespace` appear only at the top level. `use` is not transitive: a file sees the exports of what *it* uses (and of its own
-  namespace), not of what those files use. Two uses that export the same name, or a use that clashes with a local declaration, is an error.
+  namespace), not of what those files use. Two uses that export the same class name, or a use that clashes with a local declaration, is an error (two exported methods of the same name are allowed; call them with their namespace).
 * **`import` was removed in 0.6.** Replace `import "lib/math.coy"` by `namespace Lib` at the top of that file and `use "Lib"`;
   the compiler's message says so.
 * Errors and runtime errors in another file are reported with that file's path.
-* Not implemented: qualified names (`MyApp.Models.Point`), `use` with an alias or a list of names, namespaces that contain other namespaces.
+* Qualified names (`MyApp.Models.Point`) work since 0.8, see below. There is no `use` with an alias or a list of names and no namespace that contains other namespaces (not planned for 1.0).
 
 ## Maps
 
@@ -209,6 +221,48 @@ d[1] = 20             # runtime-validated indexing, d.length, d.push(4), d + 1, 
 `obj` supports only `==`/`!=`, `is`, null checks and explicit conversions. `dyn` supports the
 dynamic operators; its results are `dyn`. Errors name the runtime types involved
 (`operator '-' cannot be applied to string and int`).
+
+## Strings as sequences (0.7)
+
+`s[i]` is the `char` (code point) at index `i`; `s.length` is the number of code points (so `"€".length` is 1); `in (var c of s) { }` visits every code point; `<`, `<=`, `>`, `>=` order strings by
+code point. A string is immutable: `s[i] = x` is a compile error. `Length()` and `CharAt` of Standard.Text keep working. Indexing is O(n) for non-ASCII text.
+
+## Bytes (0.7)
+
+`array<byte>` stores one byte per item (an `array<int>` uses a full value per item). `new array<byte>(n)`, `[1, 2, 255]`, `b[i]`, `b[i] = 7`, `b.push(x)`, `b.length`, `(copy)b` and `in (var x of b)` work as for other
+arrays; items are `byte`. `File.ReadAllBytes(path)`, `File.WriteAllBytes(path, data)`, `File.AppendBytes`, `Encoding.ToBytes(text)` (UTF-8) and `Encoding.FromBytes(data)` (invalid sequences become U+FFFD)
+use it. Limit: an `array<byte>` cannot be indexed or called through `dyn` (assign it to an `array<byte>` variable first); the older `Utf8`/`Hex`/`Base64` classes of Standard.Encoding still use `array<int>`
+(`Encoding.IntsToBytes` / `BytesToInts` convert).
+
+## Enums (0.7)
+
+```coyote
+enum Color { Red, Green = 5, Blue }       # Blue is 6; values are int literals
+var c = Color.Green
+println(c.ToString() + " " + c.Value)     # Green 5
+Color.Parse("Blue")  Color.TryParse("x")  # Color / Color? ; Parse stops the program on an unknown name
+Color.FromValue(5)   Color.Values()       # Color / array<Color>
+c.CompareTo(Color.Red)                    # by value; == compares members by identity
+```
+
+An enum is a class of shared, read-only instances with `Name`, `Value`, `ToString()`, `CompareTo(other)` (the compiler generates it; names `Name Value ToString CompareTo Parse TryParse FromValue Values all` cannot be members).
+Enums carry no data of their own and cannot be extended. `public enum` exports it like a class.
+
+## `switch` (0.7)
+
+```coyote
+switch (n) {                      # statement: no fall-through, 'break' still belongs to an enclosing loop
+    case 1: println("one")
+    case 2, 3:
+        println("two or three")
+    default: println("other")
+}
+var name = switch (c) { Color.Red => "r", Color.Green => "g", Color.Blue => "b" }   # expression
+var size = switch (n) { 1 => 10, 2, 3 => 20, _ => 0 }
+```
+
+Case values are compared with `==` (ints, strings, chars, enum members, ...). The **expression** must give every arm one type (numbers widen) and is checked for completeness: over an enum it must list every member or
+have a `_` arm; over any other type it needs `_`. The statement needs neither a `default` nor completeness.
 
 ## For-each
 
@@ -261,6 +315,11 @@ Shell.PrintLine(new Tools().GiveSpecialNumber())     # 'new' can be used inside 
 * **`shared`** members belong to the class. **`shared class X { ... }`** makes every member shared; such a class cannot be instantiated with `new`.
 * **`public class`**, `public model`, `public interface` and `public method` at the top level are visible to other namespaces (replaces `export`).
 * `here` is the current object (replaces `this`); `here T name` marks an extension method's receiver.
+* **Constructors can be overloaded** (0.6.5), like methods: `constructor()`, `constructor(int a)`, `constructor(string t)`. `new P(3)` picks the
+  best fit (exact match, then widening such as int to double; ambiguity is an error that lists the candidates). Two constructors with the same
+  parameter types are an error. Each constructor gets the field initializers; in a class hierarchy `: base(args)` picks the base class's
+  constructor the same way (a constructor without `: base(...)` needs a base constructor that takes no arguments). A constructor cannot call another
+  constructor of its own class yet: put shared code in a hidden method.
 * Mixing in the old words gives, e.g. `'private' was renamed to 'hidden'`.
 * **Migrating old code:** `python3 tools/migrate-0.6.3.py file.coy ...` rewrites the keywords, adds `field`, and converts `for (x in xs)` loops in place (class bodies written on one line must be edited by hand).
 
@@ -282,7 +341,7 @@ Shell.PrintLine(new Local().Hi())
   Field initializers run, in declaration order, at the start of the constructor.
 * Inside instance methods bare names resolve to locals first, then fields/methods of the class (`here.x` is always allowed);
   shared methods cannot use instance members.
-* A class has at most one constructor (constructors cannot be overloaded); without one, a class gets a no-argument constructor and a model gets the all-fields one.
+* A class may have several constructors (0.6.5); without any, a class gets a no-argument constructor and a model gets the all-fields one.
   `return` is not allowed in a constructor. Constructors, methods, fields and properties can be `public` (default) or `hidden`.
 * `public class` / `public model` make a class visible to the files that `use` its namespace; it can be named as a type there.
 * Compound assignment (`+=` ...) works on variables and on fields (`x.count += 1`, `count += Step`).
@@ -477,36 +536,119 @@ Make(3)(4)                                             # calling the result of a
 obj.callback(5)                                        # a field of function type is called the same way
 ```
 
-* A lambda **captures by value**: variables of the enclosing method that its body mentions are copied when the lambda is created
-  (this is how the PVM's closures work). Arrays, maps and objects are shared, so a change made through them is seen on both sides;
-  assigning to a captured variable inside the lambda is a compile error. Inside a class method a lambda can use `here`, fields and other methods.
+* A lambda **shares the variables it captures** (0.8): a local variable that a lambda mentions and that is assigned anywhere (in the lambda
+  or in the enclosing code) lives in a shared cell, so both sides always see the same value:
+  `var n = 0; fn() inc = () => { n = n + 1 }; inc(); inc()` leaves `n` at 2, and a counter returned from a method keeps its own `n`.
+  Parameters, loop variables and `dyn` variables are still captured **by value** (assigning to them inside a lambda is a compile error; copy them
+  into a `var` first). Inside a class method a lambda can use `here`, fields and other methods.
 * A lambda's own local variables must not reuse the name of a variable of the enclosing method (the same rule as for any redeclaration).
 * Types of untyped parameters come from a declared variable type, a method parameter, a return type or an assignment. `var f = x => x` has no
   context, so it is an error: write `(int x) => x`. Result types of expression lambdas are inferred when no type is given.
 * Function values cannot be `null`, are not nullable (`fn(int) : int?` returns an `int?`), cannot be boxed into `obj`/`dyn` and cannot be compared. A function-typed
   field or element that was never set holds a null reference; calling it is the runtime error `null reference: cannot call a null function value`.
 * Generic inference does not look into lambdas: for `Map<T, R>(xs, f)` write `Map<int, string>(xs, f)`. Overloaded methods cannot be used as values.
-* Not in 0.6.2: a lambda cannot be `async`, recursive through itself (use a method) or change captured variables.
+* A lambda cannot be `async` or recursive through itself (use a method).
 * Native backend: programs using function values or `try` are outside the native subset (see [llvm](llvm.md)) and run as bundled executables.
 
-## Errors: `try`, `catch`, `throw` (0.6.2)
+## Errors: exceptions, `try`, `catch`, `finally`, `throw` (0.8)
 
 ```
+class NotFound : Exception {                      # your own exception types derive from Exception
+    constructor(string what) : base("not found: " + what) { }
+}
 try {
     risky()
-} catch (e) {              # also: catch (string e)  or just  catch { ... }
-    println("failed: " + e)
+} catch (e: NotFound) {                            # typed catch: the first matching clause runs
+    println("missing: " + e.Message)
+} catch (e: RuntimeError) {                        # runtime failures (division by zero, index out of range, host errors ...)
+    println("runtime: " + e.Message + "\n" + e.StackTrace)
+} catch (e) {                                     # catch-all (an Exception); also: catch { ... }
+    println("other: " + e)                        # "Error: message" through ToString()
+} finally {
+    println("always runs")
 }
-throw "something went wrong"       # the message is a string
+throw new NotFound("x")
+throw "text"                                      # sugar for throw new Exception("text")
 ```
 
-* An error is a **string message**. `throw "text"` raises one; every runtime error (division by zero, array index out of range, null reference,
-  `int("zz")`, failed host functions, call stack overflow, ...) is raised the same way and can be caught: `e` holds the message without the file and line.
-* The error unwinds method calls up to the nearest enclosing `try`. An error nobody catches ends the program exactly like a runtime error:
-  `<file>:<line>: runtime error: <message>` and exit code 1. Rethrow with `throw e` (or `throw "more: " + e`).
-* `return`, `break` and `continue` work inside `try` and `catch`. A `try` needs a `catch`; there is no `finally` yet.
-* Out-of-memory errors are not catchable. Variables assigned in the `try` block keep the values they had when the error happened.
-* `try`, `catch`, `throw` are keywords since 0.6.2 (and `fn` is read as a type when followed by `(`).
+* **`Exception`** is a built-in class: `Message`, `StackTrace` (filled when the exception is caught), constructors `()` and `(string)`, and
+  `ToString()` = `"Error: " + Message`. **`RuntimeError : Exception`** is what the runtime raises (arithmetic, bounds, null, failed host functions, ...).
+  Both names are reserved: a program class called `Exception` or `RuntimeError` is an error. Only objects of Exception classes can be thrown.
+* **Typed catch**: `catch (e: Type)` runs when the thrown object `is` that type (subclasses match). Clauses are tried in order; a catch after a
+  catch-all is an error; when nothing matches the exception continues to the caller. `catch (string e)` and `catch (var e)` are errors.
+* **`finally`** runs on every way out of the `try`/`catch` blocks: normal end, `return`, `break`, `continue` and a thrown exception.
+  `return`, and `break`/`continue` that leave the `finally`, are not allowed inside it.
+* An error nobody catches ends the program with `<file>:<line>: runtime error: <message>`, one `  at Method (file.coy:line)` line per active call
+  (innermost first; long stacks are shortened to the first 20 and last 5 frames) and exit code 1. `throw e` rethrows keeping the original trace.
+* `return`, `break` and `continue` work inside `try` and `catch`. Out-of-memory errors are not catchable.
+* `try`, `catch`, `finally`, `throw` are keywords. The `sys.exception` mouth holds the text `Error: message`; `sys.exceptionObject` the thrown
+  object and `sys.stackTrace` its trace.
+* **Migrating from 0.7**: `catch (e)` now gives an `Exception` object, not a string. Use `e.Message` where the text is needed (`"" + e` prints
+  `Error: ...`); `catch (string e)` becomes `catch (e)`. `python3 tools/migrate-0.8.py file.coy ...` does the usual cases.
+
+## File-level variables (0.8)
+
+Variables declared at the top level of the entry file are visible inside methods and classes of that file:
+
+```
+var counter = 0
+method Bump() { counter = counter + 1 }
+Bump(); Bump()                    # counter is 2
+```
+
+* Only a top-level `var`/typed declaration that some method of the file mentions becomes shared (a method that declares its own variable or parameter of that name, or whose class has a field or property of that name, does not count as mentioning it, and then cannot use the file-level one); a local of the same name inside a method shadows it,
+  and class fields win over a file-level name. A method that runs before the declaration line sees the default value (0, null).
+* They are initialized when the top-level code reaches the declaration. `(ref)` cannot alias them. Other files (namespaces) do not see them.
+
+## The object protocol (0.8)
+
+Well-known method names (PascalCase) that the language uses; no interface is needed, a matching method is enough:
+
+| Method | Used by |
+|---|---|
+| `ToString(): string` | `"text" + obj`, `string(obj)`, `catch (e)` messages |
+| `Equals(other): boolean` | `a == b` and `a != b` between two objects of that class (a comparison with `null` stays a reference check) |
+| `Hash(): int`, `CompareTo(other): int` | reserved names for the 0.10 library (map keys, `List.Sort`); nothing calls them yet |
+
+Without `Equals`, `==` on objects compares references.
+
+## Qualified names (0.8)
+
+A declaration of a namespace can be written with its namespace in front: `Acme.Geo.Point`, `new Acme.Geo.Point(1, 2)`, `Acme.Geo.Point.Origin()`,
+`Acme.Geo.Add(1, 2)`. This works for everything the file can see (its own namespace and the namespaces it `use`s). When two used namespaces export
+the same method name, the plain name is an error that asks for the qualified one. Dotted namespace names (`Acme.Geo`) are plain names: there is
+no nesting or inheritance between `Acme` and `Acme.Geo`, no alias and no `use` of single names (decided for 1.0).
+
+## `(copy)` and `(ref)` (0.6.5)
+
+Assignment copies **values** for `int`, `double`, `boolean`, `char`, `string`, `Guid`, but **shares** objects, arrays and maps (`var b = a` makes
+`b` another name for the same object). Two prefix forms change that:
+
+```
+var p = new Point(1, 2)
+var q = (copy)p            # q is a NEW object with p's field values (shallow: nested objects/arrays/maps are shared)
+q.X = 9                    # p.X is still 1
+array<int> a = [1, 2, 3]
+var b = (copy)a            # an independent array (same as a.copy())
+var m2 = (copy)someMap     # an independent map
+
+var n = 5
+var r = (ref)n             # r IS n: both names share one storage cell, for any type (int, string, objects, ...)
+r = r + 10                 # n is 15 now
+n = 100                    # r reads 100
+```
+
+* `(copy)expr` works on class instances, arrays and maps (anything else is an error: plain values are already copied on assignment). The copy is
+  shallow; it does not run constructors. Copying `null` is a runtime error; a nullable value must be unwrapped first.
+* `(ref)name` is only allowed as the initializer of a declaration (`var r = (ref)n` or `int r = (ref)n`; the declared type must be the type of `n`).
+  `r` and `n` then name the same variable, also when one of them is reassigned. The variable you alias must be declared with `var` or a type **in the same
+  function**: parameters, `in (var x of ...)` variables, catch variables and variables captured by a lambda cannot be aliased (copy them into a local first).
+  A lambda that mentions an aliased variable still captures the value it had when the closure was created, as before.
+* How it works: a variable that some `(ref)` aliases is stored in a one-element array (a cell) and every use reads/writes element 0; the alias declaration
+  shares the cell. No new instruction is needed for `(ref)`. `(copy)` of an array uses `acopy`; of an object or a map it uses the new `ocopy` (ML 9).
+* `copy` and `ref` are not reserved words: `(copy)` / `(ref)` are recognized only when the closing parenthesis is followed by an operand.
+* Native backend: programs that use objects or maps run as bundled PVM executables (see [llvm](llvm.md)); `(ref)` on `int`/`string` variables in the native subset
+  works the same way because it compiles to arrays, which are outside the subset, so those programs are bundled too.
 
 ## Methods *(provisional syntax)*
 
@@ -529,6 +671,35 @@ Declares a host intrinsic: a function implemented by the PVM, not by Coyote code
 are any value type (the PVM's registered functions currently take `string`, `int` or `boolean`); host functions may declare a return type (`hand:math sqrt(double x): double`; see [libraries](libraries.md)). A declaration only **asks** for a
 host function; the PVM runs it only if it is registered and permitted (see `ml-spec.md`).
 
+## `mouth:<module> <name> {get;}` (0.6.5.2)
+
+`hand` brings in host **functions**; `mouth` brings in host **variables**. A mouth is a name whose value the host (the PVM) provides each time it is read:
+
+```
+mouth:sys exception {get;}            # the message of the last exception a `catch` caught (null before the first)
+mouth:sys os                          # no accessor block = read-only, same as {get;}
+mouth:sys exitCode {get; set;}        # the host allows writing this one
+
+try { throw "boom" } catch (e) { }
+println(string(exception))            # boom
+exitCode = 3                          # the program ends with exit code 3
+```
+
+* Every mouth is an `obj` (it can hold an `int`, a `string`, a `boolean`, ... or null): use `is`, `string(m)`, `int(m)` ... to get the value out, see "Obj and dyn".
+* **Read-only by default.** Assigning needs `{get; set;}` in the declaration, and the host must really allow writing (the verifier refuses a program that declares `set` for a read-only host mouth).
+  `{set;}` alone is write-only. Anything else inside the braces is an error.
+* **Copyable by default.** Every read produces a fresh value, so `var saved = exception` is independent of later changes; `(copy)m` of an obj is allowed and returns the value itself (boxed values are immutable).
+* Like `hand`, a mouth is declared at the top level and is visible in its own file (in methods and classes too; a local variable of the same name hides it). Declaring grants nothing: reading or writing
+  needs the mouth's permission at the access, and a program that declares mouths it never uses does not carry them.
+* Built-in mouths (all in the `sys` module): `exception` (get), `exitCode` (get, set; applies when the program ends normally; `sys.exit` still wins), `os` (`windows`/`linux`/`macos`), `version` (the Coyote version), `pid` (needs `system`).
+* ML 10: `mouth <module>.<name> [get] [set]` declarations and `getmouth` / `setmouth` instructions ([spec](ml-spec.md)). Native backend: programs that use mouths are outside the native subset for now (bundled).
+
+## Changes in 0.7 that can break old programs
+
+* `enum`, `switch`, `case` and `default` are keywords now (rename variables with those names).
+* `Time.UptimeMs()`, `Time.UnixSeconds()`, `File.Size()` and `File.ModifiedUnix()` return **`long`**; `Time.Format/FormatUtc` take a `long`. Where you stored them in an `int`, write `int(x)` or switch the variable to `long`.
+* The `Timer` library's `ElapsedMs()` and `DueIn()` return `long`.
+
 ## Reserved but not implemented
 
 Using any of these gives `'<word>' is not supported yet` (and they cannot be used as names):
@@ -538,7 +709,7 @@ Using any of these gives `'<word>' is not supported yet` (and they cannot be use
 `import` was removed in 0.6 (use `namespace` + `use`); `namespace` is a keyword now.
 
 Also not implemented: negative literals
-in `hand` calls (use an expression), top-level globals (use `shared` class fields), constructor overloading, shared properties, map literals, iterating strings directly,
+in `hand` calls (use an expression), top-level globals (use `shared` class fields), shared properties, map literals,
 member assignment on `dyn` (`d.x = 1`), `dyn` method calls beyond the built-in array/map ones.
 
 ## Design decisions recorded so far
