@@ -1,4 +1,5 @@
 #include "ops.hpp"
+#include "overflow.hpp"
 
 #include <climits>
 #include <cmath>
@@ -309,9 +310,9 @@ Value dynBinary(Op op, const Value& oa, const Value& ob) {
     if (isWhole(a) && isWhole(b) && (a.kind == Type::Long || b.kind == Type::Long)) {  // long arithmetic (an int or byte operand widens)
         long long r = 0;
         switch (op) {
-            case Op::DynAdd: if (__builtin_add_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
-            case Op::DynSub: if (__builtin_sub_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
-            case Op::DynMul: if (__builtin_mul_overflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynAdd: if (addOverflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynSub: if (subOverflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
+            case Op::DynMul: if (mulOverflow(a.i, b.i, &r)) throw OpError{"long overflow"}; break;
             case Op::DynDiv:
                 if (b.i == 0) throw OpError{"division by zero"};
                 if (a.i == LLONG_MIN && b.i == -1) throw OpError{"long overflow"};

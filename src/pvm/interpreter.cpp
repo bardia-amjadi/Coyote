@@ -1,4 +1,5 @@
 #include "interpreter.hpp"
+#include "overflow.hpp"
 
 #include <climits>
 #include <cstdint>
@@ -354,7 +355,7 @@ void run(const Module& m, const HostRegistry& registry, std::ostream& out, Heap&
             case Op::PushLng: stack.push_back(Value::ofLong(in.ival)); break;
             case Op::AddL: case Op::SubL: case Op::MulL: {
                 long long b = popInt(), a = popInt(), r = 0;
-                const bool ovf = in.op == Op::AddL ? __builtin_add_overflow(a, b, &r) : in.op == Op::SubL ? __builtin_sub_overflow(a, b, &r) : __builtin_mul_overflow(a, b, &r);
+                const bool ovf = in.op == Op::AddL ? addOverflow(a, b, &r) : in.op == Op::SubL ? subOverflow(a, b, &r) : mulOverflow(a, b, &r);
                 if (ovf) throw rtError("long overflow");
                 stack.push_back(Value::ofLong(r));
                 break;
