@@ -2185,10 +2185,10 @@ private:
                 case Op::StrChr: { std::string a = pop('c'), r = t(); code << "  " << r << " = call ptr @rt_str_chr(i32 " << a << ")\n"; push('s', r); break; }
                 case Op::StrLen: { std::string a = pop('s'), r = t(); code << "  " << r << " = call i32 @rt_str_len(ptr " << a << ")\n"; release(a); push('i', r); break; }
                 case Op::StrAt: {
-                    std::string idx = pop('i'), a = pop('s'), r = t(), bad = t();
-                    code << "  " << r << " = call i32 @rt_str_at(ptr " << a << ", i32 " << idx << ")\n  " << bad << " = icmp slt i32 " << r << ", 0\n";
+                    std::string ix = pop('i'), a = pop('s'), r = t(), bad = t();
+                    code << "  " << r << " = call i32 @rt_str_at(ptr " << a << ", i32 " << ix << ")\n  " << bad << " = icmp slt i32 " << r << ", 0\n";
                     std::string wide = t(), wlen = t();
-                    code << "  " << wide << " = sext i32 " << idx << " to i64\n  " << wlen << " = ptrtoint ptr " << a << " to i64\n";
+                    code << "  " << wide << " = sext i32 " << ix << " to i64\n  " << wlen << " = ptrtoint ptr " << a << " to i64\n";
                     failIf(in, bad, 6, wide, "0.0", wlen);
                     release(a);
                     push('c', r);
@@ -2229,13 +2229,13 @@ private:
                     break;
                 }
                 case Op::ALoad: {
-                    std::string idx = pop('i'), o = pop('r');
+                    std::string ix = pop('i'), o = pop('r');
                     const Type arr = lastTy;
                     const std::string w = "an array element in " + where;
                     const char ek = arrayElemKind(*arr.elem, w), k = kindOf(*arr.elem, w);
                     nullCheck(in, o);
                     std::string wide = t(), len = lenOf(o), oob = t();
-                    code << "  " << wide << " = sext i32 " << idx << " to i64\n  " << oob << " = icmp uge i64 " << wide << ", " << len << "\n";
+                    code << "  " << wide << " = sext i32 " << ix << " to i64\n  " << oob << " = icmp uge i64 " << wide << ", " << len << "\n";
                     failIf(in, oob, 7, wide, "0.0", len);
                     std::string v = elemLoad(o, wide, ek, k);
                     if (k == 's') retain(v);
@@ -2247,10 +2247,10 @@ private:
                     const Type arr = tys[tys.size() - 3];
                     const std::string w = "an array element in " + where;
                     const char ek = arrayElemKind(*arr.elem, w), k = kindOf(*arr.elem, w);
-                    std::string v = pop(k), idx = pop('i'), o = pop('r');
+                    std::string v = pop(k), ix = pop('i'), o = pop('r');
                     nullCheck(in, o);
                     std::string wide = t(), len = lenOf(o), oob = t();
-                    code << "  " << wide << " = sext i32 " << idx << " to i64\n  " << oob << " = icmp uge i64 " << wide << ", " << len << "\n";
+                    code << "  " << wide << " = sext i32 " << ix << " to i64\n  " << oob << " = icmp uge i64 " << wide << ", " << len << "\n";
                     failIf(in, oob, 7, wide, "0.0", len);
                     elemStore(o, wide, ek, k, v, true);
                     break;
@@ -2427,7 +2427,7 @@ private:
                     const char ek = vk == 'y' ? 'i' : vk;
                     std::string key = pop(kc), m = pop('r');
                     nullCheckMsg(in, m, "null map reference");
-                    std::string k64 = toI64(kc, key), idx = t();
+                    std::string k64 = toI64(kc, key), ix = t();
                     if (in.op == Op::MapDel) {
                         std::string r = t(), b = t();
                         code << "  " << r << " = call i32 @rt_map_del(ptr " << m << ", i64 " << k64 << ")\n  " << b << " = icmp ne i32 " << r << ", 0\n";
@@ -2435,9 +2435,9 @@ private:
                         push('b', b);
                         break;
                     }
-                    code << "  " << idx << " = call i64 @rt_map_find(ptr " << m << ", i64 " << k64 << ")\n";
+                    code << "  " << ix << " = call i64 @rt_map_find(ptr " << m << ", i64 " << k64 << ")\n";
                     std::string found = t();
-                    code << "  " << found << " = icmp sge i64 " << idx << ", 0\n";
+                    code << "  " << found << " = icmp sge i64 " << ix << ", 0\n";
                     if (in.op == Op::MapHas) {
                         if (kc == 's') release(key);
                         push('b', found);
@@ -2449,7 +2449,7 @@ private:
                              << "  call void @rt_fail_key(ptr " << str(f.name == "$main" ? "<main>" : f.name) << ", ptr " << str(m_.fileName(in.srcFile)) << ", i32 " << in.srcLine << ", i32 " << static_cast<int>(kc) << ", i64 " << k64 << ")\n  unreachable\nmg" << id << ":\n";
                         if (kc == 's') release(key);
                         std::string slot = t();
-                        code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << idx << ")\n";
+                        code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << ix << ")\n";
                         std::string v = elemLoadAt(slot, ek, vk);
                         if (vk == 's') retain(v);
                         push(vk, v, *mt.elem);
@@ -2460,7 +2460,7 @@ private:
                     const bool refVal = vk == 'r';  // class, array, map and already-nullable values are pointers
                     code << "  br i1 " << found << ", label %mtf" << id << ", label %mtn" << id << "\nmtf" << id << ":\n";
                     std::string slot = t();
-                    code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << idx << ")\n";
+                    code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << ix << ")\n";
                     std::string v = elemLoadAt(slot, ek, vk), res = v;
                     if (!refVal) {
                         if (vk == 's') retain(v);
@@ -2485,9 +2485,9 @@ private:
                     std::string val = peekk(vk, 0), key = peekk(kc, 1), m = peekk('r', 2);
                     nullCheckMsg(in, m, "null map reference");
                     setLoc(in);
-                    std::string k64 = toI64(kc, key), idx = t(), slot = t();
-                    code << "  " << idx << " = call i64 @rt_map_put(ptr " << m << ", i64 " << k64 << ", ptr " << cstr("@.empty") << ")\n";
-                    code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << idx << ")\n";
+                    std::string k64 = toI64(kc, key), ix = t(), slot = t();
+                    code << "  " << ix << " = call i64 @rt_map_put(ptr " << m << ", i64 " << k64 << ", ptr " << cstr("@.empty") << ")\n";
+                    code << "  " << slot << " = call ptr @rt_map_slot(ptr " << m << ", i64 " << ix << ")\n";
                     elemStoreAt(slot, ek, vk, val, vk == 's');
                     if (vk == 'r') clearSlot(stack.size() - 1);
                     stack.pop_back(); tys.pop_back();
