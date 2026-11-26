@@ -42,7 +42,9 @@ using pvm::Type;
 
 // ---- C runtime linked into every native program ----
 
-const char* kRuntime = R"RT(#include <stdint.h>
+// MSVC allows at most ~16 KB per string literal piece (and 64 KB in total), so the runtime is kept in pieces and joined at run time.
+const char* const kRuntimeParts[] = {
+R"RT(#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -279,7 +281,8 @@ static void rt_collect(void) {
         RtObj** items = (RtObj**)o->data;
         const char* kinds = o->ek == 'o' ? rt_class_kinds[o->cap] : NULL;
         for (int64_t i = 0; i < o->len; ++i) {
-            if (kinds && kinds[i] != 'r') continue;
+)RT",
+R"RT(            if (kinds && kinds[i] != 'r') continue;
             RtObj* c = items[i];
             if (c && !c->mark) { c->mark = 1; if (n == cap) { cap *= 2; work = (RtObj**)realloc(work, cap * sizeof(RtObj*)); } work[n++] = c; }
         }
@@ -537,7 +540,8 @@ RtObj* rt_box_ref(int32_t tag, RtObj* p, const char* tname, int32_t tags) {
     ((int64_t*)o->data)[2] = tags;
     return o;
 }
-bool rt_istype_ref(RtObj* o, int32_t tag, const char* tname) { return o && o->ek == 'x' && o->cap == tag && strcmp(tname, rt_obj_type(o)) == 0; }
+)RT",
+R"RT(bool rt_istype_ref(RtObj* o, int32_t tag, const char* tname) { return o && o->ek == 'x' && o->cap == tag && strcmp(tname, rt_obj_type(o)) == 0; }
 RtObj* rt_unbox_ref(const char* fn, const char* file, int line, RtObj* o, int32_t tag, const char* tname) {
     if (!rt_istype_ref(o, tag, tname)) {
         char msg[500];
@@ -744,7 +748,8 @@ static const char* rt_arr_tname(int tag) {
 }
 RtObj* rt_dyn_invoke(const char* fn, const char* file, int line, const char* name, int32_t argc, RtObj* c, RtObj* a0) {
     char msg[500];
-    if (!c) { snprintf(msg, sizeof msg, "null reference: cannot call '%s' on null", name); rt_fail_at(fn, file, line, msg); }
+)RT",
+R"RT(    if (!c) { snprintf(msg, sizeof msg, "null reference: cannot call '%s' on null", name); rt_fail_at(fn, file, line, msg); }
     const int isA = rt_is_box(c, 'A'), isM = rt_is_box(c, 'M');
     RtObj* o = isA || isM ? (RtObj*)(intptr_t)((int64_t*)c->data)[0] : NULL;
     const int64_t tags = isA || isM ? ((int64_t*)c->data)[2] : 0;
@@ -951,7 +956,8 @@ const char* rt_h_encoding_fromBytes(const char* fn, const char* file, int line, 
     if (!a) rt_fail_at(fn, file, line, "null array reference");
     const unsigned char* in = (const unsigned char*)a->data;
     size_t n = (size_t)a->len, i = 0, len = 0;
-    char* out = (char*)malloc(n * 3 + 1);
+)RT",
+R"RT(    char* out = (char*)malloc(n * 3 + 1);
     while (i < n) {
         const unsigned char b = in[i];
         size_t need = b < 0x80 ? 0 : (b >= 0xC2 && b < 0xE0) ? 1 : (b >= 0xE0 && b < 0xF0) ? 2 : (b >= 0xF0 && b < 0xF5) ? 3 : 99;
@@ -1205,7 +1211,8 @@ void rt_h_file_copy(const char* fn, const char* file, int line, const char* src,
 }
 void rt_h_file_move(const char* fn, const char* file, int line, const char* src, const char* dst) {
     rt_pchk(fn, file, line, "file.move", src);
-    rt_pchk(fn, file, line, "file.move", dst);
+)RT",
+R"RT(    rt_pchk(fn, file, line, "file.move", dst);
 #ifdef _WIN32
     if (rt_is_file(dst)) remove(dst);
 #endif
@@ -1481,7 +1488,8 @@ RtObj* rt_ocopy(const char* fn, const char* file, int line, RtObj* src, const ch
         RtObj* dst = rt_map_new(rt_mkk(src), rt_mvk(src));
         rt_tmp_root = dst;
         RtMap* sm = (RtMap*)src->data;
-        const int kk = rt_mkk(src), vk = rt_mvk(src);
+)RT",
+R"RT(        const int kk = rt_mkk(src), vk = rt_mvk(src);
         for (int64_t i = 0; i < sm->n; ++i) {
             if (!sm->alive[i]) continue;
             if (kk == 's') rt_retain((const char*)sm->keys[i]);
@@ -1590,7 +1598,14 @@ RtObj* rt_arr_copy(RtObj* src) {
     return o;
 }
 int main_flush(void) { return fflush(stdout); }
-)RT";
+)RT"
+};
+
+std::string runtimeSource() {
+    std::string s;
+    for (const char* part : kRuntimeParts) s += part;
+    return s;
+}
 
 struct Unsupported {
     std::string message;
@@ -3234,7 +3249,7 @@ int main(int argc, char** argv) {
     if (ec || !made) { std::cerr << "coyote-llvm: error: cannot create a temporary directory\n"; return 2; }
     {
         std::ofstream(dir / "program.ll", std::ios::binary) << ir;
-        std::ofstream(dir / "runtime.c", std::ios::binary) << kRuntime;
+        std::ofstream(dir / "runtime.c", std::ios::binary) << runtimeSource();
     }
     auto quote = [](const std::string& s) { return "\"" + s + "\""; };
     if (clang == "clang") clang = findClang();
